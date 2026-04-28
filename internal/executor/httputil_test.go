@@ -23,7 +23,7 @@ func TestHostFromURL(t *testing.T) {
 			rawURL: "http://example.com/api/v1?key=value",
 			want:   "example.com",
 		},
-		{
+		{ //nolint:gosec // G101: test fixture, intentional userinfo
 			name:   "URL with userinfo",
 			rawURL: "https://user:pass@host.example.com/path",
 			want:   "host.example.com",

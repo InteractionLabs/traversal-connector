@@ -1,7 +1,6 @@
 package env
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -22,11 +21,7 @@ func TestGetEnvString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvString(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
@@ -51,11 +46,7 @@ func TestGetEnvInt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvInt(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
@@ -80,11 +71,7 @@ func TestGetEnvInt64(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvInt64(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
@@ -109,11 +96,7 @@ func TestGetEnvDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvDuration(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
@@ -144,11 +127,7 @@ func TestGetEnvBool(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvBool(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
@@ -171,11 +150,7 @@ func TestGetEnvOptionalString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.key)
-			if tt.value != "" {
-				os.Setenv(tt.key, tt.value)
-			}
-			defer os.Unsetenv(tt.key)
+			t.Setenv(tt.key, tt.value)
 
 			got := GetEnvOptionalString(tt.key)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {

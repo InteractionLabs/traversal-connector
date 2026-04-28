@@ -16,6 +16,16 @@ tunnels against upstream services on the local network.
 The wire protocol is defined in
 [`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
 
+## Setup
+
+Run after cloning:
+
+```bash
+./setup.sh
+```
+
+Installs `just` and the Go-based CLI tools the recipes depend on.
+
 ## Running locally
 
 `ENV_NAME` and `TRAVERSAL_CONTROLLER_URL` are required; everything else has
