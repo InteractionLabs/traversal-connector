@@ -110,6 +110,10 @@ type Config struct {
 	// may be provided as raw PEM or base64-encoded PEM.
 	// When set with UpstreamTLSVerify=true, only certificates signed by this CA are accepted.
 	UpstreamTLSCA *string
+	// RedactionRulesFile is the optional path to a TOML file containing redaction
+	// rules applied to all upstream response bodies before they leave the customer
+	// network. Read from REDACTION_RULES_FILE. When unset, no redaction is applied.
+	RedactionRulesFile *string
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -181,6 +185,7 @@ func Load() (Config, error) {
 		UpstreamTLSCA: decodeCertificate(
 			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
 		),
+		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
 	}
 
 	if err := validateControllerConnection(cfg); err != nil {
