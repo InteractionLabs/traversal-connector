@@ -17,6 +17,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/executor"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
 const (
@@ -60,13 +61,13 @@ type ConnectionManager struct {
 }
 
 // NewConnectionManager creates a new ConnectionManager with the given configuration.
-func NewConnectionManager(cfg *config.Config) (*ConnectionManager, error) {
+func NewConnectionManager(cfg *config.Config, r *redact.Redactor) (*ConnectionManager, error) {
 	metrics, err := initConnectionMetrics()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize connection metrics: %w", err)
 	}
 
-	exec, err := executor.NewExecutor(cfg)
+	exec, err := executor.NewExecutor(cfg, r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize executor: %w", err)
 	}

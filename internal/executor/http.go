@@ -20,6 +20,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
@@ -38,10 +39,11 @@ type Executor struct {
 	maxRequestBodySizeBytes int64
 	tracer                  trace.Tracer
 	metrics                 *executorMetrics
+	redactor                *redact.Redactor
 }
 
 // NewExecutor creates a new HTTP executor with the given configuration.
-func NewExecutor(cfg *config.Config) (*Executor, error) {
+func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 	metrics, err := initExecutorMetrics()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize executor metrics: %w", err)
@@ -76,6 +78,7 @@ func NewExecutor(cfg *config.Config) (*Executor, error) {
 		maxRequestBodySizeBytes: cfg.MaxRequestBodySizeMB * bytesPerKB * kbPerMB,
 		tracer:                  otel.Tracer(InstrumentationName),
 		metrics:                 metrics,
+		redactor:                r,
 	}, nil
 }
 
@@ -191,6 +194,9 @@ func (e *Executor) Execute(
 			"duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
+
+	// Apply redaction rules to the response body before it leaves the customer network.
+	respBody = e.redactor.Apply(respBody)
 
 	// Convert response headers to protobuf, filtering hop-by-hop.
 	respHeaders := connector.HTTPToProtoHeaders(resp.Header)
