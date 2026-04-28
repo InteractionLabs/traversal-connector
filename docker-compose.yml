@@ -1,0 +1,22 @@
+services:
+  traversal-connector:
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: traversal-connector
+    volumes:
+      - .:/app
+      - go-mod-cache:/go/pkg/mod
+    ports:
+      - "8081:8080"
+    environment:
+      - TRAVERSAL_CONTROLLER_URL
+      - ENV_NAME=${ENV_NAME:-dev}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: air -c .air.toml
+
+volumes:
+  go-mod-cache:

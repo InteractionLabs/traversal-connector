@@ -1,0 +1,18 @@
+# For details on buf.yaml configuration, visit https://buf.build/docs/configuration/v2/buf-yaml
+version: v2
+modules:
+  - path: proto
+deps:
+  - buf.build/bufbuild/protovalidate
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+breaking:
+  use:
+    - FILE
+  except:
+    # go_package is a Go-specific import path, not a wire-level concern.
+    # Changing it (e.g. when relocating the proto in the source tree) does
+    # not break other-language consumers and shouldn't fail the check.
+    - FILE_SAME_GO_PACKAGE

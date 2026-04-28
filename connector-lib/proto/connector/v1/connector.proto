@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package connector.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connector";
+
+// HTTP header key-value pair
+message Header {
+  // Header key
+  string key = 1;
+  // Header value
+  string value = 2;
+}
+
+// HTTP request message
+message HttpRequest {
+  // HTTP method (e.g., "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
+  string method = 1 [(buf.validate.field).string = {
+    in: [
+      "GET",
+      "POST",
+      "PUT",
+      "DELETE",
+      "PATCH",
+      "HEAD",
+      "OPTIONS"
+    ]
+  }];
+  // URL (must be a valid absolute URI)
+  string url = 2 [(buf.validate.field).string.uri = true];
+  // Headers
+  repeated Header headers = 3;
+  // Request body content
+  bytes body = 4;
+}
+
+// HTTP response message
+message HttpResponse {
+  // HTTP status code
+  int32 http_status = 1;
+  // Response headers
+  repeated Header headers = 2;
+  // Response body content
+  bytes body = 3;
+}
+
+// Health check request
+message HealthCheckRequest {
+  // Timestamp in milliseconds since Unix epoch
+  int64 unix_millis = 1;
+}
+
+// Health check response
+message HealthCheckResponse {
+  // Timestamp in milliseconds since Unix epoch
+  int64 unix_millis = 1;
+  // Health status (e.g., "healthy", "degraded")
+  string status = 2;
+}
+
+// Error response
+message ErrorResponse {
+  // Human-readable error message
+  string message = 1;
+  // Machine-readable error code
+  string code = 2;
+}
+
+// Metadata request — sent by the controller to collect traversal connector identity.
+message MetadataRequest {}
+
+// Metadata response — sent by the traversal connector with its identity information.
+message MetadataResponse {
+  // The UUID assigned to this tunnel connection.
+  string connection_uuid = 1;
+  // The hostname of the traversal connector.
+  string hostname = 2;
+  // Maximum concurrent requests the connector can handle per tunnel.
+  int32 max_concurrent_requests = 3;
+}
+
+// Connection management request
+message ConnectionRequest {
+  // Actions for connection management
+  enum Action {
+    // No action specified
+    ACTION_UNSPECIFIED = 0;
+    // Start graceful connection close and rebalancing
+    ACTION_START_CLOSE = 1;
+  }
+  // The connection management action to perform
+  Action action = 1;
+}
+
+// Controller to Connector messages
+message ControllerMessage {
+  // Unique request identifier for correlation
+  string request_id = 1;
+  // The specific message type being sent
+  oneof message {
+    // Health check request
+    HealthCheckRequest health_check_request = 2;
+    // HTTP request to execute
+    HttpRequest http_request = 3;
+    // Connection management request
+    ConnectionRequest connection_request = 4;
+    // Metadata request
+    MetadataRequest metadata_request = 5;
+  }
+}
+
+// Connector to Controller messages
+message ConnectorMessage {
+  // Unique request identifier for correlation
+  string request_id = 1;
+  // The specific message type being sent
+  oneof message {
+    // Health check response
+    HealthCheckResponse health_check_response = 2;
+    // HTTP response from upstream
+    HttpResponse http_response = 3;
+    // Error response when request failed
+    ErrorResponse error_response = 4;
+    // Connection management request from connector
+    ConnectionRequest connection_request = 5;
+    // Metadata response
+    MetadataResponse metadata_response = 6;
+  }
+}
+
+// Connector service definition
+service ConnectorService {
+  // Bidirectional streaming RPC for tunnel communication between connector and controller
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc Tunnel(stream ConnectorMessage) returns (stream ControllerMessage);
+}
