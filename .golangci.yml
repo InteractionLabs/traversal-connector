@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - misspell
+    - gosec
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+    gosec:
+      excludes:
+        - G706 # log injection: false positive for slog with structured attrs
+  exclusions:
+    rules:
+      - linters: [errcheck]
+        path: _test\.go
