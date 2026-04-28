@@ -1,0 +1,52 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Build output
+/bin/
+/build/
+/dist/
+tmp
+
+# Coverage & profiling
+*.out
+*.coverprofile
+*.prof
+coverage.*
+
+# Air hot-reload
+build-errors.log
+
+# Vendored deps (if `go mod vendor` is ever run)
+vendor/
+
+# Logs / pids
+*.log
+logs/
+*.pid
+
+# Editor / IDE
+.idea/
+.vscode/
+__debug_bin
+*.swp
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# VCS
+.sl
+
+# Claude Code
+.claude/
+
+# Local env
+.env
+.env.local
+*.env.local
