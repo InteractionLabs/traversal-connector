@@ -22,4 +22,5 @@ const (
 	MetricConcurrentRequests               = "connector.concurrent_requests"
 	MetricResponseSendWaitLatency          = "connector.response_send_wait_latency"
 	MetricRequestBodySizeLimitHitConnector = "connector.request_body_size_limit_hit_total"
+	MetricRedactionLatencyPerByte          = "connector.redaction_latency_per_byte"
 )

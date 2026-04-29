@@ -1,15 +1,17 @@
 package redact
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
+
 func TestRedactor_NoRules(t *testing.T) {
 	r := NewRedactor()
 	src := []byte("hello user@example.com world")
-	got := r.Apply(src)
+	got := r.Apply(context.Background(), src)
 	if &got[0] != &src[0] {
 		t.Error("Apply with no rules should return the original slice unchanged")
 	}
@@ -31,7 +33,7 @@ func TestRedactor_EmailRedaction(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got := string(r.Apply([]byte("contact user@example.com for help")))
+	got := string(r.Apply(context.Background(), []byte("contact user@example.com for help")))
 	want := "contact [REDACTED_EMAIL] for help"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -54,7 +56,7 @@ func TestRedactor_SSNWithBackreference(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got := string(r.Apply([]byte("SSN: 123-45-6789")))
+	got := string(r.Apply(context.Background(), []byte("SSN: 123-45-6789")))
 	want := "SSN: ***-**-6789"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -83,7 +85,7 @@ func TestRedactor_MultipleRules(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got := string(r.Apply([]byte("user@example.com has SSN 123-45-6789")))
+	got := string(r.Apply(context.Background(), []byte("user@example.com has SSN 123-45-6789")))
 	want := "[REDACTED_EMAIL] has SSN ***-**-6789"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -108,7 +110,7 @@ func TestRedactor_UnknownTypeSkipped(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 	src := []byte("some.secret text")
-	got := r.Apply(src)
+	got := r.Apply(context.Background(), src)
 	if string(got) != string(src) {
 		t.Errorf("unknown rule type should be skipped, got %q", got)
 	}
@@ -119,7 +121,7 @@ func TestRedactor_AtomicUpdate(t *testing.T) {
 
 	// No rules yet — Apply is a no-op.
 	original := []byte("user@example.com")
-	if got := string(r.Apply(original)); got != "user@example.com" {
+	if got := string(r.Apply(context.Background(), original)); got != "user@example.com" {
 		t.Errorf("before update: got %q", got)
 	}
 
@@ -134,7 +136,7 @@ func TestRedactor_AtomicUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update() error: %v", err)
 	}
-	if got := string(r.Apply([]byte("user@example.com"))); got != "[REDACTED_EMAIL]" {
+	if got := string(r.Apply(context.Background(), []byte("user@example.com"))); got != "[REDACTED_EMAIL]" {
 		t.Errorf("after update: got %q", got)
 	}
 }
@@ -159,7 +161,7 @@ replacement = "[REDACTED_EMAIL]"
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}
 
-	got := string(r.Apply([]byte("reach me at foo@bar.com")))
+	got := string(r.Apply(context.Background(), []byte("reach me at foo@bar.com")))
 	want := "reach me at [REDACTED_EMAIL]"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -224,7 +226,7 @@ func TestFileLoader_ReloadsOnChange(t *testing.T) {
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}
 
-	if got := string(r.Apply([]byte("foo@bar.com"))); got != "foo@bar.com" {
+	if got := string(r.Apply(context.Background(), []byte("foo@bar.com"))); got != "foo@bar.com" {
 		t.Errorf("before update: expected unchanged, got %q", got)
 	}
 
@@ -241,7 +243,7 @@ replacement = "[REDACTED_EMAIL]"
 	}
 	l.tryLoad()
 
-	if got := string(r.Apply([]byte("foo@bar.com"))); got != "[REDACTED_EMAIL]" {
+	if got := string(r.Apply(context.Background(), []byte("foo@bar.com"))); got != "[REDACTED_EMAIL]" {
 		t.Errorf("after reload: got %q", got)
 	}
 }
@@ -273,7 +275,7 @@ replacement = "[REDACTED_EMAIL]"
 	l.tryLoad()
 
 	// Rules should still be active.
-	got := string(r.Apply([]byte("foo@bar.com")))
+	got := string(r.Apply(context.Background(), []byte("foo@bar.com")))
 	want := "[REDACTED_EMAIL]"
 	if got != want {
 		t.Errorf("after delete: got %q, want %q (rules should be preserved)", got, want)
@@ -307,7 +309,7 @@ replacement = "[REDACTED_EMAIL]"
 	l.tryLoad()
 
 	// Rules should still be active.
-	got := string(r.Apply([]byte("foo@bar.com")))
+	got := string(r.Apply(context.Background(), []byte("foo@bar.com")))
 	want := "[REDACTED_EMAIL]"
 	if got != want {
 		t.Errorf("after corruption: got %q, want %q (rules should be preserved)", got, want)

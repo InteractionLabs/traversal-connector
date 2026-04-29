@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const reloadInterval = 10 * time.Second
@@ -45,12 +47,17 @@ type compiledRule struct {
 // Redactor holds a set of compiled redaction rules and applies them atomically.
 // The zero value is not usable; use NewRedactor.
 type Redactor struct {
-	rules atomic.Pointer[[]compiledRule]
+	rules   atomic.Pointer[[]compiledRule]
+	metrics *redactorMetrics
 }
 
 // NewRedactor returns a Redactor with an empty rule set.
 func NewRedactor() *Redactor {
-	r := &Redactor{}
+	metrics, err := initRedactorMetrics()
+	if err != nil {
+		slog.Warn("failed to initialize redactor metrics, continuing without metrics", "error", err)
+	}
+	r := &Redactor{metrics: metrics}
 	empty := make([]compiledRule, 0)
 	r.rules.Store(&empty)
 	return r
@@ -82,14 +89,21 @@ func (r *Redactor) Update(f *RulesFile) error {
 
 // Apply runs all current redaction rules over src and returns the result.
 // If there are no rules the original slice is returned unchanged.
-func (r *Redactor) Apply(src []byte) []byte {
+func (r *Redactor) Apply(ctx context.Context, src []byte) []byte {
 	rules := *r.rules.Load()
 	if len(rules) == 0 {
 		return src
 	}
 	result := src
 	for i := range rules {
+		inputLen := len(result)
+		start := time.Now()
 		result = rules[i].re.ReplaceAll(result, rules[i].replacement)
+		if r.metrics != nil && inputLen > 0 {
+			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+			r.metrics.latencyPerByte.Record(ctx, latencyMs/float64(inputLen),
+				metric.WithAttributes(attribute.String(attrRuleName, rules[i].name)))
+		}
 	}
 	return result
 }
@@ -97,9 +111,10 @@ func (r *Redactor) Apply(src []byte) []byte {
 // FileLoader reloads a TOML redaction rules file every 10 seconds and updates
 // the provided Redactor whenever the file changes.
 type FileLoader struct {
-	path     string
-	redactor *Redactor
-	lastHash [sha256.Size]byte
+	path                string
+	redactor            *Redactor
+	lastHash            [sha256.Size]byte
+	consecutiveFailures int
 }
 
 // NewFileLoader returns a FileLoader that will watch path and push updates to r.
@@ -132,8 +147,7 @@ func (l *FileLoader) LoadInitial() error {
 
 // Run reloads the rules file every 10 seconds until ctx is cancelled.
 // Call LoadInitial before Run to ensure rules are applied from the start.
-// After a successful initial load, subsequent errors (missing or corrupted file)
-// are logged and the last valid rule set is kept.
+// Each reload error is logged; after 3 consecutive failures the process exits.
 func (l *FileLoader) Run(ctx context.Context) {
 	ticker := time.NewTicker(reloadInterval)
 	defer ticker.Stop()
@@ -148,32 +162,45 @@ func (l *FileLoader) Run(ctx context.Context) {
 	}
 }
 
+const maxConsecutiveFailures = 3
+
 func (l *FileLoader) tryLoad() {
 	data, err := os.ReadFile(l.path)
 	if err != nil {
-		slog.Error("could not read redaction rules file, keeping current rules",
-			"path", l.path, "error", err)
+		l.recordFailure("could not read redaction rules file", err)
 		return
 	}
 
 	hash := sha256.Sum256(data)
 	if hash == l.lastHash {
+		l.consecutiveFailures = 0
 		return
 	}
 
 	var f RulesFile
 	if err = toml.Unmarshal(data, &f); err != nil {
-		slog.Error("failed to parse redaction rules file, keeping current rules",
-			"path", l.path, "error", err)
+		l.recordFailure("failed to parse redaction rules file", err)
 		return
 	}
 
 	if err = l.redactor.Update(&f); err != nil {
-		slog.Error("failed to compile redaction rules, keeping current rules",
-			"path", l.path, "error", err)
+		l.recordFailure("failed to compile redaction rules", err)
 		return
 	}
 
+	l.consecutiveFailures = 0
 	l.lastHash = hash
 	slog.Info("redaction rules reloaded", "path", l.path, "rules", len(f.Rules))
+}
+
+func (l *FileLoader) recordFailure(msg string, err error) {
+	l.consecutiveFailures++
+	slog.Error(msg, "path", l.path, "error", err, "consecutive_failures", l.consecutiveFailures)
+	// Maybe they are swapping out the file and it doesn't exist at this instant, or there is a transient IO error.
+	// Log and retry on the next tick. If we fail 3 times in a row, something is really wrong and we should exit to avoid
+	// running with stale rules indefinitely.
+	if l.consecutiveFailures >= maxConsecutiveFailures {
+		slog.Error("too many consecutive redaction rule failures, exiting", "path", l.path)
+		os.Exit(1)
+	}
 }

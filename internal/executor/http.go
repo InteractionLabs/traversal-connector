@@ -196,7 +196,7 @@ func (e *Executor) Execute(
 	}
 
 	// Apply redaction rules to the response body before it leaves the customer network.
-	respBody = e.redactor.Apply(respBody)
+	respBody = e.redactor.Apply(ctx, respBody)
 
 	// Convert response headers to protobuf, filtering hop-by-hop.
 	respHeaders := connector.HTTPToProtoHeaders(resp.Header)

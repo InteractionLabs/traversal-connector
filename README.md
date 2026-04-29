@@ -146,7 +146,7 @@ they leave the customer network.
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDACTION_RULES_FILE` | (none) | Path to a TOML file containing redaction rules. When unset, no redaction is applied. The file is reloaded automatically every 10 seconds; the last valid rule set is kept if a reload fails. |
+| `REDACTION_RULES_FILE` | (none) | Path to a TOML file containing redaction rules. When unset, no redaction is applied. The file is periodically reloaded. |
 
 The rules file uses the following format:
 
