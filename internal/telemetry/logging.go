@@ -113,7 +113,7 @@ func newGRPCLogExporter(
 		otlploggrpc.WithEndpoint(ep.Host),
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlploggrpc.WithTLSCredentials(
 				credentials.NewTLS(tlsConfig),
@@ -141,7 +141,7 @@ func newHTTPLogExporter(
 		opts = append(opts, otlploghttp.WithURLPath(ep.Path))
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlploghttp.WithTLSClientConfig(tlsConfig),
 		)

@@ -108,7 +108,7 @@ func newGRPCTraceExporter(
 		otlptracegrpc.WithEndpoint(ep.Host),
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlptracegrpc.WithTLSCredentials(
 				credentials.NewTLS(tlsConfig),
@@ -138,7 +138,7 @@ func newHTTPTraceExporter(
 		)
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlptracehttp.WithTLSClientConfig(tlsConfig),
 		)

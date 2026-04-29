@@ -106,7 +106,7 @@ func newGRPCMetricsExporter(
 		otlpmetricgrpc.WithEndpoint(ep.Host),
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlpmetricgrpc.WithTLSCredentials(
 				credentials.NewTLS(tlsConfig),
@@ -136,7 +136,7 @@ func newHTTPMetricsExporter(
 		)
 	}
 	switch {
-	case tlsConfig != nil:
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
 			otlpmetrichttp.WithTLSClientConfig(tlsConfig),
 		)
