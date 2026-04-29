@@ -136,7 +136,11 @@ func main() {
 
 	redactor := redact.NewRedactor()
 	if cfg.RedactionRulesFile != nil {
-		loader := redact.NewFileLoader(*cfg.RedactionRulesFile, redactor, cfg.RedactionReloadInterval)
+		loader := redact.NewFileLoader(
+			*cfg.RedactionRulesFile,
+			redactor,
+			cfg.RedactionReloadInterval,
+		)
 		if err = loader.LoadInitial(); err != nil {
 			slog.Error("failed to load redaction rules", "err", err)
 			return

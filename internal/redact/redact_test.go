@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-
 func TestRedactor_NoRules(t *testing.T) {
 	r := NewRedactor()
 	src := []byte("hello user@example.com world")
