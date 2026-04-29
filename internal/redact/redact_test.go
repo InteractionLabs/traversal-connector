@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 
@@ -156,7 +157,7 @@ replacement = "[REDACTED_EMAIL]"
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err != nil {
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}
@@ -170,7 +171,7 @@ replacement = "[REDACTED_EMAIL]"
 
 func TestFileLoader_LoadInitial_MissingFile(t *testing.T) {
 	r := NewRedactor()
-	l := NewFileLoader("/nonexistent/rules.toml", r)
+	l := NewFileLoader("/nonexistent/rules.toml", r, 10*time.Second)
 	if err := l.LoadInitial(); err == nil {
 		t.Fatal("LoadInitial() expected error for missing file, got nil")
 	}
@@ -184,7 +185,7 @@ func TestFileLoader_LoadInitial_CorruptedFile(t *testing.T) {
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err == nil {
 		t.Fatal("LoadInitial() expected error for corrupted file, got nil")
 	}
@@ -205,7 +206,7 @@ replacement = "x"
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err == nil {
 		t.Fatal("LoadInitial() expected error for invalid regex, got nil")
 	}
@@ -221,7 +222,7 @@ func TestFileLoader_ReloadsOnChange(t *testing.T) {
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err != nil {
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}
@@ -263,7 +264,7 @@ replacement = "[REDACTED_EMAIL]"
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err != nil {
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}
@@ -297,7 +298,7 @@ replacement = "[REDACTED_EMAIL]"
 	}
 
 	r := NewRedactor()
-	l := NewFileLoader(path, r)
+	l := NewFileLoader(path, r, 10*time.Second)
 	if err := l.LoadInitial(); err != nil {
 		t.Fatalf("LoadInitial() unexpected error: %v", err)
 	}

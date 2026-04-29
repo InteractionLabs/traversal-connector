@@ -15,8 +15,6 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-const reloadInterval = 10 * time.Second
-
 // ruleType enumerates the supported redaction rule kinds.
 type ruleType string
 
@@ -108,18 +106,20 @@ func (r *Redactor) Apply(ctx context.Context, src []byte) []byte {
 	return result
 }
 
-// FileLoader reloads a TOML redaction rules file every 10 seconds and updates
-// the provided Redactor whenever the file changes.
+// FileLoader watches a TOML redaction rules file at a configurable interval and
+// updates the provided Redactor whenever the file changes.
 type FileLoader struct {
 	path                string
 	redactor            *Redactor
+	reloadInterval      time.Duration
 	lastHash            [sha256.Size]byte
 	consecutiveFailures int
 }
 
-// NewFileLoader returns a FileLoader that will watch path and push updates to r.
-func NewFileLoader(path string, r *Redactor) *FileLoader {
-	return &FileLoader{path: path, redactor: r}
+// NewFileLoader returns a FileLoader that will watch path and push updates to r
+// every interval.
+func NewFileLoader(path string, r *Redactor, interval time.Duration) *FileLoader {
+	return &FileLoader{path: path, redactor: r, reloadInterval: interval}
 }
 
 // LoadInitial performs the first load of the rules file. Returns an error if
@@ -145,11 +145,11 @@ func (l *FileLoader) LoadInitial() error {
 	return nil
 }
 
-// Run reloads the rules file every 10 seconds until ctx is cancelled.
+// Run reloads the rules file on the configured interval until ctx is cancelled.
 // Call LoadInitial before Run to ensure rules are applied from the start.
 // Each reload error is logged; after 3 consecutive failures the process exits.
 func (l *FileLoader) Run(ctx context.Context) {
-	ticker := time.NewTicker(reloadInterval)
+	ticker := time.NewTicker(l.reloadInterval)
 	defer ticker.Stop()
 
 	for {

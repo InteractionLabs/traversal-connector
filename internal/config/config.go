@@ -25,9 +25,10 @@ const (
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// Default timeout and interval durations.
-	defaultReconnectInterval = 5 * time.Second
-	defaultMaxBackoffDelay   = 60 * time.Second
-	defaultRequestTimeout    = 60 * time.Second
+	defaultReconnectInterval        = 5 * time.Second
+	defaultMaxBackoffDelay          = 60 * time.Second
+	defaultRequestTimeout           = 60 * time.Second
+	defaultRedactionReloadInterval  = 10 * time.Second
 )
 
 // Config holds all configuration for the Traversal Connector service.
@@ -114,6 +115,9 @@ type Config struct {
 	// rules applied to all upstream response bodies before they leave the customer
 	// network. Read from REDACTION_RULES_FILE. When unset, no redaction is applied.
 	RedactionRulesFile *string
+	// RedactionReloadInterval is how often the redaction rules file is checked for
+	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
+	RedactionReloadInterval time.Duration
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -185,7 +189,8 @@ func Load() (Config, error) {
 		UpstreamTLSCA: decodeCertificate(
 			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
 		),
-		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionRulesFile:      env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionReloadInterval: env.GetEnvDuration("REDACTION_RELOAD_INTERVAL", defaultRedactionReloadInterval),
 	}
 
 	if err := validateControllerConnection(cfg); err != nil {
