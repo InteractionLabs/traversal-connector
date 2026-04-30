@@ -12,6 +12,7 @@ import (
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
 func newTestExecutor(t *testing.T, timeout time.Duration, maxBodyMB int64) *Executor {
@@ -20,7 +21,7 @@ func newTestExecutor(t *testing.T, timeout time.Duration, maxBodyMB int64) *Exec
 		RequestTimeout:       timeout,
 		MaxRequestBodySizeMB: maxBodyMB,
 	}
-	exec, err := NewExecutor(cfg)
+	exec, err := NewExecutor(cfg, redact.NewRedactor())
 	if err != nil {
 		t.Fatalf("NewExecutor() failed: %v", err)
 	}

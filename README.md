@@ -139,6 +139,41 @@ UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 ```
 
+### Redaction
+
+The connector can redact sensitive values from upstream response bodies before
+they leave the customer network.
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDACTION_RULES_FILE` | (none) | Path to a TOML file containing redaction rules. When unset, no redaction is applied. The file is periodically reloaded. |
+
+The rules file uses the following format:
+
+```toml
+version = "1"
+
+[[rules]]
+name   = "ssn"
+type   = "regex"
+pattern     = '\b\d{3}-\d{2}-(\d{4})\b'
+replacement = "***-**-$1"
+
+[[rules]]
+name   = "api-key"
+type   = "regex"
+pattern     = '(?i)(api[_-]?key\s*[:=]\s*)\S+'
+replacement = '$1[REDACTED]'
+```
+
+Each rule requires:
+- `name` — human-readable label used in log output.
+- `type` — only `"regex"` is supported.
+- `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
+- `replacement` — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern.
+
+Rules are applied in order; each rule operates on the output of the previous one.
+
 ### Telemetry (OpenTelemetry)
 
 The connector emits OpenTelemetry traces, metrics, and logs. Endpoints are

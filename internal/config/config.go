@@ -25,9 +25,10 @@ const (
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// Default timeout and interval durations.
-	defaultReconnectInterval = 5 * time.Second
-	defaultMaxBackoffDelay   = 60 * time.Second
-	defaultRequestTimeout    = 60 * time.Second
+	defaultReconnectInterval       = 5 * time.Second
+	defaultMaxBackoffDelay         = 60 * time.Second
+	defaultRequestTimeout          = 60 * time.Second
+	defaultRedactionReloadInterval = 10 * time.Second
 )
 
 // Config holds all configuration for the Traversal Connector service.
@@ -110,6 +111,13 @@ type Config struct {
 	// may be provided as raw PEM or base64-encoded PEM.
 	// When set with UpstreamTLSVerify=true, only certificates signed by this CA are accepted.
 	UpstreamTLSCA *string
+	// RedactionRulesFile is the optional path to a TOML file containing redaction
+	// rules applied to all upstream response bodies before they leave the customer
+	// network. Read from REDACTION_RULES_FILE. When unset, no redaction is applied.
+	RedactionRulesFile *string
+	// RedactionReloadInterval is how often the redaction rules file is checked for
+	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
+	RedactionReloadInterval time.Duration
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -180,6 +188,11 @@ func Load() (Config, error) {
 		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
 		UpstreamTLSCA: decodeCertificate(
 			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
+		),
+		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionReloadInterval: env.GetEnvDuration(
+			"REDACTION_RELOAD_INTERVAL",
+			defaultRedactionReloadInterval,
 		),
 	}
 
