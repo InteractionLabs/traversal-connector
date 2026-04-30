@@ -30,7 +30,7 @@ Installs `just` and the Go-based CLI tools the recipes depend on.
 
 `ENV_NAME` and `TRAVERSAL_CONTROLLER_URL` are required; everything else has
 sensible defaults (see Configuration below). `TRAVERSAL_CONTROLLER_URL` has no
-default — startup fails if it's unset.
+default. Startup fails if it's unset.
 
 **Docker Compose (containerized, hot-reload via `air`):**
 
@@ -43,6 +43,10 @@ TRAVERSAL_CONTROLLER_URL=http://host.docker.internal:9080 docker compose up --bu
 ```bash
 ENV_NAME=dev TRAVERSAL_CONTROLLER_URL=http://localhost:9080 go run ./cmd/connector
 ```
+
+`http://` is rejected when `ENV_LEVEL=production`. In development any
+`http://` host is accepted. Production deployments must use `https://` and
+configure mTLS, see Configuration below.
 
 ## Building & testing
 
@@ -78,14 +82,14 @@ checked in.
 |---|---|---|
 | `ENV_NAME` | **required** | Free-form environment name attached to telemetry as `service.namespace` and `deployment.environment` (e.g. `staging`, `production`). Startup fails if unset. |
 | `ENV_LEVEL` | `development` | Deployment level (`production` or `development`). The container image bakes in `production`; leave unset for local dev. |
-| `HTTP_PORT` | `8080` | Port for the local HTTP server (`/health`, `/readyz`). |
+| `HTTP_PORT` | `8080` | Port for the local HTTP server (`/healthz`, `/readyz`). |
 | `ENV_FILE` | (none) | Optional path to a dotenv file (e.g. `/mnt/secrets/connector.env`). Useful when secrets are mounted as a file (e.g. Vault Agent). Process-environment values win over file values; the file only fills in values that are unset. Startup fails if the path is set but unreadable. |
 
 ### Control plane connection
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. Startup fails if unset. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
 | `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
 | `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
@@ -96,15 +100,21 @@ checked in.
 
 ### mTLS to the control plane
 
+mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
+The connector refuses to start if `TLS_CERT_BASE64` and `TLS_KEY_BASE64` are
+not both provided, or if either fails to parse as valid PEM. mTLS is the only
+supported posture for production traffic; there is no "TLS without mTLS"
+mode.
+
 All certificate variables accept either raw PEM (starting with
 `-----BEGIN`) or base64-encoded PEM.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TLS_CERT_BASE64` | (none) | Client TLS certificate for mTLS. |
-| `TLS_KEY_BASE64` | (none) | Client TLS private key for mTLS. |
-| `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. |
-| `TLS_SERVER_NAME` | (none) | Expected server name for TLS verification. |
+| `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
+| `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
+| `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. When set, replaces the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
+| `TLS_SERVER_NAME` | (none) | Expected server name for TLS verification. Set explicitly only if it differs from the URL host. |
 
 ### Upstream TLS (HTTPS to internal services)
 
@@ -129,6 +139,41 @@ UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 ```
 
+### Redaction
+
+The connector can redact sensitive values from upstream response bodies before
+they leave the customer network.
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDACTION_RULES_FILE` | (none) | Path to a TOML file containing redaction rules. When unset, no redaction is applied. The file is periodically reloaded. |
+
+The rules file uses the following format:
+
+```toml
+version = "1"
+
+[[rules]]
+name   = "ssn"
+type   = "regex"
+pattern     = '\b\d{3}-\d{2}-(\d{4})\b'
+replacement = "***-**-$1"
+
+[[rules]]
+name   = "api-key"
+type   = "regex"
+pattern     = '(?i)(api[_-]?key\s*[:=]\s*)\S+'
+replacement = '$1[REDACTED]'
+```
+
+Each rule requires:
+- `name` — human-readable label used in log output.
+- `type` — only `"regex"` is supported.
+- `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
+- `replacement` — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern.
+
+Rules are applied in order; each rule operates on the output of the previous one.
+
 ### Telemetry (OpenTelemetry)
 
 The connector emits OpenTelemetry traces, metrics, and logs. Endpoints are
@@ -151,7 +196,7 @@ compliance IDs, team names, or any other site-specific metadata.
 
 | Port | Description |
 |---|---|
-| `8080` (container) | HTTP `/health` and `/readyz` endpoints. The compose file maps host `8081` → container `8080`. |
+| `8080` (container) | HTTP `/healthz` and `/readyz` endpoints. The compose file maps host `8081` → container `8080`. |
 
 ## License
 

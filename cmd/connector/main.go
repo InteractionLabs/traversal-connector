@@ -14,6 +14,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -148,7 +149,21 @@ func main() {
 	)
 	defer cancel()
 
-	cm, err := client.NewConnectionManager(&cfg)
+	redactor := redact.NewRedactor()
+	if cfg.RedactionRulesFile != nil {
+		loader := redact.NewFileLoader(
+			*cfg.RedactionRulesFile,
+			redactor,
+			cfg.RedactionReloadInterval,
+		)
+		if err = loader.LoadInitial(); err != nil {
+			slog.Error("failed to load redaction rules", "err", err)
+			return
+		}
+		go loader.Run(ctx)
+	}
+
+	cm, err := client.NewConnectionManager(&cfg, redactor)
 	if err != nil {
 		slog.Error("failed to create connection manager", "err", err)
 		return

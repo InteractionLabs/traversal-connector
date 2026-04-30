@@ -2,8 +2,16 @@ package client
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"testing"
+	"time"
 
 	"buf.build/go/protovalidate"
 	"github.com/google/go-cmp/cmp"
@@ -16,6 +24,42 @@ import (
 )
 
 func ptrTo[T any](v T) *T { return &v }
+
+// generateTestKeyPair returns a freshly-generated self-signed cert and key
+// as PEM strings. Used by tests that exercise the TLS transport path, since
+// tls.X509KeyPair validates that the cert and key actually pair up.
+func generateTestKeyPair(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(
+		rand.Reader, template, template, &priv.PublicKey, priv,
+	)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	certPEM = string(pem.EncodeToMemory(
+		&pem.Block{Type: "CERTIFICATE", Bytes: der},
+	))
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(
+		&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER},
+	))
+	return certPEM, keyPEM
+}
 
 func TestHttpRequestValidation(t *testing.T) {
 	tests := []struct {
@@ -135,7 +179,10 @@ func TestNewTransport_NoProxy(t *testing.T) {
 		TraversalControllerURL: "http://localhost:9080",
 	}
 
-	transport := newTransport(cfg)
+	transport, err := newTransport(cfg)
+	if err != nil {
+		t.Fatalf("newTransport() error: %v", err)
+	}
 
 	if _, ok := transport.(*http2.Transport); !ok {
 		t.Errorf("expected *http2.Transport for no proxy, got %T", transport)
@@ -143,19 +190,20 @@ func TestNewTransport_NoProxy(t *testing.T) {
 }
 
 func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
-	// Dummy PEM values (not real certs — only used to trigger TLS path).
-	dummyCert := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
-	dummyKey := "-----BEGIN EC PRIVATE KEY-----\ntest\n-----END EC PRIVATE KEY-----" //nolint:gosec // test fixture
+	certPEM, keyPEM := generateTestKeyPair(t)
 
 	cfg := &config.Config{
 		TraversalControllerURL: "https://controller.example.com:9080",
 		ProxyURL:               ptrTo("http://proxy.example.com:3128"),
-		TLSCert:                &dummyCert,
-		TLSKey:                 &dummyKey,
+		TLSCert:                &certPEM,
+		TLSKey:                 &keyPEM,
 		TLSServerName:          "controller.example.com",
 	}
 
-	transport := newTransport(cfg)
+	transport, err := newTransport(cfg)
+	if err != nil {
+		t.Fatalf("newTransport() error: %v", err)
+	}
 
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
@@ -166,8 +214,18 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 		t.Fatal("expected TLSClientConfig to be set")
 	}
 
-	if diff := cmp.Diff("controller.example.com", httpTransport.TLSClientConfig.ServerName); diff != "" {
+	if diff := cmp.Diff(
+		"controller.example.com",
+		httpTransport.TLSClientConfig.ServerName,
+	); diff != "" {
 		t.Errorf("TLS ServerName mismatch (-want +got):\n%s", diff)
+	}
+
+	if len(httpTransport.TLSClientConfig.Certificates) != 1 {
+		t.Errorf(
+			"expected exactly 1 client certificate, got %d",
+			len(httpTransport.TLSClientConfig.Certificates),
+		)
 	}
 
 	// Verify the proxy function is set.
@@ -189,17 +247,16 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 	}
 }
 
-func TestNewTransport_ProxyWithoutCerts(t *testing.T) {
+func TestNewTransport_HTTPSWithoutCertsReturnsError(t *testing.T) {
+	// In production this configuration is rejected by config.Load; if Load
+	// is bypassed, newTransport surfaces the error rather than silently
+	// falling back to a misleading transport.
 	cfg := &config.Config{
 		TraversalControllerURL: "https://controller.example.com:9080",
-		ProxyURL:               ptrTo("http://proxy.example.com:3128"),
 	}
 
-	transport := newTransport(cfg)
-
-	// No TLS certs → h2c transport regardless of proxy/https.
-	if _, ok := transport.(*http2.Transport); !ok {
-		t.Errorf("expected *http2.Transport when no TLS certs, got %T", transport)
+	if _, err := newTransport(cfg); err == nil {
+		t.Fatal("newTransport() returned nil error for https without certs")
 	}
 }
 
@@ -209,11 +266,14 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 		ProxyURL:               ptrTo("://bad-url"),
 	}
 
-	transport := newTransport(cfg)
+	transport, err := newTransport(cfg)
+	if err != nil {
+		t.Fatalf("newTransport() error: %v", err)
+	}
 
-	// No TLS certs → h2c fallback.
+	// http URL → h2c regardless of proxy validity.
 	if _, ok := transport.(*http2.Transport); !ok {
-		t.Errorf("expected *http2.Transport fallback for no TLS certs, got %T", transport)
+		t.Errorf("expected *http2.Transport for http URL, got %T", transport)
 	}
 }
 

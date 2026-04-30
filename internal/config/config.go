@@ -1,10 +1,12 @@
 package config
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,9 +25,10 @@ const (
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// Default timeout and interval durations.
-	defaultReconnectInterval = 5 * time.Second
-	defaultMaxBackoffDelay   = 60 * time.Second
-	defaultRequestTimeout    = 60 * time.Second
+	defaultReconnectInterval       = 5 * time.Second
+	defaultMaxBackoffDelay         = 60 * time.Second
+	defaultRequestTimeout          = 60 * time.Second
+	defaultRedactionReloadInterval = 10 * time.Second
 )
 
 // Config holds all configuration for the Traversal Connector service.
@@ -108,6 +111,13 @@ type Config struct {
 	// may be provided as raw PEM or base64-encoded PEM.
 	// When set with UpstreamTLSVerify=true, only certificates signed by this CA are accepted.
 	UpstreamTLSCA *string
+	// RedactionRulesFile is the optional path to a TOML file containing redaction
+	// rules applied to all upstream response bodies before they leave the customer
+	// network. Read from REDACTION_RULES_FILE. When unset, no redaction is applied.
+	RedactionRulesFile *string
+	// RedactionReloadInterval is how often the redaction rules file is checked for
+	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
+	RedactionReloadInterval time.Duration
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -138,7 +148,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("TRAVERSAL_CONTROLLER_URL is required")
 	}
 
-	return Config{
+	cfg := Config{
 		HTTPPort:               env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL: *traversalControllerURL,
 		EnvName:                *envName,
@@ -179,7 +189,73 @@ func Load() (Config, error) {
 		UpstreamTLSCA: decodeCertificate(
 			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
 		),
-	}, nil
+		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionReloadInterval: env.GetEnvDuration(
+			"REDACTION_RELOAD_INTERVAL",
+			defaultRedactionReloadInterval,
+		),
+	}
+
+	if err := validateControllerConnection(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// validateControllerConnection enforces the controller-URL / TLS rules so
+// misconfigurations fail at startup rather than after the connector has
+// entered the reconnect-with-backoff loop. The rules:
+//
+//   - https:// requires both TLS_CERT_BASE64 and TLS_KEY_BASE64 (mTLS is
+//     mandatory for production deployments).
+//   - http:// is rejected when ENV_LEVEL=production.
+//   - Other schemes are rejected.
+//
+// When mTLS material is configured but the URL is http://, the certs would
+// silently be ignored; that case is allowed but logs a WARN so the operator
+// notices.
+func validateControllerConnection(cfg Config) error {
+	u, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil {
+		return fmt.Errorf("invalid TRAVERSAL_CONTROLLER_URL: %w", err)
+	}
+
+	switch u.Scheme {
+	case "https":
+		if cfg.TLSCert == nil || cfg.TLSKey == nil {
+			return errors.New(
+				"TLS_CERT_BASE64 and TLS_KEY_BASE64 are required when " +
+					"TRAVERSAL_CONTROLLER_URL uses https:// (mTLS is required)",
+			)
+		}
+		if _, err := tls.X509KeyPair(
+			[]byte(*cfg.TLSCert), []byte(*cfg.TLSKey),
+		); err != nil {
+			return fmt.Errorf("failed to parse client TLS certificate: %w", err)
+		}
+	case "http":
+		if !cfg.EnvLevel.IsDev() {
+			return errors.New(
+				"http:// TRAVERSAL_CONTROLLER_URL is not allowed when " +
+					"ENV_LEVEL=production; use https:// with " +
+					"TLS_CERT_BASE64 / TLS_KEY_BASE64",
+			)
+		}
+		if cfg.TLSCert != nil || cfg.TLSKey != nil {
+			slog.Warn(
+				"TLS client cert is configured but " +
+					"TRAVERSAL_CONTROLLER_URL uses http://; " +
+					"cert will be ignored",
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"TRAVERSAL_CONTROLLER_URL has unsupported scheme %q; "+
+				"expected http:// or https://",
+			u.Scheme,
+		)
+	}
+	return nil
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.
