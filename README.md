@@ -44,9 +44,8 @@ TRAVERSAL_CONTROLLER_URL=http://host.docker.internal:9080 docker compose up --bu
 ENV_NAME=dev TRAVERSAL_CONTROLLER_URL=http://localhost:9080 go run ./cmd/connector
 ```
 
-`http://` is rejected when `ENV_LEVEL=production`. In development it is
-allowed only for local hosts (`localhost`, `127.0.0.1`, `::1`,
-`host.docker.internal`). Production deployments must use `https://` and
+`http://` is rejected when `ENV_LEVEL=production`. In development any
+`http://` host is accepted. Production deployments must use `https://` and
 configure mTLS, see Configuration below.
 
 ## Building & testing
@@ -90,7 +89,7 @@ checked in.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` always permitted; `http://` is rejected entirely when `ENV_LEVEL=production` and otherwise rejected unless the host is `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`. Startup fails if unset or if the scheme/host/level combination is rejected. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
 | `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
 | `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |

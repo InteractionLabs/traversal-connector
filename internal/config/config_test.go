@@ -317,8 +317,11 @@ func TestLoad_RejectsMalformedCert(t *testing.T) {
 	}
 }
 
-func TestLoad_AcceptsLocalHTTP(t *testing.T) {
-	hosts := []string{"localhost", "127.0.0.1", "host.docker.internal"}
+func TestLoad_AcceptsHTTPInDev(t *testing.T) {
+	hosts := []string{
+		"localhost", "127.0.0.1", "host.docker.internal",
+		"controller.example.com", "internal-test-controller.dev",
+	}
 	for _, host := range hosts {
 		t.Run(host, func(t *testing.T) {
 			clearEnv()
@@ -355,17 +358,6 @@ func TestLoad_RejectsHTTPInProduction(t *testing.T) {
 				)
 			}
 		})
-	}
-}
-
-func TestLoad_RejectsNonLocalHTTP(t *testing.T) {
-	clearEnv()
-	defer clearEnv()
-	_ = os.Setenv("ENV_NAME", "test")
-	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://controller.example.com:9080")
-
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() returned nil error for non-local http://; expected error")
 	}
 }
 

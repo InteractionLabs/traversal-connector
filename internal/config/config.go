@@ -196,8 +196,6 @@ func Load() (Config, error) {
 //   - https:// requires both TLS_CERT_BASE64 and TLS_KEY_BASE64 (mTLS is
 //     mandatory for production deployments).
 //   - http:// is rejected when ENV_LEVEL=production.
-//   - http:// in development is allowed only for local hosts (localhost,
-//     127.0.0.1, ::1, host.docker.internal). Any other host is rejected.
 //   - Other schemes are rejected.
 //
 // When mTLS material is configured but the URL is http://, the certs would
@@ -230,14 +228,6 @@ func validateControllerConnection(cfg Config) error {
 					"TLS_CERT_BASE64 / TLS_KEY_BASE64",
 			)
 		}
-		if !isLocalHost(u.Hostname()) {
-			return fmt.Errorf(
-				"http:// is only allowed for local development "+
-					"(localhost, 127.0.0.1, ::1, host.docker.internal); "+
-					"got host %q",
-				u.Hostname(),
-			)
-		}
 		if cfg.TLSCert != nil || cfg.TLSKey != nil {
 			slog.Warn(
 				"TLS client cert is configured but " +
@@ -253,16 +243,6 @@ func validateControllerConnection(cfg Config) error {
 		)
 	}
 	return nil
-}
-
-// isLocalHost reports whether the host is one of the recognized local-dev
-// hostnames. Used to gate the http:// escape hatch in validateControllerConnection.
-func isLocalHost(host string) bool {
-	switch host {
-	case "localhost", "127.0.0.1", "::1", "host.docker.internal":
-		return true
-	}
-	return false
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.
