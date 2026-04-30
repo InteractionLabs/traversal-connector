@@ -77,9 +77,14 @@ func NewConnectionManager(cfg *config.Config) (*ConnectionManager, error) {
 		hostname = "unknown"
 	}
 
+	client, err := NewClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connector RPC client: %w", err)
+	}
+
 	cm := &ConnectionManager{
 		connections: make([]*StreamConnection, 0, cfg.MaxTunnelsAllowed),
-		client:      NewClient(cfg),
+		client:      client,
 		config:      cfg,
 		executor:    exec,
 		tracer:      otel.Tracer(InstrumentationName),
