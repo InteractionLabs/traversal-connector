@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"time"
 
@@ -10,8 +11,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/sdk/metric"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 // InitMetrics initializes the OpenTelemetry metrics pipeline.
@@ -19,9 +19,15 @@ import (
 //
 //	"grpc" or "http/protobuf" → gRPC exporter
 //	"http/json" or ""         → HTTP exporter (default)
+//
+// When tlsConfig is non-nil, it is used for the exporter transport
+// (e.g. for mTLS to the OTLP endpoint). When nil, the default
+// transport is used (insecure for non-TLS endpoints, system roots
+// otherwise).
 func InitMetrics(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
+	tlsConfig *tls.Config,
 ) (func(context.Context) error, error) {
 	if otlpEndpoint == "" {
 		slog.InfoContext(ctx,
@@ -34,7 +40,8 @@ func InitMetrics(
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
 		"service_name", serviceName,
-		"env", envName)
+		"env", envName,
+		"mtls", tlsConfig != nil)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -46,11 +53,11 @@ func InitMetrics(
 	var exporter metric.Exporter
 	if IsGRPCProtocol(protocol) {
 		exporter, err = newGRPCMetricsExporter(
-			ctx, otlpEndpoint,
+			ctx, otlpEndpoint, tlsConfig,
 		)
 	} else {
 		exporter, err = newHTTPMetricsExporter(
-			ctx, otlpEndpoint,
+			ctx, otlpEndpoint, tlsConfig,
 		)
 	}
 	if err != nil {
@@ -89,24 +96,23 @@ func InitMetrics(
 }
 
 func newGRPCMetricsExporter(
-	ctx context.Context, endpoint string,
+	ctx context.Context, endpoint string, tlsConfig *tls.Config,
 ) (metric.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating gRPC metrics exporter",
-		"host", ep.Host, "tls", ep.TLS)
+		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
 
 	opts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(ep.Host),
 	}
-	if ep.TLS {
+	switch {
+	case tlsConfig != nil && ep.TLS:
 		opts = append(opts,
-			otlpmetricgrpc.WithDialOption(
-				grpc.WithTransportCredentials(
-					insecure.NewCredentials(),
-				),
+			otlpmetricgrpc.WithTLSCredentials(
+				credentials.NewTLS(tlsConfig),
 			),
 		)
-	} else {
+	case !ep.TLS:
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
 
@@ -114,11 +120,12 @@ func newGRPCMetricsExporter(
 }
 
 func newHTTPMetricsExporter(
-	ctx context.Context, endpoint string,
+	ctx context.Context, endpoint string, tlsConfig *tls.Config,
 ) (metric.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating HTTP metrics exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS)
+		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
+		"mtls", tlsConfig != nil)
 
 	opts := []otlpmetrichttp.Option{
 		otlpmetrichttp.WithEndpoint(ep.Host),
@@ -128,11 +135,16 @@ func newHTTPMetricsExporter(
 			otlpmetrichttp.WithURLPath(ep.Path),
 		)
 	}
-	if ep.TLS {
+	switch {
+	case tlsConfig != nil && ep.TLS:
+		opts = append(opts,
+			otlpmetrichttp.WithTLSClientConfig(tlsConfig),
+		)
+	case ep.TLS:
 		opts = append(opts,
 			otlpmetrichttp.WithTLSClientConfig(InsecureTLS()),
 		)
-	} else {
+	default:
 		opts = append(opts, otlpmetrichttp.WithInsecure())
 	}
 

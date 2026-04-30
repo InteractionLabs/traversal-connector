@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"os"
 
@@ -10,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"google.golang.org/grpc/credentials"
 )
 
 // InitLogging initializes an OTLP log exporter and returns a
@@ -20,9 +22,15 @@ import (
 //
 //	"grpc" or "http/protobuf" → gRPC exporter
 //	"http/json" or ""         → HTTP exporter (default)
+//
+// When tlsConfig is non-nil, it is used for the exporter transport
+// (e.g. for mTLS to the OTLP endpoint). When nil, the default
+// transport is used (insecure for non-TLS endpoints, system roots
+// otherwise).
 func InitLogging(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
+	tlsConfig *tls.Config,
 ) (*slog.Logger, func(context.Context) error, error) {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
@@ -38,7 +46,8 @@ func InitLogging(
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
 		"service_name", serviceName,
-		"env", envName)
+		"env", envName,
+		"mtls", tlsConfig != nil)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -49,9 +58,9 @@ func InitLogging(
 
 	var exporter sdklog.Exporter
 	if IsGRPCProtocol(protocol) {
-		exporter, err = newGRPCLogExporter(ctx, otlpEndpoint)
+		exporter, err = newGRPCLogExporter(ctx, otlpEndpoint, tlsConfig)
 	} else {
-		exporter, err = newHTTPLogExporter(ctx, otlpEndpoint)
+		exporter, err = newHTTPLogExporter(ctx, otlpEndpoint, tlsConfig)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx,
@@ -94,16 +103,23 @@ func InitLogging(
 }
 
 func newGRPCLogExporter(
-	ctx context.Context, endpoint string,
+	ctx context.Context, endpoint string, tlsConfig *tls.Config,
 ) (sdklog.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating gRPC log exporter",
-		"host", ep.Host, "tls", ep.TLS)
+		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
 
 	opts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(ep.Host),
 	}
-	if !ep.TLS {
+	switch {
+	case tlsConfig != nil && ep.TLS:
+		opts = append(opts,
+			otlploggrpc.WithTLSCredentials(
+				credentials.NewTLS(tlsConfig),
+			),
+		)
+	case !ep.TLS:
 		opts = append(opts, otlploggrpc.WithInsecure())
 	}
 
@@ -111,11 +127,12 @@ func newGRPCLogExporter(
 }
 
 func newHTTPLogExporter(
-	ctx context.Context, endpoint string,
+	ctx context.Context, endpoint string, tlsConfig *tls.Config,
 ) (sdklog.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating HTTP log exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS)
+		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
+		"mtls", tlsConfig != nil)
 
 	opts := []otlploghttp.Option{
 		otlploghttp.WithEndpoint(ep.Host),
@@ -123,11 +140,16 @@ func newHTTPLogExporter(
 	if ep.Path != "" {
 		opts = append(opts, otlploghttp.WithURLPath(ep.Path))
 	}
-	if ep.TLS {
+	switch {
+	case tlsConfig != nil && ep.TLS:
+		opts = append(opts,
+			otlploghttp.WithTLSClientConfig(tlsConfig),
+		)
+	case ep.TLS:
 		opts = append(opts,
 			otlploghttp.WithTLSClientConfig(InsecureTLS()),
 		)
-	} else {
+	default:
 		opts = append(opts, otlploghttp.WithInsecure())
 	}
 

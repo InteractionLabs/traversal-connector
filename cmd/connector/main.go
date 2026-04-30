@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,6 +31,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build optional mTLS config for OTLP exporters from the same
+	// client cert/key used to reach the Traversal control plane.
+	// cfg.TLSCert and cfg.TLSKey are already PEM-decoded by
+	// config.Load.
+	otlpTLS, tlsErr := buildOTLPTLSConfig(&cfg)
+	if tlsErr != nil {
+		slog.Error("failed to build OTLP mTLS config", "err", tlsErr)
+		os.Exit(1)
+	}
+
 	// --- Logging ---
 	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
 	// Non-local              → stdout JSON
@@ -41,6 +53,7 @@ func main() {
 			cfg.OTLPLogsEndpoint,
 			cfg.OTLPProtocol,
 			cfg.EnvName,
+			otlpTLS,
 		)
 		if logErr != nil {
 			slog.Error("failed to initialize OTLP log export",
@@ -78,6 +91,7 @@ func main() {
 		cfg.OTLPMetricsEndpoint,
 		cfg.OTLPProtocol,
 		cfg.EnvName,
+		otlpTLS,
 	)
 	if err != nil {
 		slog.Error("failed to initialize metrics", "err", err)
@@ -109,6 +123,7 @@ func main() {
 		cfg.OTLPTracesEndpoint,
 		cfg.OTLPProtocol,
 		cfg.EnvName,
+		otlpTLS,
 	)
 	if err != nil {
 		slog.Error("failed to initialize tracing", "err", err)
@@ -195,4 +210,26 @@ func main() {
 	}
 
 	slog.InfoContext(ctx, "traversal connector service shutting down")
+}
+
+// buildOTLPTLSConfig returns a *tls.Config wired with the client
+// certificate from cfg.TLSCert / cfg.TLSKey for mTLS to OTLP
+// endpoints. Returns nil when either value is unset, which leaves
+// the OTLP exporter on its default transport. cfg.TLSCert and
+// cfg.TLSKey carry PEM content (config.Load already base64-decodes
+// the TLS_CERT_BASE64 / TLS_KEY_BASE64 env values).
+func buildOTLPTLSConfig(cfg *config.Config) (*tls.Config, error) {
+	if cfg.TLSCert == nil || cfg.TLSKey == nil {
+		return nil, nil
+	}
+	cert, err := tls.X509KeyPair(
+		[]byte(*cfg.TLSCert), []byte(*cfg.TLSKey),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load OTLP client certificate: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
