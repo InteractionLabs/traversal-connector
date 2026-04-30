@@ -82,7 +82,7 @@ checked in.
 |---|---|---|
 | `ENV_NAME` | **required** | Free-form environment name attached to telemetry as `service.namespace` and `deployment.environment` (e.g. `staging`, `production`). Startup fails if unset. |
 | `ENV_LEVEL` | `development` | Deployment level (`production` or `development`). The container image bakes in `production`; leave unset for local dev. |
-| `HTTP_PORT` | `8080` | Port for the local HTTP server (`/health`, `/readyz`). |
+| `HTTP_PORT` | `8080` | Port for the local HTTP server (`/healthz`, `/readyz`). |
 | `ENV_FILE` | (none) | Optional path to a dotenv file (e.g. `/mnt/secrets/connector.env`). Useful when secrets are mounted as a file (e.g. Vault Agent). Process-environment values win over file values; the file only fills in values that are unset. Startup fails if the path is set but unreadable. |
 
 ### Control plane connection
@@ -196,7 +196,7 @@ compliance IDs, team names, or any other site-specific metadata.
 
 | Port | Description |
 |---|---|
-| `8080` (container) | HTTP `/health` and `/readyz` endpoints. The compose file maps host `8081` → container `8080`. |
+| `8080` (container) | HTTP `/healthz` and `/readyz` endpoints. The compose file maps host `8081` → container `8080`. |
 
 ## License
 

@@ -41,7 +41,7 @@ func NewRouter(cfg config.Config, cm *client.ConnectionManager) *gin.Engine {
 		r.Use(gin.Logger())
 	}
 
-	r.GET("/health", healthCheckHandler)
+	r.GET("/healthz", healthCheckHandler)
 	r.GET("/readyz", readinessHandler(cm))
 
 	return r
