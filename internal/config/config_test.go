@@ -1,7 +1,14 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"testing"
 	"time"
@@ -13,7 +20,45 @@ import (
 
 func ptrTo[T any](v T) *T { return &v }
 
+// generateTestKeyPair returns a freshly-generated self-signed cert and key
+// as PEM strings. Used by tests that go through Load() with an https://
+// controller URL, since validateControllerConnection calls tls.X509KeyPair.
+func generateTestKeyPair(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(
+		rand.Reader, template, template, &priv.PublicKey, priv,
+	)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	certPEM = string(pem.EncodeToMemory(
+		&pem.Block{Type: "CERTIFICATE", Bytes: der},
+	))
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(
+		&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER},
+	))
+	return certPEM, keyPEM
+}
+
 func TestLoad(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+
 	tests := []struct {
 		name     string
 		envVars  map[string]string
@@ -54,8 +99,8 @@ func TestLoad(t *testing.T) {
 				"MAX_BACKOFF_DELAY":                   "120s",
 				"REQUEST_TIMEOUT":                     "25s",
 				"MAX_REQUEST_BODY_SIZE_MB":            "16",
-				"TLS_CERT_BASE64":                     "/path/to/cert.pem",
-				"TLS_KEY_BASE64":                      "/path/to/key.pem",
+				"TLS_CERT_BASE64":                     certPEM,
+				"TLS_KEY_BASE64":                      keyPEM,
 				"TLS_SERVER_NAME":                     "controller.example.com",
 				"OTEL_SERVICE_NAME":                   "custom-traversal-connector",
 				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "localhost:4317",
@@ -73,8 +118,8 @@ func TestLoad(t *testing.T) {
 				MaxBackoffDelay:        120 * time.Second,
 				RequestTimeout:         25 * time.Second,
 				MaxRequestBodySizeMB:   16,
-				TLSCert:                ptrTo("/path/to/cert.pem"),
-				TLSKey:                 ptrTo("/path/to/key.pem"),
+				TLSCert:                &certPEM,
+				TLSKey:                 &keyPEM,
 				TLSServerName:          "controller.example.com",
 				OTELServiceName:        "custom-traversal-connector",
 				OTLPMetricsEndpoint:    "localhost:4317",
@@ -212,6 +257,126 @@ func TestLoad_EnvFilePopulatesEnv(t *testing.T) {
 	}
 	if cfg.EnvName != "from-file" {
 		t.Errorf("EnvName = %q, want %q", cfg.EnvName, "from-file")
+	}
+}
+
+func TestLoad_RequiresMTLSForHTTPS(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVars map[string]string
+	}{
+		{
+			name: "https URL without cert or key",
+			envVars: map[string]string{
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+			},
+		},
+		{
+			name: "https URL with cert but no key",
+			envVars: map[string]string{
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+				"TLS_CERT_BASE64":          "-----BEGIN CERTIFICATE-----\nXXX\n-----END CERTIFICATE-----",
+			},
+		},
+		{
+			name: "https URL with key but no cert",
+			envVars: map[string]string{ //nolint:gosec // G101: test fixture, intentional fake key
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+				"TLS_KEY_BASE64":           "-----BEGIN EC PRIVATE KEY-----\nXXX\n-----END EC PRIVATE KEY-----",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			for k, v := range tt.envVars {
+				_ = os.Setenv(k, v)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() returned nil error; expected mTLS-required error")
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsMalformedCert(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "https://controller.example.com:9080")
+	_ = os.Setenv("TLS_CERT_BASE64", "not a valid PEM")
+	_ = os.Setenv("TLS_KEY_BASE64", "also not valid")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() returned nil error for malformed cert; expected parse error")
+	}
+}
+
+func TestLoad_AcceptsLocalHTTP(t *testing.T) {
+	hosts := []string{"localhost", "127.0.0.1", "host.docker.internal"}
+	for _, host := range hosts {
+		t.Run(host, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv(
+				"TRAVERSAL_CONTROLLER_URL",
+				"http://"+host+":9080",
+			)
+			if _, err := Load(); err != nil {
+				t.Fatalf("Load() returned error for %s: %v", host, err)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsHTTPInProduction(t *testing.T) {
+	hosts := []string{"localhost", "127.0.0.1", "controller.example.com"}
+	for _, host := range hosts {
+		t.Run(host, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("ENV_LEVEL", "production")
+			_ = os.Setenv(
+				"TRAVERSAL_CONTROLLER_URL",
+				"http://"+host+":9080",
+			)
+			if _, err := Load(); err == nil {
+				t.Fatalf(
+					"Load() returned nil error for http://%s "+
+						"with ENV_LEVEL=production",
+					host,
+				)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsNonLocalHTTP(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://controller.example.com:9080")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() returned nil error for non-local http://; expected error")
+	}
+}
+
+func TestLoad_RejectsUnsupportedScheme(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "ftp://controller.example.com")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() returned nil error for unsupported scheme; expected error")
 	}
 }
 

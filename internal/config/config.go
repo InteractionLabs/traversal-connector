@@ -1,10 +1,12 @@
 package config
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -138,7 +140,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("TRAVERSAL_CONTROLLER_URL is required")
 	}
 
-	return Config{
+	cfg := Config{
 		HTTPPort:               env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL: *traversalControllerURL,
 		EnvName:                *envName,
@@ -179,7 +181,88 @@ func Load() (Config, error) {
 		UpstreamTLSCA: decodeCertificate(
 			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
 		),
-	}, nil
+	}
+
+	if err := validateControllerConnection(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// validateControllerConnection enforces the controller-URL / TLS rules so
+// misconfigurations fail at startup rather than after the connector has
+// entered the reconnect-with-backoff loop. The rules:
+//
+//   - https:// requires both TLS_CERT_BASE64 and TLS_KEY_BASE64 (mTLS is
+//     mandatory for production deployments).
+//   - http:// is rejected when ENV_LEVEL=production.
+//   - http:// in development is allowed only for local hosts (localhost,
+//     127.0.0.1, ::1, host.docker.internal). Any other host is rejected.
+//   - Other schemes are rejected.
+//
+// When mTLS material is configured but the URL is http://, the certs would
+// silently be ignored; that case is allowed but logs a WARN so the operator
+// notices.
+func validateControllerConnection(cfg Config) error {
+	u, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil {
+		return fmt.Errorf("invalid TRAVERSAL_CONTROLLER_URL: %w", err)
+	}
+
+	switch u.Scheme {
+	case "https":
+		if cfg.TLSCert == nil || cfg.TLSKey == nil {
+			return errors.New(
+				"TLS_CERT_BASE64 and TLS_KEY_BASE64 are required when " +
+					"TRAVERSAL_CONTROLLER_URL uses https:// (mTLS is required)",
+			)
+		}
+		if _, err := tls.X509KeyPair(
+			[]byte(*cfg.TLSCert), []byte(*cfg.TLSKey),
+		); err != nil {
+			return fmt.Errorf("failed to parse client TLS certificate: %w", err)
+		}
+	case "http":
+		if !cfg.EnvLevel.IsDev() {
+			return errors.New(
+				"http:// TRAVERSAL_CONTROLLER_URL is not allowed when " +
+					"ENV_LEVEL=production; use https:// with " +
+					"TLS_CERT_BASE64 / TLS_KEY_BASE64",
+			)
+		}
+		if !isLocalHost(u.Hostname()) {
+			return fmt.Errorf(
+				"http:// is only allowed for local development "+
+					"(localhost, 127.0.0.1, ::1, host.docker.internal); "+
+					"got host %q",
+				u.Hostname(),
+			)
+		}
+		if cfg.TLSCert != nil || cfg.TLSKey != nil {
+			slog.Warn(
+				"TLS client cert is configured but " +
+					"TRAVERSAL_CONTROLLER_URL uses http://; " +
+					"cert will be ignored",
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"TRAVERSAL_CONTROLLER_URL has unsupported scheme %q; "+
+				"expected http:// or https://",
+			u.Scheme,
+		)
+	}
+	return nil
+}
+
+// isLocalHost reports whether the host is one of the recognized local-dev
+// hostnames. Used to gate the http:// escape hatch in validateControllerConnection.
+func isLocalHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "host.docker.internal":
+		return true
+	}
+	return false
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.

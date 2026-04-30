@@ -30,7 +30,7 @@ Installs `just` and the Go-based CLI tools the recipes depend on.
 
 `ENV_NAME` and `TRAVERSAL_CONTROLLER_URL` are required; everything else has
 sensible defaults (see Configuration below). `TRAVERSAL_CONTROLLER_URL` has no
-default — startup fails if it's unset.
+default. Startup fails if it's unset.
 
 **Docker Compose (containerized, hot-reload via `air`):**
 
@@ -43,6 +43,11 @@ TRAVERSAL_CONTROLLER_URL=http://host.docker.internal:9080 docker compose up --bu
 ```bash
 ENV_NAME=dev TRAVERSAL_CONTROLLER_URL=http://localhost:9080 go run ./cmd/connector
 ```
+
+`http://` is rejected when `ENV_LEVEL=production`. In development it is
+allowed only for local hosts (`localhost`, `127.0.0.1`, `::1`,
+`host.docker.internal`). Production deployments must use `https://` and
+configure mTLS, see Configuration below.
 
 ## Building & testing
 
@@ -85,7 +90,7 @@ checked in.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. Startup fails if unset. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` always permitted; `http://` is rejected entirely when `ENV_LEVEL=production` and otherwise rejected unless the host is `localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`. Startup fails if unset or if the scheme/host/level combination is rejected. |
 | `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
 | `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
@@ -96,15 +101,21 @@ checked in.
 
 ### mTLS to the control plane
 
+mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
+The connector refuses to start if `TLS_CERT_BASE64` and `TLS_KEY_BASE64` are
+not both provided, or if either fails to parse as valid PEM. mTLS is the only
+supported posture for production traffic; there is no "TLS without mTLS"
+mode.
+
 All certificate variables accept either raw PEM (starting with
 `-----BEGIN`) or base64-encoded PEM.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TLS_CERT_BASE64` | (none) | Client TLS certificate for mTLS. |
-| `TLS_KEY_BASE64` | (none) | Client TLS private key for mTLS. |
-| `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. |
-| `TLS_SERVER_NAME` | (none) | Expected server name for TLS verification. |
+| `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
+| `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
+| `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. When set, replaces the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
+| `TLS_SERVER_NAME` | (none) | Expected server name for TLS verification. Set explicitly only if it differs from the URL host. |
 
 ### Upstream TLS (HTTPS to internal services)
 

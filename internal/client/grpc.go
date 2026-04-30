@@ -38,46 +38,94 @@ const (
 )
 
 // NewClient creates a ConnectRPC client for the Traversal control plane.
-//
-// When proxyURL is nil, it uses h2c (HTTP/2 cleartext) transport for direct
-// connections — suitable for local development and environments without a proxy.
-//
-// When proxyURL is set, it uses the standard http.Transport with HTTP CONNECT
-// proxying and TLS. The controller URL must use https:// in this case
-// because HTTP/2 over a forward proxy requires TLS negotiation via ALPN.
-func NewClient(cfg *config.Config) connectorconnect.ConnectorServiceClient {
-	transport := newTransport(cfg)
+// Transport selection is driven by the URL scheme of cfg.TraversalControllerURL:
+// https:// uses standard TLS transport with mTLS (which config.Load enforces);
+// http:// (only allowed for localhost-style hosts) uses h2c.
+// Returns an error if the URL or TLS material is malformed; in practice this
+// can't happen on a Config that came from config.Load, but the error is
+// surfaced rather than silently swallowed for callers that bypass Load.
+func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, error) {
+	transport, err := newTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
 	httpClient := &http.Client{Transport: transport}
-
 	return connectorconnect.NewConnectorServiceClient(
 		httpClient,
 		cfg.TraversalControllerURL,
 		connect.WithGRPC(),
-	)
+	), nil
 }
 
-// newTransport returns the appropriate HTTP transport based on config.
-// If a proxy URL is configured, it returns an http.Transport that tunnels
-// through the proxy via HTTP CONNECT (requires TLS / https:// controller URL).
-// If the controller URL uses HTTPS or TLS certs are provided, it uses TLS transport.
-// Otherwise it returns an h2c transport for direct cleartext HTTP/2.
-func newTransport(cfg *config.Config) http.RoundTripper {
-	// Use TLS transport only when client certs are provided.
-	shouldUseTLS := cfg.TLSCert != nil && cfg.TLSKey != nil
+// newTransport returns the HTTP transport for the controller connection.
+// URL scheme decides TLS vs h2c. config.Load enforces certs-required for
+// https://. An error here indicates the Config was not validated by Load.
+func newTransport(cfg *config.Config) (http.RoundTripper, error) {
+	controllerURL, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"invalid TRAVERSAL_CONTROLLER_URL %q: %w",
+			cfg.TraversalControllerURL, err,
+		)
+	}
 
-	if !shouldUseTLS {
-		return newH2CTransport()
+	if controllerURL.Scheme != "https" {
+		slog.Info("transport selected",
+			"scheme", controllerURL.Scheme, "mtls", false)
+		if cfg.TLSCert != nil || cfg.TLSKey != nil {
+			slog.Warn(
+				"TLS client cert is configured but " +
+					"TRAVERSAL_CONTROLLER_URL is not https://; " +
+					"cert will be ignored",
+			)
+		}
+		return newH2CTransport(), nil
+	}
+
+	slog.Info("transport selected",
+		"scheme", "https", "mtls", true, "proxy", cfg.ProxyURL != nil)
+	return newTLSTransport(cfg)
+}
+
+// newTLSTransport builds the TLS transport for an https:// controller URL.
+// mTLS is required: TLSCert and TLSKey must be non-nil and parseable. Both
+// are validated by config.Load; an error here indicates Load was bypassed.
+func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
+	if cfg.TLSCert == nil || cfg.TLSKey == nil {
+		return nil, errors.New(
+			"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
+		)
+	}
+	cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to parse client TLS certificate: %w", err,
+		)
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   cfg.TLSServerName,
+		Certificates: []tls.Certificate{cert},
+	}
+
+	if cfg.TLSCA != nil {
+		caCertPool := x509.NewCertPool()
+		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); ok {
+			tlsConfig.RootCAs = caCertPool
+			slog.Info("CA certificate loaded from PEM content")
+		} else {
+			slog.Error("failed to parse CA certificate, using system CA bundle")
+		}
 	}
 
 	var proxyURL *url.URL
-	var err error
-
 	if cfg.ProxyURL != nil {
-		proxyURL, err = url.Parse(*cfg.ProxyURL)
-		if err != nil {
+		var perr error
+		proxyURL, perr = url.Parse(*cfg.ProxyURL)
+		if perr != nil {
 			slog.Error("invalid proxy URL, proceeding with direct TLS connection",
-				"proxy_url", *cfg.ProxyURL,
-				"error", err)
+				"proxy_url", *cfg.ProxyURL, "error", perr)
 			proxyURL = nil
 		} else {
 			slog.Info("using forward proxy for controller connection",
@@ -85,59 +133,23 @@ func newTransport(cfg *config.Config) http.RoundTripper {
 		}
 	}
 
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		ServerName: cfg.TLSServerName,
-	}
-
-	// Add debug logging for TLS configuration
-	slog.Debug("TLS configuration",
-		"server_name", cfg.TLSServerName,
-		"has_certs", cfg.TLSCert != nil && cfg.TLSKey != nil,
-		"has_ca", cfg.TLSCA != nil)
-
-	// Load client certificate for mTLS if both cert and key are provided.
-	if cfg.TLSCert != nil && cfg.TLSKey != nil {
-		slog.Debug("loading TLS certificate from PEM content")
-		cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
-		if err != nil {
-			slog.Error("failed to load client TLS certificate, proceeding without mTLS",
-				"error", err)
-		} else {
-			tlsConfig.Certificates = []tls.Certificate{cert}
-			slog.Info("mTLS client certificate loaded from PEM content")
-		}
-	}
-
-	// Load CA certificate for server verification if provided
-	if cfg.TLSCA != nil {
-		slog.Debug("loading CA certificate from PEM content")
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); !ok {
-			slog.Error("failed to parse CA certificate, using system CA bundle")
-		} else {
-			tlsConfig.RootCAs = caCertPool
-			slog.Info("CA certificate loaded from PEM content")
-		}
-	}
-
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
 	}
-
 	if proxyURL != nil {
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
 	h2Transport, h2Err := http2.ConfigureTransports(transport)
 	if h2Err != nil {
-		slog.Error("failed to configure HTTP/2 transport, keepalives disabled", "error", h2Err)
+		slog.Error("failed to configure HTTP/2 transport, keepalives disabled",
+			"error", h2Err)
 	} else {
 		h2Transport.ReadIdleTimeout = h2ReadIdleTimeout
 		h2Transport.PingTimeout = h2PingTimeout
 	}
 
-	return transport
+	return transport, nil
 }
 
 // newH2CTransport creates an HTTP/2 cleartext transport for direct connections
