@@ -107,14 +107,13 @@ func newGRPCMetricsExporter(
 		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(t.Host)}
-	switch {
-	case t.UseMTLS():
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlpmetricgrpc.WithTLSCredentials(
 				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case t.UseInsecure():
+	} else {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
 	if t.UseProxy() {
@@ -138,16 +137,11 @@ func newHTTPMetricsExporter(
 	if t.Path != "" {
 		opts = append(opts, otlpmetrichttp.WithURLPath(t.Path))
 	}
-	switch {
-	case t.UseMTLS():
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlpmetrichttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	case t.TLS:
-		opts = append(opts,
-			otlpmetrichttp.WithTLSClientConfig(InsecureTLS()),
-		)
-	default:
+	} else {
 		opts = append(opts, otlpmetrichttp.WithInsecure())
 	}
 	if t.UseProxy() {

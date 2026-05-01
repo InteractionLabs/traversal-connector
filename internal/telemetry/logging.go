@@ -118,14 +118,13 @@ func newGRPCLogExporter(
 		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(t.Host)}
-	switch {
-	case t.UseMTLS():
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlploggrpc.WithTLSCredentials(
 				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case t.UseInsecure():
+	} else {
 		opts = append(opts, otlploggrpc.WithInsecure())
 	}
 	if t.UseProxy() {
@@ -149,16 +148,11 @@ func newHTTPLogExporter(
 	if t.Path != "" {
 		opts = append(opts, otlploghttp.WithURLPath(t.Path))
 	}
-	switch {
-	case t.UseMTLS():
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlploghttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	case t.TLS:
-		opts = append(opts,
-			otlploghttp.WithTLSClientConfig(InsecureTLS()),
-		)
-	default:
+	} else {
 		opts = append(opts, otlploghttp.WithInsecure())
 	}
 	if t.UseProxy() {

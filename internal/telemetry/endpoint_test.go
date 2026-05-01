@@ -97,16 +97,6 @@ func TestIsGRPCProtocol(t *testing.T) {
 	}
 }
 
-func TestInsecureTLS(t *testing.T) {
-	cfg := InsecureTLS()
-	if cfg == nil {
-		t.Fatal("InsecureTLS() returned nil")
-	}
-	if !cfg.InsecureSkipVerify {
-		t.Error("InsecureSkipVerify should be true")
-	}
-}
-
 func TestNewResource(t *testing.T) {
 	// Ensure OTEL_RESOURCE_ATTRIBUTES does not leak between tests.
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
@@ -201,10 +191,8 @@ func TestPlanOTLPTransport(t *testing.T) {
 		egressProxyURL *url.URL
 		wantMTLS       bool
 		wantProxy      bool
-		wantInsec      bool
 		wantHost       string
 		wantPath       string
-		wantTLSFlag    bool
 	}{
 		{
 			name:           "mtls https endpoint with proxy",
@@ -213,49 +201,39 @@ func TestPlanOTLPTransport(t *testing.T) {
 			egressProxyURL: proxy,
 			wantMTLS:       true,
 			wantProxy:      true,
-			wantInsec:      false,
 			wantHost:       "example.traversal.com:443",
-			wantTLSFlag:    true,
 		},
 		{
-			name:        "mtls https endpoint without proxy",
-			endpoint:    "https://example.traversal.com:443",
-			tlsConfig:   mtls,
-			wantMTLS:    true,
-			wantProxy:   false,
-			wantInsec:   false,
-			wantTLSFlag: true,
+			name:      "mtls https endpoint without proxy",
+			endpoint:  "https://example.traversal.com:443",
+			tlsConfig: mtls,
+			wantMTLS:  true,
+			wantProxy: false,
 		},
 		{
-			name:           "mtls config but cleartext endpoint — no mtls, no proxy",
+			// planOTLPTransport drops mTLS material and proxy for
+			// cleartext endpoints — invariant relied on by every
+			// exporter constructor.
+			name:           "mtls config but cleartext endpoint — material dropped",
 			endpoint:       "http://localhost:4317",
 			tlsConfig:      mtls,
 			egressProxyURL: proxy,
 			wantMTLS:       false,
 			wantProxy:      false,
-			wantInsec:      true,
-		},
-		{
-			name:        "https endpoint without mtls config",
-			endpoint:    "https://example.traversal.com",
-			wantMTLS:    false,
-			wantProxy:   false,
-			wantInsec:   false,
-			wantTLSFlag: true,
 		},
 		{
 			name:      "cleartext endpoint, nothing extra",
 			endpoint:  "localhost:4317",
-			wantInsec: true,
+			wantMTLS:  false,
+			wantProxy: false,
 		},
 		{
-			name:        "https endpoint with path",
-			endpoint:    "https://otel.example.com/v1/logs",
-			tlsConfig:   mtls,
-			wantMTLS:    true,
-			wantHost:    "otel.example.com",
-			wantPath:    "/v1/logs",
-			wantTLSFlag: true,
+			name:      "https endpoint with path",
+			endpoint:  "https://otel.example.com/v1/logs",
+			tlsConfig: mtls,
+			wantMTLS:  true,
+			wantHost:  "otel.example.com",
+			wantPath:  "/v1/logs",
 		},
 	}
 
@@ -268,17 +246,11 @@ func TestPlanOTLPTransport(t *testing.T) {
 			if got := plan.UseProxy(); got != tt.wantProxy {
 				t.Errorf("UseProxy() = %v, want %v", got, tt.wantProxy)
 			}
-			if got := plan.UseInsecure(); got != tt.wantInsec {
-				t.Errorf("UseInsecure() = %v, want %v", got, tt.wantInsec)
-			}
 			if tt.wantHost != "" && plan.Host != tt.wantHost {
 				t.Errorf("Host = %q, want %q", plan.Host, tt.wantHost)
 			}
 			if tt.wantPath != "" && plan.Path != tt.wantPath {
 				t.Errorf("Path = %q, want %q", plan.Path, tt.wantPath)
-			}
-			if plan.TLS != tt.wantTLSFlag {
-				t.Errorf("TLS = %v, want %v", plan.TLS, tt.wantTLSFlag)
 			}
 		})
 	}

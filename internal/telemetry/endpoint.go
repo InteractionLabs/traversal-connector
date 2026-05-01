@@ -65,14 +65,6 @@ func ParseOTLPEndpoint(raw string) OTLPEndpoint {
 	}
 }
 
-// InsecureTLS returns a TLS config with verification disabled,
-// for use with internal endpoints that have self-signed certs.
-//
-//nolint:gosec // InsecureSkipVerify intentional for internal endpoints.
-func InsecureTLS() *tls.Config {
-	return &tls.Config{InsecureSkipVerify: true}
-}
-
 // otlpTransport is the parsed transport plan shared by every OTLP
 // exporter constructor (gRPC and HTTP, across logs/metrics/traces). It
 // captures where to dial, whether the endpoint is TLS, the optional
@@ -82,17 +74,19 @@ func InsecureTLS() *tls.Config {
 type otlpTransport struct {
 	Host           string
 	Path           string
-	TLS            bool
 	TLSConfig      *tls.Config
 	EgressProxyURL *url.URL
 }
 
 // planOTLPTransport parses the raw endpoint and merges it with the
 // caller's mTLS and proxy preferences. mTLS material and the egress
-// proxy are silently dropped for cleartext endpoints — that way
-// downstream code can decide what to do by checking field presence
-// alone (TLSConfig != nil ⇒ mTLS; EgressProxyURL != nil ⇒ proxy)
-// without having to also gate on the scheme.
+// proxy are silently dropped for cleartext endpoints, so downstream
+// code can decide what to do by checking field presence alone:
+// TLSConfig != nil ⇒ mTLS, EgressProxyURL != nil ⇒ proxy.
+//
+// "TLS endpoint without mTLS config" is not a supported configuration
+// for this connector — the SaaS gateway requires mutual TLS — so we
+// don't model it as a third state.
 func planOTLPTransport(
 	rawEndpoint string,
 	tlsConfig *tls.Config,
@@ -106,28 +100,21 @@ func planOTLPTransport(
 	return otlpTransport{
 		Host:           ep.Host,
 		Path:           ep.Path,
-		TLS:            ep.TLS,
 		TLSConfig:      tlsConfig,
 		EgressProxyURL: egressProxyURL,
 	}
 }
 
 // UseMTLS reports whether the exporter should authenticate with a
-// client cert/key. planOTLPTransport guarantees TLSConfig is nil for
-// cleartext endpoints, so presence of TLSConfig is sufficient.
+// client cert/key. Equivalent to "the endpoint is TLS and we have
+// material" — both conditions are folded into TLSConfig by
+// planOTLPTransport.
 func (t otlpTransport) UseMTLS() bool {
 	return t.TLSConfig != nil
 }
 
-// UseInsecure reports whether the gRPC exporter should be created with
-// WithInsecure — i.e. the endpoint is plain TCP.
-func (t otlpTransport) UseInsecure() bool {
-	return !t.TLS
-}
-
 // UseProxy reports whether the exporter should traverse the forward
-// proxy. planOTLPTransport drops the proxy for cleartext endpoints, so
-// presence of EgressProxyURL is sufficient.
+// proxy.
 func (t otlpTransport) UseProxy() bool {
 	return t.EgressProxyURL != nil
 }
@@ -138,7 +125,6 @@ func (t otlpTransport) LogFields() []any {
 	return []any{
 		"host", t.Host,
 		"path", t.Path,
-		"tls", t.TLS,
 		"mtls", t.UseMTLS(),
 		"proxy", t.UseProxy(),
 	}
