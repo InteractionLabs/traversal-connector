@@ -28,13 +28,13 @@ import (
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
 //
-// When proxyURL is non-nil and the endpoint is TLS, exporter traffic is
-// routed through the given HTTP forward proxy.
+// When internetProxyURL is non-nil and the endpoint is TLS, exporter traffic
+// is routed through the given HTTP forward proxy.
 func InitMetrics(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
-	proxyURL *url.URL,
+	internetProxyURL *url.URL,
 ) (func(context.Context) error, error) {
 	if otlpEndpoint == "" {
 		slog.InfoContext(ctx,
@@ -43,7 +43,7 @@ func InitMetrics(
 		return nil, nil
 	}
 
-	transport := planOTLPTransport(otlpEndpoint, tlsConfig, proxyURL)
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP metrics export",
 		append([]any{
 			"otlp_endpoint", otlpEndpoint,
@@ -119,7 +119,7 @@ func newGRPCMetricsExporter(
 	if t.UseProxy() {
 		opts = append(opts,
 			otlpmetricgrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(t.ProxyURL)),
+				grpc.WithContextDialer(httpConnectDialer(t.InternetProxyURL)),
 			),
 		)
 	}
@@ -150,7 +150,7 @@ func newHTTPMetricsExporter(
 	}
 	if t.UseProxy() {
 		opts = append(opts,
-			otlpmetrichttp.WithProxy(http.ProxyURL(t.ProxyURL)),
+			otlpmetrichttp.WithProxy(http.ProxyURL(t.InternetProxyURL)),
 		)
 	}
 

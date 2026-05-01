@@ -51,29 +51,29 @@ func TestConnectivity(cfg *config.Config) error {
 	}
 
 	// --- proxy ---
-	var proxyURL *url.URL
+	var internetProxyURL *url.URL
 	if cfg.InternetProxyURL != nil {
-		proxyURL, err = url.Parse(*cfg.InternetProxyURL)
+		internetProxyURL, err = url.Parse(*cfg.InternetProxyURL)
 		if err != nil {
 			slog.Error(
 				"connectivity test: invalid INTERNET_PROXY_URL, skipping proxy tests",
 				"internet_proxy_url", *cfg.InternetProxyURL,
 				"error", err,
 			)
-			proxyURL = nil
+			internetProxyURL = nil
 		}
 	}
 
 	// ---------------------------------------------------------------
 	// Proxy-specific tests (only when InternetProxyURL is set)
 	// ---------------------------------------------------------------
-	if proxyURL != nil {
-		testProxyTCPReachability(proxyURL)
+	if internetProxyURL != nil {
+		testProxyTCPReachability(internetProxyURL)
 		testManualCONNECT(
-			addr, proxyURL, clientCerts, caPool,
+			addr, internetProxyURL, clientCerts, caPool,
 		)
 		testHTTPTransportViaProxy(
-			cfg.TraversalControllerURL, addr, proxyURL,
+			cfg.TraversalControllerURL, addr, internetProxyURL,
 			clientCerts, caPool,
 		)
 	}
@@ -223,8 +223,8 @@ func logTLSState(label, addr string, state tls.ConnectionState) {
 // Test 1: Proxy TCP reachability
 // ---------------------------------------------------------------------------
 
-func testProxyTCPReachability(proxyURL *url.URL) {
-	proxyAddr := proxyHostPort(proxyURL)
+func testProxyTCPReachability(internetProxyURL *url.URL) {
+	proxyAddr := proxyHostPort(internetProxyURL)
 	slog.Info(
 		"connectivity test [proxy-tcp]: dialing proxy",
 		"proxy_address", proxyAddr,
@@ -263,12 +263,12 @@ func testProxyTCPReachability(proxyURL *url.URL) {
 
 func testManualCONNECT(
 	targetAddr string,
-	proxyURL *url.URL,
+	internetProxyURL *url.URL,
 	clientCerts []tls.Certificate,
 	caPool *x509.CertPool,
 ) {
 	label := "proxy-manual-connect"
-	proxyAddr := proxyHostPort(proxyURL)
+	proxyAddr := proxyHostPort(internetProxyURL)
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"proxy_address", proxyAddr,
@@ -436,7 +436,7 @@ func testManualCONNECT(
 func testHTTPTransportViaProxy(
 	controllerUrl string,
 	targetAddr string,
-	proxyURL *url.URL,
+	internetProxyURL *url.URL,
 	clientCerts []tls.Certificate,
 	caPool *x509.CertPool,
 ) {
@@ -444,14 +444,14 @@ func testHTTPTransportViaProxy(
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"traversal_controller_url", controllerUrl,
-		"proxy_url", proxyURL.String(),
+		"internet_proxy_url", internetProxyURL.String(),
 		"target_address", targetAddr,
 	)
 
 	//nolint:gosec // InsecureSkipVerify intentional for diagnostics.
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
-		Proxy:             http.ProxyURL(proxyURL),
+		Proxy:             http.ProxyURL(internetProxyURL),
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 			Certificates:       clientCerts,
@@ -475,7 +475,7 @@ func testHTTPTransportViaProxy(
 			label,
 		),
 		"url", reqURL,
-		"proxy", proxyURL.String(),
+		"proxy", internetProxyURL.String(),
 	)
 
 	start := time.Now()
@@ -490,7 +490,7 @@ func testHTTPTransportViaProxy(
 				label,
 			),
 			"url", reqURL,
-			"proxy", proxyURL.String(),
+			"proxy", internetProxyURL.String(),
 			"latency", elapsed.String(),
 			"error", err,
 		)
@@ -509,7 +509,7 @@ func testHTTPTransportViaProxy(
 			label,
 		),
 		"url", reqURL,
-		"proxy", proxyURL.String(),
+		"proxy", internetProxyURL.String(),
 		"latency", elapsed.String(),
 		"status", resp.Status,
 		"status_code", resp.StatusCode,

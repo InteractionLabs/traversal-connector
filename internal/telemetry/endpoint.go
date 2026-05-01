@@ -80,11 +80,11 @@ func InsecureTLS() *tls.Config {
 // signal exporter options happens inside each constructor — the plan
 // itself is just data.
 type otlpTransport struct {
-	Host      string
-	Path      string
-	TLS       bool
-	TLSConfig *tls.Config
-	ProxyURL  *url.URL
+	Host             string
+	Path             string
+	TLS              bool
+	TLSConfig        *tls.Config
+	InternetProxyURL *url.URL
 }
 
 // planOTLPTransport parses the raw endpoint and merges it with the
@@ -92,15 +92,15 @@ type otlpTransport struct {
 func planOTLPTransport(
 	rawEndpoint string,
 	tlsConfig *tls.Config,
-	proxyURL *url.URL,
+	internetProxyURL *url.URL,
 ) otlpTransport {
 	ep := ParseOTLPEndpoint(rawEndpoint)
 	return otlpTransport{
-		Host:      ep.Host,
-		Path:      ep.Path,
-		TLS:       ep.TLS,
-		TLSConfig: tlsConfig,
-		ProxyURL:  proxyURL,
+		Host:             ep.Host,
+		Path:             ep.Path,
+		TLS:              ep.TLS,
+		TLSConfig:        tlsConfig,
+		InternetProxyURL: internetProxyURL,
 	}
 }
 
@@ -122,7 +122,7 @@ func (t otlpTransport) UseInsecure() bool {
 // proxy. We only proxy mTLS endpoints (i.e. real SaaS egress) — local
 // cleartext OTLP collectors don't go through the corporate proxy.
 func (t otlpTransport) UseProxy() bool {
-	return t.UseMTLS() && t.ProxyURL != nil
+	return t.UseMTLS() && t.InternetProxyURL != nil
 }
 
 // LogFields returns the standard structured fields used in exporter
