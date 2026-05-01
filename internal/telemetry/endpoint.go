@@ -73,6 +73,70 @@ func InsecureTLS() *tls.Config {
 	return &tls.Config{InsecureSkipVerify: true}
 }
 
+// otlpTransport is the parsed transport plan shared by every OTLP
+// exporter constructor (gRPC and HTTP, across logs/metrics/traces). It
+// captures where to dial, whether the endpoint is TLS, the optional
+// mTLS material, and an optional forward proxy. Translation into per-
+// signal exporter options happens inside each constructor — the plan
+// itself is just data.
+type otlpTransport struct {
+	Host      string
+	Path      string
+	TLS       bool
+	TLSConfig *tls.Config
+	ProxyURL  *url.URL
+}
+
+// planOTLPTransport parses the raw endpoint and merges it with the
+// caller's mTLS and proxy preferences.
+func planOTLPTransport(
+	rawEndpoint string,
+	tlsConfig *tls.Config,
+	proxyURL *url.URL,
+) otlpTransport {
+	ep := ParseOTLPEndpoint(rawEndpoint)
+	return otlpTransport{
+		Host:      ep.Host,
+		Path:      ep.Path,
+		TLS:       ep.TLS,
+		TLSConfig: tlsConfig,
+		ProxyURL:  proxyURL,
+	}
+}
+
+// UseMTLS reports whether the exporter should authenticate with the
+// configured client cert/key — needs both an mTLS config and a TLS
+// endpoint.
+func (t otlpTransport) UseMTLS() bool {
+	return t.TLSConfig != nil && t.TLS
+}
+
+// UseInsecure reports whether the gRPC exporter should be created with
+// WithInsecure — i.e. the endpoint is plain TCP. The HTTP exporter has
+// its own equivalent (WithInsecure when no scheme).
+func (t otlpTransport) UseInsecure() bool {
+	return !t.TLS
+}
+
+// UseProxy reports whether the exporter should traverse the forward
+// proxy. We only proxy mTLS endpoints (i.e. real SaaS egress) — local
+// cleartext OTLP collectors don't go through the corporate proxy.
+func (t otlpTransport) UseProxy() bool {
+	return t.UseMTLS() && t.ProxyURL != nil
+}
+
+// LogFields returns the standard structured fields used in exporter
+// init logs, so each signal logs the same shape.
+func (t otlpTransport) LogFields() []any {
+	return []any{
+		"host", t.Host,
+		"path", t.Path,
+		"tls", t.TLS,
+		"mtls", t.UseMTLS(),
+		"proxy", t.UseProxy(),
+	}
+}
+
 // NewResource builds an OTel resource with standard service metadata.
 // Additional attributes can be injected by the operator via the
 // OTEL_RESOURCE_ATTRIBUTES environment variable (OpenTelemetry standard),

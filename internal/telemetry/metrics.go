@@ -43,13 +43,14 @@ func InitMetrics(
 		return nil, nil
 	}
 
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, proxyURL)
 	slog.InfoContext(ctx, "initializing OTLP metrics export",
-		"otlp_endpoint", otlpEndpoint,
-		"protocol", protocol,
-		"service_name", serviceName,
-		"env", envName,
-		"mtls", tlsConfig != nil,
-		"proxy", proxyURL != nil)
+		append([]any{
+			"otlp_endpoint", otlpEndpoint,
+			"protocol", protocol,
+			"service_name", serviceName,
+			"env", envName,
+		}, transport.LogFields()...)...)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -60,13 +61,9 @@ func InitMetrics(
 
 	var exporter metric.Exporter
 	if IsGRPCProtocol(protocol) {
-		exporter, err = newGRPCMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig, proxyURL,
-		)
+		exporter, err = newGRPCMetricsExporter(ctx, transport)
 	} else {
-		exporter, err = newHTTPMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig, proxyURL,
-		)
+		exporter, err = newHTTPMetricsExporter(ctx, transport)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx,
@@ -104,32 +101,25 @@ func InitMetrics(
 }
 
 func newGRPCMetricsExporter(
-	ctx context.Context, endpoint string,
-	tlsConfig *tls.Config, proxyURL *url.URL,
+	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
-	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
-	slog.InfoContext(ctx, "creating gRPC metrics exporter",
-		"host", ep.Host, "tls", ep.TLS,
-		"mtls", tlsConfig != nil, "proxy", useProxy)
+	slog.InfoContext(ctx, "creating gRPC metrics exporter", t.LogFields()...)
 
-	opts := []otlpmetricgrpc.Option{
-		otlpmetricgrpc.WithEndpoint(ep.Host),
-	}
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(t.Host)}
 	switch {
-	case tlsConfig != nil && ep.TLS:
+	case t.UseMTLS():
 		opts = append(opts,
 			otlpmetricgrpc.WithTLSCredentials(
-				credentials.NewTLS(tlsConfig),
+				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case !ep.TLS:
+	case t.UseInsecure():
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
-	if useProxy {
+	if t.UseProxy() {
 		opts = append(opts,
 			otlpmetricgrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(proxyURL)),
+				grpc.WithContextDialer(httpConnectDialer(t.ProxyURL)),
 			),
 		)
 	}
@@ -138,38 +128,29 @@ func newGRPCMetricsExporter(
 }
 
 func newHTTPMetricsExporter(
-	ctx context.Context, endpoint string,
-	tlsConfig *tls.Config, proxyURL *url.URL,
+	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
-	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
-	slog.InfoContext(ctx, "creating HTTP metrics exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil, "proxy", useProxy)
+	slog.InfoContext(ctx, "creating HTTP metrics exporter", t.LogFields()...)
 
-	opts := []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpoint(ep.Host),
-	}
-	if ep.Path != "" {
-		opts = append(opts,
-			otlpmetrichttp.WithURLPath(ep.Path),
-		)
+	opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(t.Host)}
+	if t.Path != "" {
+		opts = append(opts, otlpmetrichttp.WithURLPath(t.Path))
 	}
 	switch {
-	case tlsConfig != nil && ep.TLS:
+	case t.UseMTLS():
 		opts = append(opts,
-			otlpmetrichttp.WithTLSClientConfig(tlsConfig),
+			otlpmetrichttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	case ep.TLS:
+	case t.TLS:
 		opts = append(opts,
 			otlpmetrichttp.WithTLSClientConfig(InsecureTLS()),
 		)
 	default:
 		opts = append(opts, otlpmetrichttp.WithInsecure())
 	}
-	if useProxy {
+	if t.UseProxy() {
 		opts = append(opts,
-			otlpmetrichttp.WithProxy(http.ProxyURL(proxyURL)),
+			otlpmetrichttp.WithProxy(http.ProxyURL(t.ProxyURL)),
 		)
 	}
 

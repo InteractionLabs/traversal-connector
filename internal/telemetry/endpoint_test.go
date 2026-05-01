@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
+	"net/url"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -186,4 +188,98 @@ func hasAttrKey(
 		}
 	}
 	return false
+}
+
+func TestPlanOTLPTransport(t *testing.T) {
+	mtls := &tls.Config{MinVersion: tls.VersionTLS12}
+	proxy, _ := url.Parse("http://proxy.example.com:3128")
+
+	tests := []struct {
+		name        string
+		endpoint    string
+		tlsConfig   *tls.Config
+		proxyURL    *url.URL
+		wantMTLS    bool
+		wantProxy   bool
+		wantInsec   bool
+		wantHost    string
+		wantPath    string
+		wantTLSFlag bool
+	}{
+		{
+			name:        "mtls https endpoint with proxy",
+			endpoint:    "https://relay.example.com:443",
+			tlsConfig:   mtls,
+			proxyURL:    proxy,
+			wantMTLS:    true,
+			wantProxy:   true,
+			wantInsec:   false,
+			wantHost:    "relay.example.com:443",
+			wantTLSFlag: true,
+		},
+		{
+			name:        "mtls https endpoint without proxy",
+			endpoint:    "https://relay.example.com:443",
+			tlsConfig:   mtls,
+			wantMTLS:    true,
+			wantProxy:   false,
+			wantInsec:   false,
+			wantTLSFlag: true,
+		},
+		{
+			name:      "mtls config but cleartext endpoint — no mtls, no proxy",
+			endpoint:  "http://localhost:4317",
+			tlsConfig: mtls,
+			proxyURL:  proxy,
+			wantMTLS:  false,
+			wantProxy: false,
+			wantInsec: true,
+		},
+		{
+			name:        "https endpoint without mtls config",
+			endpoint:    "https://relay.example.com",
+			wantMTLS:    false,
+			wantProxy:   false,
+			wantInsec:   false,
+			wantTLSFlag: true,
+		},
+		{
+			name:      "cleartext endpoint, nothing extra",
+			endpoint:  "localhost:4317",
+			wantInsec: true,
+		},
+		{
+			name:        "https endpoint with path",
+			endpoint:    "https://otel.example.com/v1/logs",
+			tlsConfig:   mtls,
+			wantMTLS:    true,
+			wantHost:    "otel.example.com",
+			wantPath:    "/v1/logs",
+			wantTLSFlag: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := planOTLPTransport(tt.endpoint, tt.tlsConfig, tt.proxyURL)
+			if got := plan.UseMTLS(); got != tt.wantMTLS {
+				t.Errorf("UseMTLS() = %v, want %v", got, tt.wantMTLS)
+			}
+			if got := plan.UseProxy(); got != tt.wantProxy {
+				t.Errorf("UseProxy() = %v, want %v", got, tt.wantProxy)
+			}
+			if got := plan.UseInsecure(); got != tt.wantInsec {
+				t.Errorf("UseInsecure() = %v, want %v", got, tt.wantInsec)
+			}
+			if tt.wantHost != "" && plan.Host != tt.wantHost {
+				t.Errorf("Host = %q, want %q", plan.Host, tt.wantHost)
+			}
+			if tt.wantPath != "" && plan.Path != tt.wantPath {
+				t.Errorf("Path = %q, want %q", plan.Path, tt.wantPath)
+			}
+			if plan.TLS != tt.wantTLSFlag {
+				t.Errorf("TLS = %v, want %v", plan.TLS, tt.wantTLSFlag)
+			}
+		})
+	}
 }

@@ -49,23 +49,20 @@ func InitTracing(
 	}
 
 	if otlpEndpoint != "" {
+		transport := planOTLPTransport(otlpEndpoint, tlsConfig, proxyURL)
 		slog.InfoContext(ctx, "initializing OTLP tracing export",
-			"otlp_endpoint", otlpEndpoint,
-			"protocol", protocol,
-			"service_name", serviceName,
-			"env", envName,
-			"mtls", tlsConfig != nil,
-			"proxy", proxyURL != nil)
+			append([]any{
+				"otlp_endpoint", otlpEndpoint,
+				"protocol", protocol,
+				"service_name", serviceName,
+				"env", envName,
+			}, transport.LogFields()...)...)
 
 		var exporter sdktrace.SpanExporter
 		if IsGRPCProtocol(protocol) {
-			exporter, err = newGRPCTraceExporter(
-				ctx, otlpEndpoint, tlsConfig, proxyURL,
-			)
+			exporter, err = newGRPCTraceExporter(ctx, transport)
 		} else {
-			exporter, err = newHTTPTraceExporter(
-				ctx, otlpEndpoint, tlsConfig, proxyURL,
-			)
+			exporter, err = newHTTPTraceExporter(ctx, transport)
 		}
 		if err != nil {
 			slog.ErrorContext(ctx,
@@ -107,32 +104,25 @@ func InitTracing(
 }
 
 func newGRPCTraceExporter(
-	ctx context.Context, endpoint string,
-	tlsConfig *tls.Config, proxyURL *url.URL,
+	ctx context.Context, t otlpTransport,
 ) (sdktrace.SpanExporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
-	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
-	slog.InfoContext(ctx, "creating gRPC trace exporter",
-		"host", ep.Host, "tls", ep.TLS,
-		"mtls", tlsConfig != nil, "proxy", useProxy)
+	slog.InfoContext(ctx, "creating gRPC trace exporter", t.LogFields()...)
 
-	opts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(ep.Host),
-	}
+	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(t.Host)}
 	switch {
-	case tlsConfig != nil && ep.TLS:
+	case t.UseMTLS():
 		opts = append(opts,
 			otlptracegrpc.WithTLSCredentials(
-				credentials.NewTLS(tlsConfig),
+				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case !ep.TLS:
+	case t.UseInsecure():
 		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
-	if useProxy {
+	if t.UseProxy() {
 		opts = append(opts,
 			otlptracegrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(proxyURL)),
+				grpc.WithContextDialer(httpConnectDialer(t.ProxyURL)),
 			),
 		)
 	}
@@ -141,38 +131,29 @@ func newGRPCTraceExporter(
 }
 
 func newHTTPTraceExporter(
-	ctx context.Context, endpoint string,
-	tlsConfig *tls.Config, proxyURL *url.URL,
+	ctx context.Context, t otlpTransport,
 ) (sdktrace.SpanExporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
-	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
-	slog.InfoContext(ctx, "creating HTTP trace exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil, "proxy", useProxy)
+	slog.InfoContext(ctx, "creating HTTP trace exporter", t.LogFields()...)
 
-	opts := []otlptracehttp.Option{
-		otlptracehttp.WithEndpoint(ep.Host),
-	}
-	if ep.Path != "" {
-		opts = append(opts,
-			otlptracehttp.WithURLPath(ep.Path),
-		)
+	opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(t.Host)}
+	if t.Path != "" {
+		opts = append(opts, otlptracehttp.WithURLPath(t.Path))
 	}
 	switch {
-	case tlsConfig != nil && ep.TLS:
+	case t.UseMTLS():
 		opts = append(opts,
-			otlptracehttp.WithTLSClientConfig(tlsConfig),
+			otlptracehttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	case ep.TLS:
+	case t.TLS:
 		opts = append(opts,
 			otlptracehttp.WithTLSClientConfig(InsecureTLS()),
 		)
 	default:
 		opts = append(opts, otlptracehttp.WithInsecure())
 	}
-	if useProxy {
+	if t.UseProxy() {
 		opts = append(opts,
-			otlptracehttp.WithProxy(http.ProxyURL(proxyURL)),
+			otlptracehttp.WithProxy(http.ProxyURL(t.ProxyURL)),
 		)
 	}
 
