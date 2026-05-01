@@ -51,12 +51,12 @@ func InitTracing(
 	if otlpEndpoint != "" {
 		transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
 		slog.InfoContext(ctx, "initializing OTLP tracing export",
-			append([]any{
-				"otlp_endpoint", otlpEndpoint,
-				"protocol", protocol,
-				"service_name", serviceName,
-				"env", envName,
-			}, transport.LogFields()...)...)
+			"otlp_endpoint", otlpEndpoint,
+			"protocol", protocol,
+			"service_name", serviceName,
+			"env", envName,
+			slog.Group("transport", transport.LogFields()...),
+		)
 
 		var exporter sdktrace.SpanExporter
 		if IsGRPCProtocol(protocol) {
@@ -106,7 +106,8 @@ func InitTracing(
 func newGRPCTraceExporter(
 	ctx context.Context, t otlpTransport,
 ) (sdktrace.SpanExporter, error) {
-	slog.InfoContext(ctx, "creating gRPC trace exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating gRPC trace exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(t.Host)}
 	switch {
@@ -133,7 +134,8 @@ func newGRPCTraceExporter(
 func newHTTPTraceExporter(
 	ctx context.Context, t otlpTransport,
 ) (sdktrace.SpanExporter, error) {
-	slog.InfoContext(ctx, "creating HTTP trace exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating HTTP trace exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(t.Host)}
 	if t.Path != "" {

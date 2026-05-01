@@ -51,12 +51,12 @@ func InitLogging(
 
 	transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP log export",
-		append([]any{
-			"otlp_endpoint", otlpEndpoint,
-			"protocol", protocol,
-			"service_name", serviceName,
-			"env", envName,
-		}, transport.LogFields()...)...)
+		"otlp_endpoint", otlpEndpoint,
+		"protocol", protocol,
+		"service_name", serviceName,
+		"env", envName,
+		slog.Group("transport", transport.LogFields()...),
+	)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -114,7 +114,8 @@ func InitLogging(
 func newGRPCLogExporter(
 	ctx context.Context, t otlpTransport,
 ) (sdklog.Exporter, error) {
-	slog.InfoContext(ctx, "creating gRPC log exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating gRPC log exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(t.Host)}
 	switch {
@@ -141,7 +142,8 @@ func newGRPCLogExporter(
 func newHTTPLogExporter(
 	ctx context.Context, t otlpTransport,
 ) (sdklog.Exporter, error) {
-	slog.InfoContext(ctx, "creating HTTP log exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating HTTP log exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlploghttp.Option{otlploghttp.WithEndpoint(t.Host)}
 	if t.Path != "" {

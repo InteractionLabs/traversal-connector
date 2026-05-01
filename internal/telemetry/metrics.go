@@ -45,12 +45,12 @@ func InitMetrics(
 
 	transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP metrics export",
-		append([]any{
-			"otlp_endpoint", otlpEndpoint,
-			"protocol", protocol,
-			"service_name", serviceName,
-			"env", envName,
-		}, transport.LogFields()...)...)
+		"otlp_endpoint", otlpEndpoint,
+		"protocol", protocol,
+		"service_name", serviceName,
+		"env", envName,
+		slog.Group("transport", transport.LogFields()...),
+	)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -103,7 +103,8 @@ func InitMetrics(
 func newGRPCMetricsExporter(
 	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	slog.InfoContext(ctx, "creating gRPC metrics exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating gRPC metrics exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(t.Host)}
 	switch {
@@ -130,7 +131,8 @@ func newGRPCMetricsExporter(
 func newHTTPMetricsExporter(
 	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	slog.InfoContext(ctx, "creating HTTP metrics exporter", t.LogFields()...)
+	slog.InfoContext(ctx, "creating HTTP metrics exporter",
+		slog.Group("transport", t.LogFields()...))
 
 	opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(t.Host)}
 	if t.Path != "" {
