@@ -28,7 +28,7 @@ const connectivityTestTimeout = 10 * time.Second
 //   - Direct TLS dial (insecure — mirrors grpcurl -insecure)
 //   - Direct TLS dial (secure  — full cert verification)
 //
-// When InternetProxyURL is set, three additional proxy-specific tests run first:
+// When EgressProxyURL is set, three additional proxy-specific tests run first:
 //  1. Proxy TCP reachability  — plain TCP dial to the proxy
 //  2. Manual HTTP CONNECT + TLS — hand-rolled CONNECT tunnel, then TLS
 //  3. Go http.Transport + Proxy — uses Go's built-in proxy support
@@ -51,29 +51,29 @@ func TestConnectivity(cfg *config.Config) error {
 	}
 
 	// --- proxy ---
-	var internetProxyURL *url.URL
-	if cfg.InternetProxyURL != nil {
-		internetProxyURL, err = url.Parse(*cfg.InternetProxyURL)
+	var egressProxyURL *url.URL
+	if cfg.EgressProxyURL != nil {
+		egressProxyURL, err = url.Parse(*cfg.EgressProxyURL)
 		if err != nil {
 			slog.Error(
-				"connectivity test: invalid INTERNET_PROXY_URL, skipping proxy tests",
-				"internet_proxy_url", *cfg.InternetProxyURL,
+				"connectivity test: invalid EGRESS_PROXY_URL, skipping proxy tests",
+				"egress_proxy_url", *cfg.EgressProxyURL,
 				"error", err,
 			)
-			internetProxyURL = nil
+			egressProxyURL = nil
 		}
 	}
 
 	// ---------------------------------------------------------------
-	// Proxy-specific tests (only when InternetProxyURL is set)
+	// Proxy-specific tests (only when EgressProxyURL is set)
 	// ---------------------------------------------------------------
-	if internetProxyURL != nil {
-		testProxyTCPReachability(internetProxyURL)
+	if egressProxyURL != nil {
+		testProxyTCPReachability(egressProxyURL)
 		testManualCONNECT(
-			addr, internetProxyURL, clientCerts, caPool,
+			addr, egressProxyURL, clientCerts, caPool,
 		)
 		testHTTPTransportViaProxy(
-			cfg.TraversalControllerURL, addr, internetProxyURL,
+			cfg.TraversalControllerURL, addr, egressProxyURL,
 			clientCerts, caPool,
 		)
 	}
@@ -223,8 +223,8 @@ func logTLSState(label, addr string, state tls.ConnectionState) {
 // Test 1: Proxy TCP reachability
 // ---------------------------------------------------------------------------
 
-func testProxyTCPReachability(internetProxyURL *url.URL) {
-	proxyAddr := proxyHostPort(internetProxyURL)
+func testProxyTCPReachability(egressProxyURL *url.URL) {
+	proxyAddr := proxyHostPort(egressProxyURL)
 	slog.Info(
 		"connectivity test [proxy-tcp]: dialing proxy",
 		"proxy_address", proxyAddr,
@@ -263,12 +263,12 @@ func testProxyTCPReachability(internetProxyURL *url.URL) {
 
 func testManualCONNECT(
 	targetAddr string,
-	internetProxyURL *url.URL,
+	egressProxyURL *url.URL,
 	clientCerts []tls.Certificate,
 	caPool *x509.CertPool,
 ) {
 	label := "proxy-manual-connect"
-	proxyAddr := proxyHostPort(internetProxyURL)
+	proxyAddr := proxyHostPort(egressProxyURL)
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"proxy_address", proxyAddr,
@@ -436,7 +436,7 @@ func testManualCONNECT(
 func testHTTPTransportViaProxy(
 	controllerUrl string,
 	targetAddr string,
-	internetProxyURL *url.URL,
+	egressProxyURL *url.URL,
 	clientCerts []tls.Certificate,
 	caPool *x509.CertPool,
 ) {
@@ -444,14 +444,14 @@ func testHTTPTransportViaProxy(
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"traversal_controller_url", controllerUrl,
-		"internet_proxy_url", internetProxyURL.String(),
+		"egress_proxy_url", egressProxyURL.String(),
 		"target_address", targetAddr,
 	)
 
 	//nolint:gosec // InsecureSkipVerify intentional for diagnostics.
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
-		Proxy:             http.ProxyURL(internetProxyURL),
+		Proxy:             http.ProxyURL(egressProxyURL),
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 			Certificates:       clientCerts,
@@ -475,7 +475,7 @@ func testHTTPTransportViaProxy(
 			label,
 		),
 		"url", reqURL,
-		"proxy", internetProxyURL.String(),
+		"proxy", egressProxyURL.String(),
 	)
 
 	start := time.Now()
@@ -490,7 +490,7 @@ func testHTTPTransportViaProxy(
 				label,
 			),
 			"url", reqURL,
-			"proxy", internetProxyURL.String(),
+			"proxy", egressProxyURL.String(),
 			"latency", elapsed.String(),
 			"error", err,
 		)
@@ -509,7 +509,7 @@ func testHTTPTransportViaProxy(
 			label,
 		),
 		"url", reqURL,
-		"proxy", internetProxyURL.String(),
+		"proxy", egressProxyURL.String(),
 		"latency", elapsed.String(),
 		"status", resp.Status,
 		"status_code", resp.StatusCode,

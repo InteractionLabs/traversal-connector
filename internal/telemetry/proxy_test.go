@@ -55,7 +55,7 @@ func TestHTTPConnectDialer_Success(t *testing.T) {
 	ln, upstreamCh := fakeConnectProxy(t)
 	defer ln.Close()
 
-	internetProxyURL, err := url.Parse("http://" + ln.Addr().String())
+	egressProxyURL, err := url.Parse("http://" + ln.Addr().String())
 	if err != nil {
 		t.Fatalf("parse proxy URL: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestHTTPConnectDialer_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	dialer := httpConnectDialer(internetProxyURL)
+	dialer := httpConnectDialer(egressProxyURL)
 	clientConn, err := dialer(ctx, "example.com:443")
 	if err != nil {
 		t.Fatalf("dialer error: %v", err)
@@ -106,12 +106,12 @@ func TestHTTPConnectDialer_ProxyRejects(t *testing.T) {
 		_ = conn.Close()
 	}()
 
-	internetProxyURL, _ := url.Parse("http://" + ln.Addr().String())
+	egressProxyURL, _ := url.Parse("http://" + ln.Addr().String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if _, err := httpConnectDialer(internetProxyURL)(ctx, "example.com:443"); err == nil {
+	if _, err := httpConnectDialer(egressProxyURL)(ctx, "example.com:443"); err == nil {
 		t.Fatal("expected error on proxy rejection, got nil")
 	} else if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected 403 in error, got: %v", err)

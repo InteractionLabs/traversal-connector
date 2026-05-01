@@ -195,27 +195,27 @@ func TestPlanOTLPTransport(t *testing.T) {
 	proxy, _ := url.Parse("http://proxy.example.com:3128")
 
 	tests := []struct {
-		name             string
-		endpoint         string
-		tlsConfig        *tls.Config
-		internetProxyURL *url.URL
-		wantMTLS         bool
-		wantProxy        bool
-		wantInsec        bool
-		wantHost         string
-		wantPath         string
-		wantTLSFlag      bool
+		name           string
+		endpoint       string
+		tlsConfig      *tls.Config
+		egressProxyURL *url.URL
+		wantMTLS       bool
+		wantProxy      bool
+		wantInsec      bool
+		wantHost       string
+		wantPath       string
+		wantTLSFlag    bool
 	}{
 		{
-			name:             "mtls https endpoint with proxy",
-			endpoint:         "https://relay.example.com:443",
-			tlsConfig:        mtls,
-			internetProxyURL: proxy,
-			wantMTLS:         true,
-			wantProxy:        true,
-			wantInsec:        false,
-			wantHost:         "relay.example.com:443",
-			wantTLSFlag:      true,
+			name:           "mtls https endpoint with proxy",
+			endpoint:       "https://relay.example.com:443",
+			tlsConfig:      mtls,
+			egressProxyURL: proxy,
+			wantMTLS:       true,
+			wantProxy:      true,
+			wantInsec:      false,
+			wantHost:       "relay.example.com:443",
+			wantTLSFlag:    true,
 		},
 		{
 			name:        "mtls https endpoint without proxy",
@@ -227,13 +227,13 @@ func TestPlanOTLPTransport(t *testing.T) {
 			wantTLSFlag: true,
 		},
 		{
-			name:             "mtls config but cleartext endpoint — no mtls, no proxy",
-			endpoint:         "http://localhost:4317",
-			tlsConfig:        mtls,
-			internetProxyURL: proxy,
-			wantMTLS:         false,
-			wantProxy:        false,
-			wantInsec:        true,
+			name:           "mtls config but cleartext endpoint — no mtls, no proxy",
+			endpoint:       "http://localhost:4317",
+			tlsConfig:      mtls,
+			egressProxyURL: proxy,
+			wantMTLS:       false,
+			wantProxy:      false,
+			wantInsec:      true,
 		},
 		{
 			name:        "https endpoint without mtls config",
@@ -261,7 +261,7 @@ func TestPlanOTLPTransport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := planOTLPTransport(tt.endpoint, tt.tlsConfig, tt.internetProxyURL)
+			plan := planOTLPTransport(tt.endpoint, tt.tlsConfig, tt.egressProxyURL)
 			if got := plan.UseMTLS(); got != tt.wantMTLS {
 				t.Errorf("UseMTLS() = %v, want %v", got, tt.wantMTLS)
 			}

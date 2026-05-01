@@ -31,13 +31,13 @@ import (
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
 //
-// When internetProxyURL is non-nil and the endpoint is TLS, exporter traffic
+// When egressProxyURL is non-nil and the endpoint is TLS, exporter traffic
 // is routed through the given HTTP forward proxy.
 func InitLogging(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
-	internetProxyURL *url.URL,
+	egressProxyURL *url.URL,
 ) (*slog.Logger, func(context.Context) error, error) {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
@@ -49,7 +49,7 @@ func InitLogging(
 		return slog.New(jsonHandler), nil, nil
 	}
 
-	transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP log export",
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
@@ -131,7 +131,7 @@ func newGRPCLogExporter(
 	if t.UseProxy() {
 		opts = append(opts,
 			otlploggrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(t.InternetProxyURL)),
+				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
 			),
 		)
 	}
@@ -163,7 +163,7 @@ func newHTTPLogExporter(
 	}
 	if t.UseProxy() {
 		opts = append(opts,
-			otlploghttp.WithProxy(http.ProxyURL(t.InternetProxyURL)),
+			otlploghttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
 		)
 	}
 

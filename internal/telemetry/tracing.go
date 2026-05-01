@@ -27,14 +27,14 @@ import (
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
 //
-// When internetProxyURL is non-nil and the endpoint is TLS, exporter traffic
+// When egressProxyURL is non-nil and the endpoint is TLS, exporter traffic
 // is routed through the given HTTP forward proxy via CONNECT (gRPC) or
 // http.ProxyURL (HTTP). The proxy is ignored for cleartext endpoints.
 func InitTracing(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
-	internetProxyURL *url.URL,
+	egressProxyURL *url.URL,
 ) (func(context.Context) error, error) {
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -49,7 +49,7 @@ func InitTracing(
 	}
 
 	if otlpEndpoint != "" {
-		transport := planOTLPTransport(otlpEndpoint, tlsConfig, internetProxyURL)
+		transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
 		slog.InfoContext(ctx, "initializing OTLP tracing export",
 			"otlp_endpoint", otlpEndpoint,
 			"protocol", protocol,
@@ -123,7 +123,7 @@ func newGRPCTraceExporter(
 	if t.UseProxy() {
 		opts = append(opts,
 			otlptracegrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(t.InternetProxyURL)),
+				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
 			),
 		)
 	}
@@ -155,7 +155,7 @@ func newHTTPTraceExporter(
 	}
 	if t.UseProxy() {
 		opts = append(opts,
-			otlptracehttp.WithProxy(http.ProxyURL(t.InternetProxyURL)),
+			otlptracehttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
 		)
 	}
 

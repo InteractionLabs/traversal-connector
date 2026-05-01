@@ -45,7 +45,7 @@ func main() {
 	// Forward proxy for OTLP egress, applied alongside otlpTLS. Only used
 	// by the exporters when both mTLS is configured and the OTLP endpoint
 	// is TLS — same egress path as the bidi controller tunnel.
-	otlpInternetProxyURL := parseOTLPInternetProxyURL(cfg.InternetProxyURL)
+	otlpEgressProxyURL := parseOTLPEgressProxyURL(cfg.EgressProxyURL)
 
 	// --- Logging ---
 	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
@@ -60,7 +60,7 @@ func main() {
 			cfg.OTLPProtocol,
 			cfg.EnvName,
 			otlpTLS,
-			otlpInternetProxyURL,
+			otlpEgressProxyURL,
 		)
 		if logErr != nil {
 			slog.Error("failed to initialize OTLP log export",
@@ -99,7 +99,7 @@ func main() {
 		cfg.OTLPProtocol,
 		cfg.EnvName,
 		otlpTLS,
-		otlpInternetProxyURL,
+		otlpEgressProxyURL,
 	)
 	if err != nil {
 		slog.Error("failed to initialize metrics", "err", err)
@@ -132,7 +132,7 @@ func main() {
 		cfg.OTLPProtocol,
 		cfg.EnvName,
 		otlpTLS,
-		otlpInternetProxyURL,
+		otlpEgressProxyURL,
 	)
 	if err != nil {
 		slog.Error("failed to initialize tracing", "err", err)
@@ -243,18 +243,18 @@ func buildOTLPTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	}, nil
 }
 
-// parseOTLPInternetProxyURL parses cfg.InternetProxyURL for use by the OTLP
+// parseOTLPEgressProxyURL parses cfg.EgressProxyURL for use by the OTLP
 // exporters. An invalid value is logged and ignored — the exporters then
 // dial directly. A nil input (proxy not configured) returns nil.
-func parseOTLPInternetProxyURL(raw *string) *url.URL {
+func parseOTLPEgressProxyURL(raw *string) *url.URL {
 	if raw == nil {
 		return nil
 	}
 	parsed, err := url.Parse(*raw)
 	if err != nil {
 		slog.Error(
-			"invalid INTERNET_PROXY_URL for OTLP, exporters will dial direct",
-			"internet_proxy_url", *raw, "error", err,
+			"invalid EGRESS_PROXY_URL for OTLP, exporters will dial direct",
+			"egress_proxy_url", *raw, "error", err,
 		)
 		return nil
 	}
