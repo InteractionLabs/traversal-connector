@@ -208,18 +208,18 @@ func TestPlanOTLPTransport(t *testing.T) {
 	}{
 		{
 			name:           "mtls https endpoint with proxy",
-			endpoint:       "https://relay.example.com:443",
+			endpoint:       "https://example.traversal.com:443",
 			tlsConfig:      mtls,
 			egressProxyURL: proxy,
 			wantMTLS:       true,
 			wantProxy:      true,
 			wantInsec:      false,
-			wantHost:       "relay.example.com:443",
+			wantHost:       "example.traversal.com:443",
 			wantTLSFlag:    true,
 		},
 		{
 			name:        "mtls https endpoint without proxy",
-			endpoint:    "https://relay.example.com:443",
+			endpoint:    "https://example.traversal.com:443",
 			tlsConfig:   mtls,
 			wantMTLS:    true,
 			wantProxy:   false,
@@ -237,7 +237,7 @@ func TestPlanOTLPTransport(t *testing.T) {
 		},
 		{
 			name:        "https endpoint without mtls config",
-			endpoint:    "https://relay.example.com",
+			endpoint:    "https://example.traversal.com",
 			wantMTLS:    false,
 			wantProxy:   false,
 			wantInsec:   false,
