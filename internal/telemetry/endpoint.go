@@ -88,13 +88,21 @@ type otlpTransport struct {
 }
 
 // planOTLPTransport parses the raw endpoint and merges it with the
-// caller's mTLS and proxy preferences.
+// caller's mTLS and proxy preferences. mTLS material and the egress
+// proxy are silently dropped for cleartext endpoints — that way
+// downstream code can decide what to do by checking field presence
+// alone (TLSConfig != nil ⇒ mTLS; EgressProxyURL != nil ⇒ proxy)
+// without having to also gate on the scheme.
 func planOTLPTransport(
 	rawEndpoint string,
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
 ) otlpTransport {
 	ep := ParseOTLPEndpoint(rawEndpoint)
+	if !ep.TLS {
+		tlsConfig = nil
+		egressProxyURL = nil
+	}
 	return otlpTransport{
 		Host:           ep.Host,
 		Path:           ep.Path,
@@ -104,25 +112,24 @@ func planOTLPTransport(
 	}
 }
 
-// UseMTLS reports whether the exporter should authenticate with the
-// configured client cert/key — needs both an mTLS config and a TLS
-// endpoint.
+// UseMTLS reports whether the exporter should authenticate with a
+// client cert/key. planOTLPTransport guarantees TLSConfig is nil for
+// cleartext endpoints, so presence of TLSConfig is sufficient.
 func (t otlpTransport) UseMTLS() bool {
-	return t.TLSConfig != nil && t.TLS
+	return t.TLSConfig != nil
 }
 
 // UseInsecure reports whether the gRPC exporter should be created with
-// WithInsecure — i.e. the endpoint is plain TCP. The HTTP exporter has
-// its own equivalent (WithInsecure when no scheme).
+// WithInsecure — i.e. the endpoint is plain TCP.
 func (t otlpTransport) UseInsecure() bool {
 	return !t.TLS
 }
 
 // UseProxy reports whether the exporter should traverse the forward
-// proxy. We only proxy mTLS endpoints (i.e. real SaaS egress) — local
-// cleartext OTLP collectors don't go through the corporate proxy.
+// proxy. planOTLPTransport drops the proxy for cleartext endpoints, so
+// presence of EgressProxyURL is sufficient.
 func (t otlpTransport) UseProxy() bool {
-	return t.UseMTLS() && t.EgressProxyURL != nil
+	return t.EgressProxyURL != nil
 }
 
 // LogFields returns the standard structured fields used in exporter
