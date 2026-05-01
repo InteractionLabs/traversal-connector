@@ -194,7 +194,7 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 
 	cfg := &config.Config{
 		TraversalControllerURL: "https://controller.example.com:9080",
-		ProxyURL:               ptrTo("http://proxy.example.com:3128"),
+		InternetProxyURL:       ptrTo("http://proxy.example.com:3128"),
 		TLSCert:                &certPEM,
 		TLSKey:                 &keyPEM,
 		TLSServerName:          "controller.example.com",
@@ -263,7 +263,7 @@ func TestNewTransport_HTTPSWithoutCertsReturnsError(t *testing.T) {
 func TestNewTransport_InvalidProxyURL(t *testing.T) {
 	cfg := &config.Config{
 		TraversalControllerURL: "http://localhost:9080",
-		ProxyURL:               ptrTo("://bad-url"),
+		InternetProxyURL:       ptrTo("://bad-url"),
 	}
 
 	transport, err := newTransport(cfg)

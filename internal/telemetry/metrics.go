@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -11,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -24,10 +27,14 @@ import (
 // (e.g. for mTLS to the OTLP endpoint). When nil, the default
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
+//
+// When proxyURL is non-nil and the endpoint is TLS, exporter traffic is
+// routed through the given HTTP forward proxy.
 func InitMetrics(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
+	proxyURL *url.URL,
 ) (func(context.Context) error, error) {
 	if otlpEndpoint == "" {
 		slog.InfoContext(ctx,
@@ -41,7 +48,8 @@ func InitMetrics(
 		"protocol", protocol,
 		"service_name", serviceName,
 		"env", envName,
-		"mtls", tlsConfig != nil)
+		"mtls", tlsConfig != nil,
+		"proxy", proxyURL != nil)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -53,11 +61,11 @@ func InitMetrics(
 	var exporter metric.Exporter
 	if IsGRPCProtocol(protocol) {
 		exporter, err = newGRPCMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig,
+			ctx, otlpEndpoint, tlsConfig, proxyURL,
 		)
 	} else {
 		exporter, err = newHTTPMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig,
+			ctx, otlpEndpoint, tlsConfig, proxyURL,
 		)
 	}
 	if err != nil {
@@ -96,11 +104,14 @@ func InitMetrics(
 }
 
 func newGRPCMetricsExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, endpoint string,
+	tlsConfig *tls.Config, proxyURL *url.URL,
 ) (metric.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
+	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
 	slog.InfoContext(ctx, "creating gRPC metrics exporter",
-		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
+		"host", ep.Host, "tls", ep.TLS,
+		"mtls", tlsConfig != nil, "proxy", useProxy)
 
 	opts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(ep.Host),
@@ -115,17 +126,26 @@ func newGRPCMetricsExporter(
 	case !ep.TLS:
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
+	if useProxy {
+		opts = append(opts,
+			otlpmetricgrpc.WithDialOption(
+				grpc.WithContextDialer(httpConnectDialer(proxyURL)),
+			),
+		)
+	}
 
 	return otlpmetricgrpc.New(ctx, opts...)
 }
 
 func newHTTPMetricsExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, endpoint string,
+	tlsConfig *tls.Config, proxyURL *url.URL,
 ) (metric.Exporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
+	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
 	slog.InfoContext(ctx, "creating HTTP metrics exporter",
 		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil)
+		"mtls", tlsConfig != nil, "proxy", useProxy)
 
 	opts := []otlpmetrichttp.Option{
 		otlpmetrichttp.WithEndpoint(ep.Host),
@@ -146,6 +166,11 @@ func newHTTPMetricsExporter(
 		)
 	default:
 		opts = append(opts, otlpmetrichttp.WithInsecure())
+	}
+	if useProxy {
+		opts = append(opts,
+			otlpmetrichttp.WithProxy(http.ProxyURL(proxyURL)),
+		)
 	}
 
 	return otlpmetrichttp.New(ctx, opts...)

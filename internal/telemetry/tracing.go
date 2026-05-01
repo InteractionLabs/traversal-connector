@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net/http"
+	"net/url"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -23,10 +26,15 @@ import (
 // (e.g. for mTLS to the OTLP endpoint). When nil, the default
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
+//
+// When proxyURL is non-nil and the endpoint is TLS, exporter traffic is
+// routed through the given HTTP forward proxy via CONNECT (gRPC) or
+// http.ProxyURL (HTTP). The proxy is ignored for cleartext endpoints.
 func InitTracing(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
+	proxyURL *url.URL,
 ) (func(context.Context) error, error) {
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -46,16 +54,17 @@ func InitTracing(
 			"protocol", protocol,
 			"service_name", serviceName,
 			"env", envName,
-			"mtls", tlsConfig != nil)
+			"mtls", tlsConfig != nil,
+			"proxy", proxyURL != nil)
 
 		var exporter sdktrace.SpanExporter
 		if IsGRPCProtocol(protocol) {
 			exporter, err = newGRPCTraceExporter(
-				ctx, otlpEndpoint, tlsConfig,
+				ctx, otlpEndpoint, tlsConfig, proxyURL,
 			)
 		} else {
 			exporter, err = newHTTPTraceExporter(
-				ctx, otlpEndpoint, tlsConfig,
+				ctx, otlpEndpoint, tlsConfig, proxyURL,
 			)
 		}
 		if err != nil {
@@ -98,11 +107,14 @@ func InitTracing(
 }
 
 func newGRPCTraceExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, endpoint string,
+	tlsConfig *tls.Config, proxyURL *url.URL,
 ) (sdktrace.SpanExporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
+	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
 	slog.InfoContext(ctx, "creating gRPC trace exporter",
-		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
+		"host", ep.Host, "tls", ep.TLS,
+		"mtls", tlsConfig != nil, "proxy", useProxy)
 
 	opts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(ep.Host),
@@ -117,17 +129,26 @@ func newGRPCTraceExporter(
 	case !ep.TLS:
 		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
+	if useProxy {
+		opts = append(opts,
+			otlptracegrpc.WithDialOption(
+				grpc.WithContextDialer(httpConnectDialer(proxyURL)),
+			),
+		)
+	}
 
 	return otlptracegrpc.New(ctx, opts...)
 }
 
 func newHTTPTraceExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, endpoint string,
+	tlsConfig *tls.Config, proxyURL *url.URL,
 ) (sdktrace.SpanExporter, error) {
 	ep := ParseOTLPEndpoint(endpoint)
+	useProxy := tlsConfig != nil && ep.TLS && proxyURL != nil
 	slog.InfoContext(ctx, "creating HTTP trace exporter",
 		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil)
+		"mtls", tlsConfig != nil, "proxy", useProxy)
 
 	opts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpoint(ep.Host),
@@ -148,6 +169,11 @@ func newHTTPTraceExporter(
 		)
 	default:
 		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+	if useProxy {
+		opts = append(opts,
+			otlptracehttp.WithProxy(http.ProxyURL(proxyURL)),
+		)
 	}
 
 	return otlptracehttp.New(ctx, opts...)

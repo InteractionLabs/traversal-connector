@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -41,6 +42,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Forward proxy for OTLP egress, applied alongside otlpTLS. Only used
+	// by the exporters when both mTLS is configured and the OTLP endpoint
+	// is TLS — same egress path as the bidi controller tunnel.
+	otlpProxyURL := parseOTLPProxyURL(cfg.InternetProxyURL)
+
 	// --- Logging ---
 	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
 	// Non-local              → stdout JSON
@@ -54,6 +60,7 @@ func main() {
 			cfg.OTLPProtocol,
 			cfg.EnvName,
 			otlpTLS,
+			otlpProxyURL,
 		)
 		if logErr != nil {
 			slog.Error("failed to initialize OTLP log export",
@@ -92,6 +99,7 @@ func main() {
 		cfg.OTLPProtocol,
 		cfg.EnvName,
 		otlpTLS,
+		otlpProxyURL,
 	)
 	if err != nil {
 		slog.Error("failed to initialize metrics", "err", err)
@@ -124,6 +132,7 @@ func main() {
 		cfg.OTLPProtocol,
 		cfg.EnvName,
 		otlpTLS,
+		otlpProxyURL,
 	)
 	if err != nil {
 		slog.Error("failed to initialize tracing", "err", err)
@@ -232,4 +241,22 @@ func buildOTLPTLSConfig(cfg *config.Config) (*tls.Config, error) {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}, nil
+}
+
+// parseOTLPProxyURL parses cfg.InternetProxyURL for use by the OTLP
+// exporters. An invalid value is logged and ignored — the exporters then
+// dial directly. A nil input (proxy not configured) returns nil.
+func parseOTLPProxyURL(raw *string) *url.URL {
+	if raw == nil {
+		return nil
+	}
+	parsed, err := url.Parse(*raw)
+	if err != nil {
+		slog.Error(
+			"invalid INTERNET_PROXY_URL for OTLP, exporters will dial direct",
+			"internet_proxy_url", *raw, "error", err,
+		)
+		return nil
+	}
+	return parsed
 }

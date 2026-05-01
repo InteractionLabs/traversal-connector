@@ -96,7 +96,7 @@ checked in.
 | `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
-| `PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. When unset, the connector talks h2c (HTTP/2 cleartext). |
+| `INTERNET_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. When unset, the connector dials its destinations directly (h2c for the controller; default OTLP transport for telemetry). |
 
 ### mTLS to the control plane
 

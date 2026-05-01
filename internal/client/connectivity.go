@@ -28,7 +28,7 @@ const connectivityTestTimeout = 10 * time.Second
 //   - Direct TLS dial (insecure — mirrors grpcurl -insecure)
 //   - Direct TLS dial (secure  — full cert verification)
 //
-// When ProxyURL is set, three additional proxy-specific tests run first:
+// When InternetProxyURL is set, three additional proxy-specific tests run first:
 //  1. Proxy TCP reachability  — plain TCP dial to the proxy
 //  2. Manual HTTP CONNECT + TLS — hand-rolled CONNECT tunnel, then TLS
 //  3. Go http.Transport + Proxy — uses Go's built-in proxy support
@@ -52,12 +52,12 @@ func TestConnectivity(cfg *config.Config) error {
 
 	// --- proxy ---
 	var proxyURL *url.URL
-	if cfg.ProxyURL != nil {
-		proxyURL, err = url.Parse(*cfg.ProxyURL)
+	if cfg.InternetProxyURL != nil {
+		proxyURL, err = url.Parse(*cfg.InternetProxyURL)
 		if err != nil {
 			slog.Error(
-				"connectivity test: invalid proxy URL, skipping proxy tests",
-				"proxy_url", *cfg.ProxyURL,
+				"connectivity test: invalid INTERNET_PROXY_URL, skipping proxy tests",
+				"internet_proxy_url", *cfg.InternetProxyURL,
 				"error", err,
 			)
 			proxyURL = nil
@@ -65,7 +65,7 @@ func TestConnectivity(cfg *config.Config) error {
 	}
 
 	// ---------------------------------------------------------------
-	// Proxy-specific tests (only when ProxyURL is set)
+	// Proxy-specific tests (only when InternetProxyURL is set)
 	// ---------------------------------------------------------------
 	if proxyURL != nil {
 		testProxyTCPReachability(proxyURL)

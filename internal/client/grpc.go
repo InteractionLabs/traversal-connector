@@ -83,7 +83,7 @@ func newTransport(cfg *config.Config) (http.RoundTripper, error) {
 	}
 
 	slog.Info("transport selected",
-		"scheme", "https", "mtls", true, "proxy", cfg.ProxyURL != nil)
+		"scheme", "https", "mtls", true, "proxy", cfg.InternetProxyURL != nil)
 	return newTLSTransport(cfg)
 }
 
@@ -120,16 +120,16 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 	}
 
 	var proxyURL *url.URL
-	if cfg.ProxyURL != nil {
+	if cfg.InternetProxyURL != nil {
 		var perr error
-		proxyURL, perr = url.Parse(*cfg.ProxyURL)
+		proxyURL, perr = url.Parse(*cfg.InternetProxyURL)
 		if perr != nil {
-			slog.Error("invalid proxy URL, proceeding with direct TLS connection",
-				"proxy_url", *cfg.ProxyURL, "error", perr)
+			slog.Error("invalid INTERNET_PROXY_URL, proceeding with direct TLS connection",
+				"internet_proxy_url", *cfg.InternetProxyURL, "error", perr)
 			proxyURL = nil
 		} else {
 			slog.Info("using forward proxy for controller connection",
-				"proxy_url", *cfg.ProxyURL)
+				"internet_proxy_url", *cfg.InternetProxyURL)
 		}
 	}
 
