@@ -83,7 +83,7 @@ func newTransport(cfg *config.Config) (http.RoundTripper, error) {
 	}
 
 	slog.Info("transport selected",
-		"scheme", "https", "mtls", true, "proxy", cfg.ProxyURL != nil)
+		"scheme", "https", "mtls", true, "proxy", cfg.EgressProxyURL != nil)
 	return newTLSTransport(cfg)
 }
 
@@ -119,25 +119,25 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 		}
 	}
 
-	var proxyURL *url.URL
-	if cfg.ProxyURL != nil {
+	var egressProxyURL *url.URL
+	if cfg.EgressProxyURL != nil {
 		var perr error
-		proxyURL, perr = url.Parse(*cfg.ProxyURL)
+		egressProxyURL, perr = url.Parse(*cfg.EgressProxyURL)
 		if perr != nil {
-			slog.Error("invalid proxy URL, proceeding with direct TLS connection",
-				"proxy_url", *cfg.ProxyURL, "error", perr)
-			proxyURL = nil
+			slog.Error("invalid EGRESS_PROXY_URL, proceeding with direct TLS connection",
+				"egress_proxy_url", *cfg.EgressProxyURL, "error", perr)
+			egressProxyURL = nil
 		} else {
 			slog.Info("using forward proxy for controller connection",
-				"proxy_url", *cfg.ProxyURL)
+				"egress_proxy_url", *cfg.EgressProxyURL)
 		}
 	}
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
 	}
-	if proxyURL != nil {
-		transport.Proxy = http.ProxyURL(proxyURL)
+	if egressProxyURL != nil {
+		transport.Proxy = http.ProxyURL(egressProxyURL)
 	}
 
 	h2Transport, h2Err := http2.ConfigureTransports(transport)

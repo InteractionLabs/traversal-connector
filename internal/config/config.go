@@ -59,12 +59,14 @@ type Config struct {
 	// MaxRequestBodySizeMB is the maximum size (in MB) allowed for HTTP
 	// request bodies sent upstream.
 	MaxRequestBodySizeMB int64
-	// ProxyURL is the optional HTTP forward proxy URL for connecting
-	// to the Traversal control plane (e.g. "http://proxy.example.com:3128").
-	// When set, the controller URL must use https:// (TLS) because
-	// HTTP/2 over a proxy requires TLS. When unset, the traversal connector
-	// connects directly using h2c (HTTP/2 cleartext).
-	ProxyURL *string
+	// EgressProxyURL is the optional HTTP forward proxy URL used for any
+	// connector-initiated egress to the Traversal SaaS — both the bidi
+	// control-plane tunnel and OTLP telemetry export. Read from
+	// EGRESS_PROXY_URL (e.g. "http://proxy.example.com:3128"). When set,
+	// the controller URL must use https:// because HTTP/2 over a proxy
+	// requires TLS. When unset, the connector dials its destinations
+	// directly (h2c for the controller; default OTLP transport for telemetry).
+	EgressProxyURL *string
 	// TLSCert is the optional client TLS certificate PEM content
 	// for mTLS to the Traversal control plane. Read from TLS_CERT_BASE64;
 	// may be provided as raw PEM or base64-encoded PEM.
@@ -163,7 +165,7 @@ func Load() (Config, error) {
 			"MAX_REQUEST_BODY_SIZE_MB",
 			defaultBodySizeMB,
 		),
-		ProxyURL:        env.GetEnvOptionalString("PROXY_URL"),
+		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
 		TLSCA:           decodeCertificate(env.GetEnvOptionalString("TLS_CA_BASE64")),

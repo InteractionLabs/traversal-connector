@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
@@ -11,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -24,10 +27,14 @@ import (
 // (e.g. for mTLS to the OTLP endpoint). When nil, the default
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
+//
+// When egressProxyURL is non-nil and the endpoint is TLS, exporter traffic
+// is routed through the given HTTP forward proxy.
 func InitMetrics(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
+	egressProxyURL *url.URL,
 ) (func(context.Context) error, error) {
 	if otlpEndpoint == "" {
 		slog.InfoContext(ctx,
@@ -36,12 +43,14 @@ func InitMetrics(
 		return nil, nil
 	}
 
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP metrics export",
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
 		"service_name", serviceName,
 		"env", envName,
-		"mtls", tlsConfig != nil)
+		slog.Group("transport", transport.LogFields()...),
+	)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -52,13 +61,9 @@ func InitMetrics(
 
 	var exporter metric.Exporter
 	if IsGRPCProtocol(protocol) {
-		exporter, err = newGRPCMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig,
-		)
+		exporter, err = newGRPCMetricsExporter(ctx, transport)
 	} else {
-		exporter, err = newHTTPMetricsExporter(
-			ctx, otlpEndpoint, tlsConfig,
-		)
+		exporter, err = newHTTPMetricsExporter(ctx, transport)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx,
@@ -96,56 +101,53 @@ func InitMetrics(
 }
 
 func newGRPCMetricsExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating gRPC metrics exporter",
-		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
+		slog.Group("transport", t.LogFields()...))
 
-	opts := []otlpmetricgrpc.Option{
-		otlpmetricgrpc.WithEndpoint(ep.Host),
-	}
-	switch {
-	case tlsConfig != nil && ep.TLS:
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(t.Host)}
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlpmetricgrpc.WithTLSCredentials(
-				credentials.NewTLS(tlsConfig),
+				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case !ep.TLS:
+	} else {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+	if t.UseProxy() {
+		opts = append(opts,
+			otlpmetricgrpc.WithDialOption(
+				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
+			),
+		)
 	}
 
 	return otlpmetricgrpc.New(ctx, opts...)
 }
 
 func newHTTPMetricsExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, t otlpTransport,
 ) (metric.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating HTTP metrics exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil)
+		slog.Group("transport", t.LogFields()...))
 
-	opts := []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpoint(ep.Host),
+	opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(t.Host)}
+	if t.Path != "" {
+		opts = append(opts, otlpmetrichttp.WithURLPath(t.Path))
 	}
-	if ep.Path != "" {
+	if t.UseMTLS() {
 		opts = append(opts,
-			otlpmetrichttp.WithURLPath(ep.Path),
+			otlpmetrichttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	}
-	switch {
-	case tlsConfig != nil && ep.TLS:
-		opts = append(opts,
-			otlpmetrichttp.WithTLSClientConfig(tlsConfig),
-		)
-	case ep.TLS:
-		opts = append(opts,
-			otlpmetrichttp.WithTLSClientConfig(InsecureTLS()),
-		)
-	default:
+	} else {
 		opts = append(opts, otlpmetrichttp.WithInsecure())
+	}
+	if t.UseProxy() {
+		opts = append(opts,
+			otlpmetrichttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
+		)
 	}
 
 	return otlpmetrichttp.New(ctx, opts...)

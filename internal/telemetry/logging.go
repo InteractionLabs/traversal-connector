@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -11,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -27,10 +30,14 @@ import (
 // (e.g. for mTLS to the OTLP endpoint). When nil, the default
 // transport is used (insecure for non-TLS endpoints, system roots
 // otherwise).
+//
+// When egressProxyURL is non-nil and the endpoint is TLS, exporter traffic
+// is routed through the given HTTP forward proxy.
 func InitLogging(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
+	egressProxyURL *url.URL,
 ) (*slog.Logger, func(context.Context) error, error) {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
@@ -42,12 +49,14 @@ func InitLogging(
 		return slog.New(jsonHandler), nil, nil
 	}
 
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
 	slog.InfoContext(ctx, "initializing OTLP log export",
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
 		"service_name", serviceName,
 		"env", envName,
-		"mtls", tlsConfig != nil)
+		slog.Group("transport", transport.LogFields()...),
+	)
 
 	res, err := NewResource(ctx, serviceName, envName)
 	if err != nil {
@@ -58,9 +67,9 @@ func InitLogging(
 
 	var exporter sdklog.Exporter
 	if IsGRPCProtocol(protocol) {
-		exporter, err = newGRPCLogExporter(ctx, otlpEndpoint, tlsConfig)
+		exporter, err = newGRPCLogExporter(ctx, transport)
 	} else {
-		exporter, err = newHTTPLogExporter(ctx, otlpEndpoint, tlsConfig)
+		exporter, err = newHTTPLogExporter(ctx, transport)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx,
@@ -103,54 +112,53 @@ func InitLogging(
 }
 
 func newGRPCLogExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, t otlpTransport,
 ) (sdklog.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating gRPC log exporter",
-		"host", ep.Host, "tls", ep.TLS, "mtls", tlsConfig != nil)
+		slog.Group("transport", t.LogFields()...))
 
-	opts := []otlploggrpc.Option{
-		otlploggrpc.WithEndpoint(ep.Host),
-	}
-	switch {
-	case tlsConfig != nil && ep.TLS:
+	opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(t.Host)}
+	if t.UseMTLS() {
 		opts = append(opts,
 			otlploggrpc.WithTLSCredentials(
-				credentials.NewTLS(tlsConfig),
+				credentials.NewTLS(t.TLSConfig),
 			),
 		)
-	case !ep.TLS:
+	} else {
 		opts = append(opts, otlploggrpc.WithInsecure())
+	}
+	if t.UseProxy() {
+		opts = append(opts,
+			otlploggrpc.WithDialOption(
+				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
+			),
+		)
 	}
 
 	return otlploggrpc.New(ctx, opts...)
 }
 
 func newHTTPLogExporter(
-	ctx context.Context, endpoint string, tlsConfig *tls.Config,
+	ctx context.Context, t otlpTransport,
 ) (sdklog.Exporter, error) {
-	ep := ParseOTLPEndpoint(endpoint)
 	slog.InfoContext(ctx, "creating HTTP log exporter",
-		"host", ep.Host, "path", ep.Path, "tls", ep.TLS,
-		"mtls", tlsConfig != nil)
+		slog.Group("transport", t.LogFields()...))
 
-	opts := []otlploghttp.Option{
-		otlploghttp.WithEndpoint(ep.Host),
+	opts := []otlploghttp.Option{otlploghttp.WithEndpoint(t.Host)}
+	if t.Path != "" {
+		opts = append(opts, otlploghttp.WithURLPath(t.Path))
 	}
-	if ep.Path != "" {
-		opts = append(opts, otlploghttp.WithURLPath(ep.Path))
-	}
-	switch {
-	case tlsConfig != nil && ep.TLS:
+	if t.UseMTLS() {
 		opts = append(opts,
-			otlploghttp.WithTLSClientConfig(tlsConfig),
+			otlploghttp.WithTLSClientConfig(t.TLSConfig),
 		)
-	case ep.TLS:
-		opts = append(opts,
-			otlploghttp.WithTLSClientConfig(InsecureTLS()),
-		)
-	default:
+	} else {
 		opts = append(opts, otlploghttp.WithInsecure())
+	}
+	if t.UseProxy() {
+		opts = append(opts,
+			otlploghttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
+		)
 	}
 
 	return otlploghttp.New(ctx, opts...)

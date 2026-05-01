@@ -194,7 +194,7 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 
 	cfg := &config.Config{
 		TraversalControllerURL: "https://controller.example.com:9080",
-		ProxyURL:               ptrTo("http://proxy.example.com:3128"),
+		EgressProxyURL:         ptrTo("http://proxy.example.com:3128"),
 		TLSCert:                &certPEM,
 		TLSKey:                 &keyPEM,
 		TLSServerName:          "controller.example.com",
@@ -235,14 +235,14 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 		"https://controller.example.com",
 		nil,
 	)
-	proxyURL, err := httpTransport.Proxy(proxyReq)
+	egressProxyURL, err := httpTransport.Proxy(proxyReq)
 	if err != nil {
 		t.Fatalf("proxy function returned error: %v", err)
 	}
-	if proxyURL == nil {
+	if egressProxyURL == nil {
 		t.Fatal("expected proxy URL to be set")
 	}
-	if diff := cmp.Diff("proxy.example.com:3128", proxyURL.Host); diff != "" {
+	if diff := cmp.Diff("proxy.example.com:3128", egressProxyURL.Host); diff != "" {
 		t.Errorf("proxy host mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -263,7 +263,7 @@ func TestNewTransport_HTTPSWithoutCertsReturnsError(t *testing.T) {
 func TestNewTransport_InvalidProxyURL(t *testing.T) {
 	cfg := &config.Config{
 		TraversalControllerURL: "http://localhost:9080",
-		ProxyURL:               ptrTo("://bad-url"),
+		EgressProxyURL:         ptrTo("://bad-url"),
 	}
 
 	transport, err := newTransport(cfg)
