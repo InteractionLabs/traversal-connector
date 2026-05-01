@@ -47,6 +47,55 @@ build:
 test:
     go test ./...
 
+# Tag and push a release. Usage: just release v0.4.0
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Version must look like vX.Y.Z (semver, no pre-release suffix).
+    if ! [[ "{{version}}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Version must match vX.Y.Z, got: {{version}}"
+        exit 1
+    fi
+
+    # Working tree must be clean: no staged, unstaged, or untracked changes.
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Working tree is dirty. Commit or stash changes before releasing."
+        git status --short
+        exit 1
+    fi
+
+    # Must be on main.
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$branch" != "main" ]; then
+        echo "Must be on main to release, currently on: $branch"
+        exit 1
+    fi
+
+    # Local HEAD must match origin/main exactly (no ahead/behind drift).
+    git fetch origin main --tags
+    local_sha=$(git rev-parse HEAD)
+    remote_sha=$(git rev-parse origin/main)
+    if [ "$local_sha" != "$remote_sha" ]; then
+        echo "Local main ($local_sha) does not match origin/main ($remote_sha)."
+        echo "Pull or push so they match before releasing."
+        exit 1
+    fi
+
+    # Tag must not already exist locally or on the remote.
+    if git rev-parse -q --verify "refs/tags/{{version}}" >/dev/null; then
+        echo "Tag {{version}} already exists locally."
+        exit 1
+    fi
+    if git ls-remote --exit-code --tags origin "refs/tags/{{version}}" >/dev/null 2>&1; then
+        echo "Tag {{version}} already exists on origin."
+        exit 1
+    fi
+
+    git tag -a "{{version}}" -m "Release {{version}}"
+    git push origin "refs/tags/{{version}}"
+    echo "Released {{version}}."
+
 # Check for unreachable functions
 deadcode:
     #!/usr/bin/env bash
