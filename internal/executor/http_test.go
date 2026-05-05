@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,17 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
+
+func assertKind(t *testing.T, err error, want ErrorKind) {
+	t.Helper()
+	var ue *UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %T: %v", err, err)
+	}
+	if ue.Kind != want {
+		t.Errorf("kind mismatch: want %d got %d (err=%v)", want, ue.Kind, err)
+	}
+}
 
 func newTestExecutor(t *testing.T, timeout time.Duration, maxBodyMB int64) *Executor {
 	t.Helper()
@@ -109,6 +121,7 @@ func TestExecute_InvalidURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindInvalidRequest)
 
 	if resp != nil {
 		t.Errorf("expected nil response, got %v", resp)
@@ -126,6 +139,7 @@ func TestExecute_EmptyURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindInvalidRequest)
 
 	if resp != nil {
 		t.Errorf("expected nil response, got %v", resp)
@@ -147,6 +161,7 @@ func TestExecute_BodySizeLimitExceeded(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindRequestTooLarge)
 
 	if !strings.Contains(err.Error(), "exceeds limit") {
 		t.Errorf("expected body size error message, got: %s", err)
@@ -194,6 +209,7 @@ func TestExecute_NetworkError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindUpstreamUnavailable)
 
 	if resp != nil {
 		t.Errorf("expected nil response, got %v", resp)
@@ -218,6 +234,46 @@ func TestExecute_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindUpstreamTimeout)
+
+	if resp != nil {
+		t.Errorf("expected nil response, got %v", resp)
+	}
+}
+
+// TestExecute_UpstreamAborted exercises the case where the upstream sends
+// response headers but closes the connection mid-body. This is the canonical
+// "broken pipe / aborted stream" condition that should surface as
+// KindUpstreamAborted (HTTP 502 at the controller).
+func TestExecute_UpstreamAborted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Promise more bytes than we'll send, then drop the connection.
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter is not a Hijacker")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack failed: %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	exec := newTestExecutor(t, 5*time.Second, 32)
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	assertKind(t, err, KindUpstreamAborted)
 
 	if resp != nil {
 		t.Errorf("expected nil response, got %v", resp)
@@ -305,6 +361,7 @@ func TestExecute_ContextCanceled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	assertKind(t, err, KindClientCanceled)
 
 	if resp != nil {
 		t.Errorf("expected nil response, got %v", resp)

@@ -84,7 +84,10 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 
 // Execute converts a protobuf HttpRequest into a real HTTP request, executes it
 // against the upstream service, and returns the response as a protobuf HttpResponse.
-// On failure (invalid URL, network error, timeout, etc.) it returns an error.
+// On failure it returns an *UpstreamError whose Kind tells the caller whether
+// the failure was caused by a malformed request, a connector limit, or a
+// specific upstream condition (timeout, unavailable, aborted). Successful
+// upstream responses — including 4xx/5xx — are returned as HttpResponse.
 func (e *Executor) Execute(
 	ctx context.Context,
 	protoReq *pb.HttpRequest,
@@ -127,13 +130,14 @@ func (e *Executor) Execute(
 		slog.ErrorContext(ctx, "upstream request failed: invalid URL",
 			"error", err,
 			"url", protoReq.Url)
-		return nil, fmt.Errorf("invalid target URL: %w", err)
+		return nil, newUpstreamError(KindInvalidRequest,
+			fmt.Errorf("invalid target URL: %w", err))
 	}
 
 	// Enforce request body size limit.
 	if e.maxRequestBodySizeBytes > 0 && int64(len(protoReq.Body)) > e.maxRequestBodySizeBytes {
 		bodySizeErr := fmt.Errorf(
-			"body size %d exceeds limit %d",
+			"request body size %d exceeds limit %d",
 			len(protoReq.Body),
 			e.maxRequestBodySizeBytes,
 		)
@@ -143,11 +147,7 @@ func (e *Executor) Execute(
 			"body_size", len(protoReq.Body),
 			"max_size", e.maxRequestBodySizeBytes,
 			"url", protoReq.Url)
-		return nil, fmt.Errorf(
-			"request body size %d exceeds limit %d",
-			len(protoReq.Body),
-			e.maxRequestBodySizeBytes,
-		)
+		return nil, newUpstreamError(KindRequestTooLarge, bodySizeErr)
 	}
 
 	// Build the HTTP request body.
@@ -162,7 +162,10 @@ func (e *Executor) Execute(
 		slog.ErrorContext(ctx, "upstream request failed: cannot create request",
 			"error", err,
 			"url", protoReq.Url)
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		// http.NewRequestWithContext only fails on a malformed method/URL —
+		// the caller passed something the connector cannot make sense of.
+		return nil, newUpstreamError(KindInvalidRequest,
+			fmt.Errorf("failed to create HTTP request: %w", err))
 	}
 
 	// Convert protobuf headers to HTTP headers, filtering hop-by-hop.
@@ -175,11 +178,14 @@ func (e *Executor) Execute(
 	if err != nil {
 		span.RecordError(err)
 		duration := time.Since(startTime)
+		kind := classifyNetwork(err)
 		slog.ErrorContext(ctx, "upstream request failed",
 			"error", err,
+			"kind", kind,
 			"target_host", targetHost,
 			"duration_ms", duration.Milliseconds())
-		return nil, fmt.Errorf("upstream request failed: %w", err)
+		return nil, newUpstreamError(kind,
+			fmt.Errorf("upstream request failed: %w", err))
 	}
 	defer resp.Body.Close()
 
@@ -188,11 +194,20 @@ func (e *Executor) Execute(
 	if err != nil {
 		span.RecordError(err)
 		duration := time.Since(startTime)
+		// Failures past this point mean the upstream sent headers but cut the
+		// body short — classify as aborted unless the caller cancelled or our
+		// deadline fired.
+		kind := classifyNetwork(err)
+		if kind == KindInternal {
+			kind = KindUpstreamAborted
+		}
 		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
 			"error", err,
+			"kind", kind,
 			"target_host", targetHost,
 			"duration_ms", duration.Milliseconds())
-		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
+		return nil, newUpstreamError(kind,
+			fmt.Errorf("failed to read upstream response body: %w", err))
 	}
 
 	// Apply redaction rules to the response body before it leaves the customer network.
