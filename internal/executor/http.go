@@ -210,11 +210,15 @@ func (e *Executor) Execute(
 	span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
 
 	duration := time.Since(startTime)
+	reqContentType := contentTypeFromProtoHeaders(protoReq.Headers)
+	respContentType := contentTypeFromGoHeaders(resp.Header)
 	slog.InfoContext(ctx, "upstream request completed",
 		"target_host", targetHost,
 		"status", resp.StatusCode,
 		"duration_ms", duration.Milliseconds(),
-		"response_body_size", len(respBody))
+		"response_body_size", len(respBody),
+		"request_content_type", reqContentType,
+		"response_content_type", respContentType)
 
 	return &pb.HttpResponse{
 		HttpStatus: int32( //nolint:gosec // HTTP status codes are always in the int32 range
