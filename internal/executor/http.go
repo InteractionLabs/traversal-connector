@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -30,6 +32,9 @@ const (
 
 	bytesPerKB = 1024
 	kbPerMB    = 1024
+
+	headerContentLength = "Content-Length"
+	headerContentType   = "Content-Type"
 )
 
 // Executor handles executing HTTP requests against upstream services
@@ -195,8 +200,29 @@ func (e *Executor) Execute(
 		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
 
-	// Apply redaction rules to the response body before it leaves the customer network.
+	// Apply redaction rules to the response body before it leaves the customer
+	// network. Structured (regex-structured-data) rules fire per-field via
+	// ApplyJSON — only when the Content-Type is JSON and the body parses. If
+	// either fails, structured rules are skipped (their field filters can't be
+	// honored on raw bytes). Legacy byte-level "regex" rules always fire via
+	// Apply, regardless of content type.
+	if isJSONContentType(resp.Header.Get(headerContentType)) {
+		redacted, jerr := e.redactor.ApplyJSON(ctx, respBody)
+		if jerr == nil {
+			respBody = redacted
+		} else {
+			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
+				"error", jerr, "target_host", targetHost)
+		}
+	}
 	respBody = e.redactor.Apply(ctx, respBody)
+
+	// Redaction can change the body length, so refresh Content-Length if the
+	// upstream set one. Go's http.Client strips Content-Length on transparent
+	// gzip decompression, so we only touch the header when it's actually present.
+	if resp.Header.Get(headerContentLength) != "" {
+		resp.Header.Set(headerContentLength, strconv.Itoa(len(respBody)))
+	}
 
 	// Convert response headers to protobuf, filtering hop-by-hop.
 	respHeaders := connector.HTTPToProtoHeaders(resp.Header)
@@ -223,4 +249,22 @@ func (e *Executor) Execute(
 		Headers: respHeaders,
 		Body:    respBody,
 	}, nil
+}
+
+// isJSONContentType reports whether the given Content-Type header indicates a
+// JSON payload. Handles charset parameters (e.g. "application/json; charset=utf-8")
+// and the "+json" structured-syntax suffix (RFC 6839, e.g. "application/ld+json").
+func isJSONContentType(header string) bool {
+	if header == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(header)
+	if err != nil {
+		return false
+	}
+	if mediaType == "application/json" || mediaType == "text/json" {
+		return true
+	}
+	// "+json" structured-syntax suffix, e.g. application/ld+json, application/hal+json.
+	return len(mediaType) > 5 && mediaType[len(mediaType)-5:] == "+json"
 }
