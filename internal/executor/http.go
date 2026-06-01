@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -35,6 +36,13 @@ const (
 
 	headerContentLength = "Content-Length"
 	headerContentType   = "Content-Type"
+	// headerRedactionStrategy is a Traversal control header that lets the caller
+	// opt out of response redaction for a single request. It is consumed here and
+	// stripped before the request is forwarded upstream.
+	headerRedactionStrategy = "Redaction-Strategy"
+	// redactionStrategyPassThrough is the only header value that disables
+	// redaction. Any other value (or no header at all) leaves redaction enabled.
+	redactionStrategyPassThrough = "pass-through"
 )
 
 // Executor handles executing HTTP requests against upstream services
@@ -170,9 +178,20 @@ func (e *Executor) Execute(
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
+	// Determine the redaction strategy from the control header before it is
+	// stripped. Redaction is skipped only when the header is explicitly set to
+	// "pass-through"; any other value (or no header) leaves redaction enabled.
+	skipRedaction := strings.EqualFold(
+		strings.TrimSpace(connector.HeaderValue(protoReq.Headers, headerRedactionStrategy)),
+		redactionStrategyPassThrough,
+	)
+
 	// Convert protobuf headers to HTTP headers, filtering hop-by-hop.
 	filtered := connector.FilterHopByHopHeaders(protoReq.Headers)
 	httpHeaders := connector.ProtoToHTTPHeaders(filtered)
+	// The redaction strategy header is a Traversal control instruction, not part
+	// of the upstream API contract, so it must not leak to the target.
+	httpHeaders.Del(headerRedactionStrategy)
 	httpReq.Header = httpHeaders
 
 	// Execute the HTTP request.
@@ -206,16 +225,25 @@ func (e *Executor) Execute(
 	// either fails, structured rules are skipped (their field filters can't be
 	// honored on raw bytes). Legacy byte-level "regex" rules always fire via
 	// Apply, regardless of content type.
-	if isJSONContentType(resp.Header.Get(headerContentType)) {
-		redacted, jerr := e.redactor.ApplyJSON(ctx, respBody)
-		if jerr == nil {
-			respBody = redacted
-		} else {
-			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
-				"error", jerr, "target_host", targetHost)
+	//
+	// Redaction is bypassed entirely when the caller set the pass-through control
+	// header, allowing trusted callers to receive the unredacted response.
+	switch {
+	case skipRedaction:
+		slog.InfoContext(ctx, "skipping response redaction: pass-through strategy requested",
+			"target_host", targetHost)
+	default:
+		if isJSONContentType(resp.Header.Get(headerContentType)) {
+			redacted, jerr := e.redactor.ApplyJSON(ctx, respBody)
+			if jerr == nil {
+				respBody = redacted
+			} else {
+				slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
+					"error", jerr, "target_host", targetHost)
+			}
 		}
+		respBody = e.redactor.Apply(ctx, respBody)
 	}
-	respBody = e.redactor.Apply(ctx, respBody)
 
 	// Redaction can change the body length, so refresh Content-Length if the
 	// upstream set one. Go's http.Client strips Content-Length on transparent

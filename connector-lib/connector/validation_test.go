@@ -366,3 +366,33 @@ func TestHeaderConversionRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestHeaderValue(t *testing.T) {
+	headers := []*pb.Header{
+		{Key: "Accept", Value: "application/json"},
+		{Key: "Redaction-Strategy", Value: "pass-through"},
+	}
+
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "exact match", key: "Redaction-Strategy", want: "pass-through"},
+		{name: "case-insensitive match", key: "redaction-strategy", want: "pass-through"},
+		{name: "other header", key: "Accept", want: "application/json"},
+		{name: "missing header", key: "X-Not-Present", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HeaderValue(headers, tt.key); got != tt.want {
+				t.Errorf("HeaderValue(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+
+	if got := HeaderValue(nil, "Redaction-Strategy"); got != "" {
+		t.Errorf("HeaderValue(nil, ...) = %q, want empty string", got)
+	}
+}
