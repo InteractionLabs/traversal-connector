@@ -663,7 +663,11 @@ func TestExecute_RedactionStrategyPassThrough_SkipsRedaction(t *testing.T) {
 		// The control header must be consumed by the connector, never forwarded
 		// to the upstream target.
 		if got := r.Header.Get(headerRedactionStrategy); got != "" {
-			t.Errorf("%s header should be stripped before forwarding, got %q", headerRedactionStrategy, got)
+			t.Errorf(
+				"%s header should be stripped before forwarding, got %q",
+				headerRedactionStrategy,
+				got,
+			)
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
