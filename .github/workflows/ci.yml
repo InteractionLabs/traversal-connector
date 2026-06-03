@@ -8,7 +8,7 @@ on:
 jobs:
   check:
     name: ${{ matrix.recipe }}
-    runs-on: [arc-runner]
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
