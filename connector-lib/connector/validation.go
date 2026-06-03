@@ -61,17 +61,6 @@ func FilterHopByHopHeaders(headers []*pb.Header) []*pb.Header {
 	return filtered
 }
 
-// HeaderValue returns the value of the first header whose key matches the given
-// name case-insensitively, or an empty string when no such header is present.
-func HeaderValue(headers []*pb.Header, key string) string {
-	for _, header := range headers {
-		if strings.EqualFold(header.Key, key) {
-			return header.Value
-		}
-	}
-	return ""
-}
-
 // HTTPToProtoHeaders converts Go http.Header to protobuf Header slice.
 //
 // Each value in a multi-valued header becomes its own Header proto, preserving
