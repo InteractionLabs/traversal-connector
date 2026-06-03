@@ -205,16 +205,6 @@ If you need a pattern to redact everywhere unconditionally, use `regex`. If you 
 
 Rules are applied in order; each rule operates on the output of the previous one.
 
-#### Per-request opt-out
-
-A caller can bypass redaction for an individual request by setting the
-`Redaction-Strategy` request header to `pass-through`. When that value is
-present, the connector returns the upstream response body unmodified and applies
-no rules. Any other value — or no header at all — leaves the configured
-redaction in place. The header is a Traversal control instruction and is
-stripped before the request is forwarded upstream, so it never reaches the
-target API.
-
 ### Telemetry (OpenTelemetry)
 
 The connector emits OpenTelemetry traces, metrics, and logs. Endpoints are
