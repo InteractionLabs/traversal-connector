@@ -206,8 +206,9 @@ func (e *Executor) Execute(
 	// either fails, structured rules are skipped (their field filters can't be
 	// honored on raw bytes). Legacy byte-level "regex" rules always fire via
 	// Apply, regardless of content type.
+	redactHost := hostnameFromURL(protoReq.Url)
 	if isJSONContentType(resp.Header.Get(headerContentType)) {
-		redacted, jerr := e.redactor.ApplyJSON(ctx, respBody)
+		redacted, jerr := e.redactor.ApplyJSON(ctx, redactHost, respBody)
 		if jerr == nil {
 			respBody = redacted
 		} else {
@@ -215,7 +216,7 @@ func (e *Executor) Execute(
 				"error", jerr, "target_host", targetHost)
 		}
 	}
-	respBody = e.redactor.Apply(ctx, respBody)
+	respBody = e.redactor.Apply(ctx, redactHost, respBody)
 
 	// Redaction can change the body length, so refresh Content-Length if the
 	// upstream set one. Go's http.Client strips Content-Length on transparent

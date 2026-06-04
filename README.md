@@ -175,6 +175,14 @@ type   = "regex-structured-data"
 pattern       = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
 # replacement omitted -> falls back to default_replacement
+
+# Host-scoped rule: this token pattern is only redacted for responses from
+# GitHub hostnames. Requests to any other upstream pass through untouched.
+[[rules]]
+name    = "github-token"
+type    = "regex"
+pattern = 'gh[pousr]_[A-Za-z0-9]{36}'
+hosts   = ['.*github\.com']
 ```
 
 Top-level fields:
@@ -187,6 +195,7 @@ Each rule requires:
 - `type` — `"regex"` for byte-level redaction over the full response body, or `"regex-structured-data"` for per-field redaction over JSON response bodies. Unrecognised types are logged and skipped.
 - `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
+- `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
 
 `regex-structured-data` rules additionally accept:
 - `redact_fields` — allowlist of pipe-delimited paths. When set, the rule only fires inside the matching subtrees.

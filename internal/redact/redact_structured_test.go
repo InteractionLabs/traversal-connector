@@ -24,7 +24,7 @@ func TestRedactor_DefaultReplacement_FallsBackToREDACTED(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got, err := r.ApplyJSON(context.Background(), []byte(`{"msg":"ping user@example.com"}`))
+	got, err := r.ApplyJSON(context.Background(), "", []byte(`{"msg":"ping user@example.com"}`))
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestRedactor_DefaultReplacement_FileLevel(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got, err := r.ApplyJSON(context.Background(), []byte(`{"msg":"ping user@example.com"}`))
+	got, err := r.ApplyJSON(context.Background(), "", []byte(`{"msg":"ping user@example.com"}`))
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestRedactor_DefaultReplacement_RuleOverridesFile(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got, err := r.ApplyJSON(context.Background(), []byte(`{"msg":"ping user@example.com"}`))
+	got, err := r.ApplyJSON(context.Background(), "", []byte(`{"msg":"ping user@example.com"}`))
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRedactor_ApplyJSON_NoStructuredRules_ReturnsSrcUnchanged(t *testing.T) 
 	}
 
 	src := []byte(`{"msg":"user@example.com"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestRedactor_ApplyJSON_InvalidJSONReturnsError(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	_, err := r.ApplyJSON(context.Background(), []byte("not json {{{"))
+	_, err := r.ApplyJSON(context.Background(), "", []byte("not json {{{"))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -137,7 +137,7 @@ func TestRedactor_ApplyJSON_RedactsAllStringFields_NoFilters(t *testing.T) {
 	}
 
 	src := []byte(`{"message":"ping user@example.com","other":"meet bob@bar.io"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRedactor_ApplyJSON_RedactFields_OnlyListedFieldsRedacted(t *testing.T) 
 	}
 
 	src := []byte(`{"message":"ping user@example.com","other":"meet bob@bar.io"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRedactor_ApplyJSON_SkipFields_ListedFieldsNotRedacted(t *testing.T) {
 	}
 
 	src := []byte(`{"message":"ping user@example.com","safe":"meet bob@bar.io"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRedactor_ApplyJSON_RedactAndSkip_BlocklistWinsOnOverlap(t *testing.T) {
 	}
 
 	src := []byte(`{"a":"x@y.com","b":"x@y.com","c":"x@y.com"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestRedactor_ApplyJSON_NestedFields_PipeDelimitedPath(t *testing.T) {
 	}
 
 	src := []byte(`{"body":{"message":"x@y.com","other":"a@b.com"},"top":"c@d.com"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestRedactor_ApplyJSON_ArrayElementsInheritParentPath(t *testing.T) {
 	}
 
 	src := []byte(`{"emails":["a@b.com","c@d.com"],"other":["e@f.com"]}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestRedactor_ApplyJSON_MultipleRulesDifferentFields(t *testing.T) {
 	}
 
 	src := []byte(`{"message":"a@b.com 123-45-6789","notes":"a@b.com 123-45-6789"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestRedactor_Apply_StructuredRule_DoesNotFireOnBytes(t *testing.T) {
 	// Structured rules only fire on the per-field ApplyJSON path. Apply leaves
 	// the input untouched even when the pattern would match — without parsed
 	// JSON there is no field to check redact_fields / skip_fields against.
-	got := string(r.Apply(context.Background(), []byte("contact a@b.com")))
+	got := string(r.Apply(context.Background(), "", []byte("contact a@b.com")))
 	want := "contact a@b.com"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -425,7 +425,7 @@ func TestRedactor_Apply_MixedTypes_OnlyLegacyFires(t *testing.T) {
 	}
 
 	// Only the legacy regex rule fires byte-level; the structured rule is skipped.
-	got := string(r.Apply(context.Background(), []byte("a@b.com / 123-45-6789")))
+	got := string(r.Apply(context.Background(), "", []byte("a@b.com / 123-45-6789")))
 	want := "[EMAIL] / 123-45-6789"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -454,7 +454,7 @@ func TestRedactor_ApplyJSON_LegacyRegexRulesAreIgnored(t *testing.T) {
 	}
 
 	src := []byte(`{"msg":"a@b.com / 123-45-6789"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -503,7 +503,7 @@ skip_fields = ["meta|hostname"]
 	src := []byte(
 		`{"body":{"message":"a@b.com 123-45-6789"},"meta":{"hostname":"a@b.com 123-45-6789"}}`,
 	)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestRedactor_ApplyJSON_NoFilter_RedactsKeysAndValues(t *testing.T) {
 	}
 
 	src := []byte(`{"user@example.com":"bob@bar.io","plain":"no email here"}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -574,7 +574,7 @@ func TestRedactor_ApplyJSON_RedactFields_AppliesToEntireSubtree(t *testing.T) {
 	src := []byte(
 		`{"data":{"nested":{"deep":"a@b.com"},"arr":["c@d.com","plain"]},"other":"e@f.com"}`,
 	)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestRedactor_ApplyJSON_RedactFields_RedactsNestedKeysInsideSubtree(t *testi
 	// "data" itself is at the parent scope (root), which is NOT in scope, so
 	// it stays intact.
 	src := []byte(`{"data":{"a@b.com":"value"}}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestRedactor_ApplyJSON_TopLevelArray_NoFilter(t *testing.T) {
 		t.Fatalf("Update() error: %v", err)
 	}
 
-	got, err := r.ApplyJSON(context.Background(), []byte(`["a@b.com","c@d.com","plain"]`))
+	got, err := r.ApplyJSON(context.Background(), "", []byte(`["a@b.com","c@d.com","plain"]`))
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestRedactor_ApplyJSON_NumberMatching_RewrittenAsString(t *testing.T) {
 	}
 
 	src := []byte(`{"as_string":"4111111111111111","as_number":4111111111111111,"untouched":42}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
@@ -709,7 +709,7 @@ func TestRedactor_ApplyJSON_SkipFields_ExcludesSubtreeIncludingKey(t *testing.T)
 	// "safe" is skipped: neither the key nor anything inside it is touched,
 	// even though there's no whitelist and the rule otherwise applies everywhere.
 	src := []byte(`{"data":"a@b.com","safe":{"inner":"c@d.com","other":"plain"}}`)
-	got, err := r.ApplyJSON(context.Background(), src)
+	got, err := r.ApplyJSON(context.Background(), "", src)
 	if err != nil {
 		t.Fatalf("ApplyJSON() error: %v", err)
 	}
