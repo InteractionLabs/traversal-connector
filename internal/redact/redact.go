@@ -53,6 +53,13 @@ type Rule struct {
 	// SkipFields is an optional blocklist of pipe-delimited field names.
 	// When set, the rule never runs against those fields on the per-field path.
 	SkipFields []string `toml:"skip_fields"`
+	// Hosts is an optional allowlist of RE2 patterns matched against the request
+	// hostname (port stripped). The rule only fires when the hostname fully
+	// matches at least one pattern. When empty, it defaults to [".*"], which
+	// matches every host. Each pattern is anchored to the whole hostname, so
+	// ".*github.com" matches "api.github.com" and "github.com" but not
+	// "github.com.evil.com".
+	Hosts []string `toml:"hosts"`
 }
 
 // RulesFile is the top-level TOML document.
@@ -81,6 +88,25 @@ type compiledRule struct {
 	// "body" itself plus everything beneath it ("body|message", "body|x|y", …).
 	redactFields map[string]struct{}
 	skipFields   map[string]struct{}
+	// hostMatchers is the compiled, fully-anchored form of Rule.Hosts. A nil
+	// slice means "no host filter" — the rule fires on every host (equivalent to
+	// the [".*"] default). When non-nil, the rule fires only if the request
+	// hostname fully matches at least one matcher.
+	hostMatchers []*regexp.Regexp
+}
+
+// appliesToHost reports whether the rule should fire for the given request
+// hostname. A rule with no host filter (nil hostMatchers) always applies.
+func (cr *compiledRule) appliesToHost(host string) bool {
+	if cr.hostMatchers == nil {
+		return true
+	}
+	for _, m := range cr.hostMatchers {
+		if m.MatchString(host) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
@@ -166,11 +192,17 @@ func (r *Redactor) Update(f *RulesFile) error {
 			replacement = defaultReplacement
 		}
 
+		hostMatchers, err := compileHostMatchers(rule.Hosts)
+		if err != nil {
+			return fmt.Errorf("rule %q: %w", rule.Name, err)
+		}
+
 		cr := compiledRule{
-			name:        rule.Name,
-			re:          re,
-			replacement: []byte(replacement),
-			structured:  structured,
+			name:         rule.Name,
+			re:           re,
+			replacement:  []byte(replacement),
+			structured:   structured,
+			hostMatchers: hostMatchers,
 		}
 		if structured {
 			cr.redactFields = toFieldSet(rule.RedactFields)
@@ -180,6 +212,32 @@ func (r *Redactor) Update(f *RulesFile) error {
 	}
 	r.rules.Store(&compiled)
 	return nil
+}
+
+// compileHostMatchers compiles each host pattern into a fully-anchored regexp
+// so a pattern matches only when it spans the entire hostname. An empty/nil
+// patterns slice (or one containing only ".*") returns nil, meaning "match every
+// host" — this avoids running a regex per request for the common default case.
+func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	matchers := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		if p == ".*" {
+			// Matches everything; equivalent to no filter at all.
+			return nil, nil
+		}
+		// Anchor to the whole hostname. The non-capturing group keeps any
+		// top-level alternation in p from binding only the first/last branch
+		// to the anchors.
+		m, err := regexp.Compile("^(?:" + p + ")$")
+		if err != nil {
+			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
+		}
+		matchers = append(matchers, m)
+	}
+	return matchers, nil
 }
 
 func toFieldSet(fields []string) map[string]struct{} {
@@ -199,15 +257,19 @@ func toFieldSet(fields []string) map[string]struct{} {
 // be honored on raw bytes, so firing them globally would surprise callers (it
 // would redact across fields the filters explicitly excluded).
 //
+// Rules whose hosts allowlist does not match host are skipped; host is the
+// request hostname (port stripped). A rule with no hosts filter matches every
+// host.
+//
 // If there are no legacy rules the original slice is returned unchanged.
-func (r *Redactor) Apply(ctx context.Context, src []byte) []byte {
+func (r *Redactor) Apply(ctx context.Context, host string, src []byte) []byte {
 	rules := *r.rules.Load()
 	if len(rules) == 0 {
 		return src
 	}
 	result := src
 	for i := range rules {
-		if rules[i].structured {
+		if rules[i].structured || !rules[i].appliesToHost(host) {
 			continue
 		}
 		result = r.applyOneRule(ctx, &rules[i], result)
@@ -223,18 +285,24 @@ func (r *Redactor) Apply(ctx context.Context, src []byte) []byte {
 // Legacy "regex" rules do not fire on this path; callers wanting byte-level
 // regex over JSON should use Apply.
 //
-// If there are no structured rules, src is returned unchanged. If src is not
-// valid JSON, an error is returned and the caller should fall back to Apply.
-func (r *Redactor) ApplyJSON(ctx context.Context, src []byte) ([]byte, error) {
+// Rules whose hosts allowlist does not match host are skipped; host is the
+// request hostname (port stripped). A rule with no hosts filter matches every
+// host.
+//
+// If there are no structured rules in scope for host, src is returned
+// unchanged. If src is not valid JSON, an error is returned and the caller
+// should fall back to Apply.
+func (r *Redactor) ApplyJSON(ctx context.Context, host string, src []byte) ([]byte, error) {
 	rules := *r.rules.Load()
-	hasStructured := false
+	// Pre-filter to the structured rules in scope for this host so the host
+	// regexes run once per request rather than once per JSON node.
+	active := make([]compiledRule, 0, len(rules))
 	for i := range rules {
-		if rules[i].structured {
-			hasStructured = true
-			break
+		if rules[i].structured && rules[i].appliesToHost(host) {
+			active = append(active, rules[i])
 		}
 	}
-	if !hasStructured {
+	if len(active) == 0 {
 		return src, nil
 	}
 
@@ -245,7 +313,7 @@ func (r *Redactor) ApplyJSON(ctx context.Context, src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("redact: parse json: %w", err)
 	}
 
-	value = r.redactValue(ctx, value, "", rules)
+	value = r.redactValue(ctx, value, "", active)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
