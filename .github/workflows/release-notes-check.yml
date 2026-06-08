@@ -1,0 +1,69 @@
+name: Release Notes Check
+
+# Fails a PR (and blocks the merge queue) when it carries a release:* label
+# but its description is missing a non-empty top-level "# Release Notes" section.
+on:
+  pull_request:
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
+  merge_group:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Gather labels + body for whichever event triggered us. The merge_group
+          # payload has no PR context, so resolve the PR from its head commit.
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
+            pr=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0] // empty')
+            if [[ -z "$pr" ]]; then
+              echo "No PR associated with $HEAD_SHA; nothing to validate."
+              exit 0
+            fi
+            labels=$(echo "$pr" | jq -c '.labels')
+            body=$(echo "$pr" | jq -r '.body // ""')
+          else
+            labels="$PR_LABELS"
+            body="$PR_BODY"
+          fi
+
+          # Only enforce when a release:* label is present.
+          if ! echo "$labels" | jq -e '.[] | select(.name == "release:major" or .name == "release:minor" or .name == "release:patch")' > /dev/null; then
+            echo "No release:* label present; skipping release notes check."
+            exit 0
+          fi
+
+          # Extract the top-level "# Release Notes" section (case-insensitive),
+          # stopping at the next H1.
+          section=$(printf '%s\n' "$body" | awk '
+            /^#[[:space:]]+[Rr]elease[[:space:]]+[Nn]otes[[:space:]]*$/ { found=1; next }
+            found && /^#[[:space:]]/ { found=0 }
+            found { print }
+          ')
+
+          if [[ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
+            echo "::error::This PR has a release:* label but its description has no non-empty '# Release Notes' section."
+            echo "Add a top-level header at the bottom of your description like:"
+            echo ""
+            echo "# Release Notes"
+            echo "<what changed in this release>"
+            exit 1
+          fi
+
+          echo "Release notes section found:"
+          echo "----------------------------------------"
+          printf '%s\n' "$section"
+          echo "----------------------------------------"

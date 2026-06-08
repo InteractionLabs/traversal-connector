@@ -62,8 +62,19 @@ jobs:
             else
               bump=patch
             fi
-            # PR body is the release notes; fall back to the PR title if the body is empty.
-            notes="${PR_BODY:-$PR_TITLE}"
+            # Release notes are the top-level "# Release Notes" section of the PR
+            # body (enforced by the Release Notes Check workflow). Fall back to the
+            # full body, then the PR title, if the section is somehow absent.
+            section=$(printf '%s\n' "$PR_BODY" | awk '
+              /^#[[:space:]]+[Rr]elease[[:space:]]+[Nn]otes[[:space:]]*$/ { found=1; next }
+              found && /^#[[:space:]]/ { found=0 }
+              found { print }
+            ')
+            if [[ -n "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
+              notes="$section"
+            else
+              notes="${PR_BODY:-$PR_TITLE}"
+            fi
           fi
 
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
