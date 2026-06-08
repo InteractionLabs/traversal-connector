@@ -69,12 +69,14 @@ func TestLoad(t *testing.T) {
 			envVars: map[string]string{
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 			},
 			expected: Config{
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "test",
 				EnvLevel:                env.EnvLevelDevelopment,
+				ConnectorID:             "connector-1",
 				MaxTunnelsAllowed:       2,
 				ReconnectInterval:       5 * time.Second,
 				MaxBackoffDelay:         60 * time.Second,
@@ -94,6 +96,7 @@ func TestLoad(t *testing.T) {
 			envVars: map[string]string{
 				"TRAVERSAL_CONTROLLER_URL":            "https://controller.example.com:9080",
 				"ENV_NAME":                            "production",
+				"TRAVERSAL_CONNECTOR_ID":              "connector-prod",
 				"ENV_LEVEL":                           "production",
 				"MAX_TUNNELS_ALLOWED":                 "10",
 				"RECONNECT_INTERVAL":                  "10m",
@@ -113,6 +116,7 @@ func TestLoad(t *testing.T) {
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "https://controller.example.com:9080",
 				EnvName:                 "production",
+				ConnectorID:             "connector-prod",
 				EnvLevel:                env.EnvLevelProduction,
 				MaxTunnelsAllowed:       10,
 				ReconnectInterval:       10 * time.Minute,
@@ -137,11 +141,13 @@ func TestLoad(t *testing.T) {
 			envVars: map[string]string{
 				"ENV_NAME":                 "staging",
 				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-staging",
 			},
 			expected: Config{
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "staging",
+				ConnectorID:             "connector-staging",
 				EnvLevel:                env.EnvLevelDevelopment,
 				MaxTunnelsAllowed:       2,
 				ReconnectInterval:       5 * time.Second,
@@ -162,6 +168,7 @@ func TestLoad(t *testing.T) {
 			envVars: map[string]string{
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 				"RECONNECT_INTERVAL":       "invalid",
 				"MAX_BACKOFF_DELAY":        "also-invalid",
 				"REQUEST_TIMEOUT":          "nope",
@@ -170,6 +177,7 @@ func TestLoad(t *testing.T) {
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "test",
+				ConnectorID:             "connector-1",
 				EnvLevel:                env.EnvLevelDevelopment,
 				MaxTunnelsAllowed:       2,
 				ReconnectInterval:       5 * time.Second,
@@ -230,6 +238,20 @@ func TestLoad_RequiresTraversalControllerURL(t *testing.T) {
 	}
 }
 
+func TestLoad_RequiresConnectorID(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+
+	if _, err := Load(); err == nil {
+		t.Fatal(
+			"Load() returned nil error when TRAVERSAL_CONNECTOR_ID is unset; expected an error",
+		)
+	}
+}
+
 func TestLoad_EnvFileMissing(t *testing.T) {
 	clearEnv()
 	defer clearEnv()
@@ -249,7 +271,7 @@ func TestLoad_EnvFilePopulatesEnv(t *testing.T) {
 	defer clearEnv()
 
 	tmp := t.TempDir() + "/secrets.env"
-	envFileContent := "ENV_NAME=from-file\nTRAVERSAL_CONTROLLER_URL=http://localhost:9080\n"
+	envFileContent := "ENV_NAME=from-file\nTRAVERSAL_CONTROLLER_URL=http://localhost:9080\nTRAVERSAL_CONNECTOR_ID=connector-1\n"
 	if err := os.WriteFile(tmp, []byte(envFileContent), 0o600); err != nil {
 		t.Fatalf("write temp env file: %v", err)
 	}
@@ -274,6 +296,7 @@ func TestLoad_RequiresMTLSForHTTPS(t *testing.T) {
 			envVars: map[string]string{
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 			},
 		},
 		{
@@ -281,6 +304,7 @@ func TestLoad_RequiresMTLSForHTTPS(t *testing.T) {
 			envVars: map[string]string{
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 				"TLS_CERT_BASE64":          "-----BEGIN CERTIFICATE-----\nXXX\n-----END CERTIFICATE-----",
 			},
 		},
@@ -289,6 +313,7 @@ func TestLoad_RequiresMTLSForHTTPS(t *testing.T) {
 			envVars: map[string]string{ //nolint:gosec // G101: test fixture, intentional fake key
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "https://controller.example.com:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 				"TLS_KEY_BASE64":           "-----BEGIN EC PRIVATE KEY-----\nXXX\n-----END EC PRIVATE KEY-----",
 			},
 		},
@@ -313,6 +338,7 @@ func TestLoad_RejectsMalformedCert(t *testing.T) {
 	defer clearEnv()
 	_ = os.Setenv("ENV_NAME", "test")
 	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "https://controller.example.com:9080")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
 	_ = os.Setenv("TLS_CERT_BASE64", "not a valid PEM")
 	_ = os.Setenv("TLS_KEY_BASE64", "also not valid")
 
@@ -331,6 +357,7 @@ func TestLoad_AcceptsHTTPInDev(t *testing.T) {
 			clearEnv()
 			defer clearEnv()
 			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
 			_ = os.Setenv(
 				"TRAVERSAL_CONTROLLER_URL",
 				"http://"+host+":9080",
@@ -349,6 +376,7 @@ func TestLoad_RejectsHTTPInProduction(t *testing.T) {
 			clearEnv()
 			defer clearEnv()
 			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
 			_ = os.Setenv("ENV_LEVEL", "production")
 			_ = os.Setenv(
 				"TRAVERSAL_CONTROLLER_URL",
@@ -369,6 +397,7 @@ func TestLoad_RejectsUnsupportedScheme(t *testing.T) {
 	clearEnv()
 	defer clearEnv()
 	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
 	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "ftp://controller.example.com")
 
 	if _, err := Load(); err == nil {
@@ -444,7 +473,7 @@ func TestDecodeCertificate(t *testing.T) {
 
 func clearEnv() {
 	envVars := []string{
-		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
+		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
 		"RECONNECT_INTERVAL", "MAX_BACKOFF_DELAY", "REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
 		"TLS_SERVER_NAME", "OTEL_SERVICE_NAME",
