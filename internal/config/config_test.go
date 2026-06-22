@@ -92,6 +92,33 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "quoted connector id is trimmed",
+			envVars: map[string]string{
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   `"connector-1"`,
+			},
+			expected: Config{
+				HTTPPort:                "8080",
+				TraversalControllerURL:  "http://localhost:9080",
+				EnvName:                 "test",
+				EnvLevel:                env.EnvLevelDevelopment,
+				ConnectorID:             "connector-1",
+				MaxTunnelsAllowed:       2,
+				ReconnectInterval:       5 * time.Second,
+				MaxBackoffDelay:         60 * time.Second,
+				RequestTimeout:          60 * time.Second,
+				MaxRequestBodySizeMB:    32,
+				TLSCert:                 nil,
+				TLSKey:                  nil,
+				TLSServerName:           "",
+				OTELServiceName:         "traversal-connector",
+				MaxConcurrentRequests:   10,
+				UpstreamTLSVerify:       true,
+				RedactionReloadInterval: 10 * time.Second,
+			},
+		},
+		{
 			name: "custom values",
 			envVars: map[string]string{
 				"TRAVERSAL_CONTROLLER_URL":            "https://controller.example.com:9080",

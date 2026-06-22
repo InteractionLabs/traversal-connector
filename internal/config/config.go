@@ -159,6 +159,12 @@ func Load() (Config, error) {
 	if connectorID == nil {
 		return Config{}, errors.New("TRAVERSAL_CONNECTOR_ID is required")
 	}
+	// Strip surrounding quotes. docker-compose list-syntax env vars
+	// (- KEY="val") keep the quotes as part of the value, which would otherwise
+	// be sent verbatim in the X-Traversal-Connector-ID header and never match
+	// the unquoted routing key used by requests.
+	trimmedConnectorID := strings.Trim(*connectorID, `"'`)
+	connectorID = &trimmedConnectorID
 
 	cfg := Config{
 		HTTPPort:               env.GetEnvString("HTTP_PORT", defaultHTTPPort),
