@@ -28,9 +28,9 @@ Installs `just` and the Go-based CLI tools the recipes depend on.
 
 ## Running locally
 
-`ENV_NAME` and `TRAVERSAL_CONTROLLER_URL` are required; everything else has
-sensible defaults (see Configuration below). `TRAVERSAL_CONTROLLER_URL` has no
-default. Startup fails if it's unset.
+`ENV_NAME`, `TRAVERSAL_CONTROLLER_URL`, and `TRAVERSAL_CONNECTOR_ID` are
+required; everything else has sensible defaults (see Configuration below).
+These have no defaults — startup fails if any is unset.
 
 **Docker Compose (containerized, hot-reload via `air`):**
 
@@ -41,7 +41,7 @@ TRAVERSAL_CONTROLLER_URL=http://host.docker.internal:9080 docker compose up --bu
 **Native (skip docker, fast iteration):**
 
 ```bash
-ENV_NAME=dev TRAVERSAL_CONTROLLER_URL=http://localhost:9080 go run ./cmd/connector
+ENV_NAME=dev TRAVERSAL_CONNECTOR_ID=local-dev TRAVERSAL_CONTROLLER_URL=http://localhost:9080 go run ./cmd/connector
 ```
 
 `http://` is rejected when `ENV_LEVEL=production`. In development any
@@ -96,6 +96,7 @@ checked in.
 | `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
+| `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. When unset, the connector dials its destinations directly (h2c for the controller; default OTLP transport for telemetry). |
 
 ### mTLS to the control plane

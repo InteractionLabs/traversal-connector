@@ -35,6 +35,10 @@ const (
 	// h2PingTimeout is how long to wait for a PING response before closing
 	// a connection that appears dead.
 	h2PingTimeout = 10 * time.Second
+	// connectorIDHeader is the request header carrying cfg.ConnectorID on
+	// every call to the control plane, letting it attribute connections to a
+	// specific connector instance.
+	connectorIDHeader = "X-Traversal-Connector-ID"
 )
 
 // NewClient creates a ConnectRPC client for the Traversal control plane.
@@ -50,11 +54,57 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 		return nil, err
 	}
 	httpClient := &http.Client{Transport: transport}
+
+	opts := []connect.ClientOption{
+		connect.WithGRPC(),
+		connect.WithInterceptors(
+			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
+		),
+	}
+
 	return connectorconnect.NewConnectorServiceClient(
 		httpClient,
 		cfg.TraversalControllerURL,
-		connect.WithGRPC(),
+		opts...,
 	), nil
+}
+
+// headerInterceptor is a ConnectRPC interceptor that stamps a fixed header
+// onto every outgoing request — both unary calls and streaming connections
+// (such as the bidi Tunnel) — before they are sent to the control plane.
+type headerInterceptor struct {
+	key   string
+	value string
+}
+
+// newHeaderInterceptor returns an interceptor that sets key: value on each
+// outgoing request.
+func newHeaderInterceptor(key, value string) *headerInterceptor {
+	return &headerInterceptor{key: key, value: value}
+}
+
+func (h *headerInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		req.Header().Set(h.key, h.value)
+		return next(ctx, req)
+	}
+}
+
+func (h *headerInterceptor) WrapStreamingClient(
+	next connect.StreamingClientFunc,
+) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		conn.RequestHeader().Set(h.key, h.value)
+		return conn
+	}
+}
+
+// WrapStreamingHandler is a no-op: this connector is a ConnectRPC client only.
+func (h *headerInterceptor) WrapStreamingHandler(
+	next connect.StreamingHandlerFunc,
+) connect.StreamingHandlerFunc {
+	return next
 }
 
 // newTransport returns the HTTP transport for the controller connection.
