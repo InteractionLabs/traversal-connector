@@ -1,6 +1,7 @@
 package env
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -62,6 +63,22 @@ func GetEnvBool(key string, defaultVal bool) bool {
 		}
 	}
 	return defaultVal
+}
+
+// GetEnvLogLevel returns the value of the environment variable identified by key
+// parsed as a slog.Level (accepts "debug", "info", "warn", "error", case-insensitive,
+// and offset forms like "INFO+2"), or defaultVal if the variable is empty, unset,
+// or not a valid level.
+func GetEnvLogLevel(key string, defaultVal slog.Level) slog.Level {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal
+	}
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(val)); err != nil {
+		return defaultVal
+	}
+	return lvl
 }
 
 // GetEnvOptionalString returns a pointer to the value of the environment variable

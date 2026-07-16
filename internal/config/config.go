@@ -29,6 +29,7 @@ const (
 	defaultMaxBackoffDelay         = 60 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
+	defaultLogLevel                = slog.LevelInfo
 )
 
 // Config holds all configuration for the Traversal Connector service.
@@ -105,6 +106,10 @@ type Config struct {
 	// OTLPProtocol selects the OTLP exporter transport.
 	// "grpc" or "http/protobuf" → gRPC; "http/json" or "" → HTTP.
 	OTLPProtocol string
+	// LogLevel is the minimum slog level emitted by all handlers (stdout text/JSON
+	// and the OTLP fanout). Read from LOG_LEVEL (debug|info|warn|error,
+	// case-insensitive). Defaults to info.
+	LogLevel slog.Level
 	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
 	// this traversal connector can handle per tunnel when multiplexing is active.
 	MaxConcurrentRequests int
@@ -200,6 +205,7 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
+		LogLevel: env.GetEnvLogLevel("LOG_LEVEL", defaultLogLevel),
 		MaxConcurrentRequests: env.GetEnvInt(
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
