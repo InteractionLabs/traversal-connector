@@ -1,6 +1,7 @@
 package env
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -132,6 +133,33 @@ func TestGetEnvBool(t *testing.T) {
 			got := GetEnvBool(tt.key, tt.defaultVal)
 			if diff := cmp.Diff(tt.expected, got); diff != "" {
 				t.Errorf("GetEnvBool() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGetEnvLogLevel(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		value      string
+		defaultVal slog.Level
+		expected   slog.Level
+	}{
+		{"valid debug", "TEST_LOG_LEVEL", "debug", slog.LevelInfo, slog.LevelDebug},
+		{"valid uppercase warn", "TEST_LOG_LEVEL", "WARN", slog.LevelInfo, slog.LevelWarn},
+		{"valid error", "TEST_LOG_LEVEL", "error", slog.LevelInfo, slog.LevelError},
+		{"empty value", "TEST_LOG_LEVEL", "", slog.LevelInfo, slog.LevelInfo},
+		{"invalid value", "TEST_LOG_LEVEL", "nonsense", slog.LevelInfo, slog.LevelInfo},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+
+			got := GetEnvLogLevel(tt.key, tt.defaultVal)
+			if diff := cmp.Diff(tt.expected, got); diff != "" {
+				t.Errorf("GetEnvLogLevel() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

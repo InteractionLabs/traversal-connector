@@ -227,6 +227,7 @@ The connector emits OpenTelemetry traces, metrics, and logs. Endpoints are
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | (none) | OTLP endpoint for traces. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | (none) | OTLP endpoint for logs. When unset, logs go to stdout only. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | (empty) | `grpc` or `http/protobuf` selects gRPC; `http/json` (or empty) selects HTTP. |
+| `LOG_LEVEL` | `info` | Minimum log level emitted by all handlers (`debug`, `info`, `warn`, `error`; case-insensitive). Applies to stdout logs and OTLP-exported logs alike. |
 
 The connector also reads the OTel-standard
 [`OTEL_RESOURCE_ATTRIBUTES`](https://opentelemetry.io/docs/specs/otel/resource/sdk/#specifying-resource-information-via-an-environment-variable)

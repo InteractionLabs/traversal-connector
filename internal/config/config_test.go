@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"testing"
@@ -89,6 +90,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
 				RedactionReloadInterval: 10 * time.Second,
+				LogLevel:                slog.LevelInfo,
 			},
 		},
 		{
@@ -138,6 +140,7 @@ func TestLoad(t *testing.T) {
 				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "localhost:4317",
 				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "localhost:4317",
 				"OTEL_EXPORTER_OTLP_PROTOCOL":         "grpc",
+				"LOG_LEVEL":                           "debug",
 			},
 			expected: Config{
 				HTTPPort:                "8080",
@@ -161,6 +164,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
 				RedactionReloadInterval: 10 * time.Second,
+				LogLevel:                slog.LevelDebug,
 			},
 		},
 		{
@@ -509,6 +513,7 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"UPSTREAM_TLS_VERIFY",
+		"LOG_LEVEL",
 	}
 	for _, key := range envVars {
 		_ = os.Unsetenv(key)
