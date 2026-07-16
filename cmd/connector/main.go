@@ -51,6 +51,11 @@ func main() {
 	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
 	// Non-local              → stdout JSON
 	// Local                  → pretty text
+	//
+	// A single LevelVar built from cfg.LogLevel is threaded into all three
+	// branches so LOG_LEVEL controls the threshold uniformly.
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(cfg.LogLevel)
 	switch {
 	case cfg.OTLPLogsEndpoint != "":
 		logger, shutdownLogs, logErr := telemetry.InitLogging(
@@ -61,6 +66,7 @@ func main() {
 			cfg.EnvName,
 			otlpTLS,
 			otlpEgressProxyURL,
+			logLevel,
 		)
 		if logErr != nil {
 			slog.Error("failed to initialize OTLP log export",
@@ -85,10 +91,11 @@ func main() {
 		slog.SetDefault(slog.New(
 			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 				AddSource: true,
+				Level:     logLevel,
 			}),
 		))
 	default:
-		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout)))
+		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout, logLevel)))
 	}
 
 	// --- Metrics ---

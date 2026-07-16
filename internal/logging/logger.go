@@ -38,20 +38,25 @@ func levelColor(l slog.Level) string {
 type TextHandler struct {
 	w      io.Writer
 	mu     *sync.Mutex
+	level  slog.Leveler
 	attrs  []slog.Attr
 	groups []string
 }
 
-func NewTextHandler(w io.Writer) *TextHandler {
+func NewTextHandler(w io.Writer, level slog.Leveler) *TextHandler {
 	return &TextHandler{
-		w:  w,
-		mu: &sync.Mutex{},
+		w:     w,
+		mu:    &sync.Mutex{},
+		level: level,
 	}
 }
 
 func (handler *TextHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	// Could add level filtering here if you want
-	return true
+	minLevel := slog.LevelInfo
+	if handler.level != nil {
+		minLevel = handler.level.Level()
+	}
+	return level >= minLevel
 }
 
 func (handler *TextHandler) Handle(ctx context.Context, record slog.Record) error {
@@ -164,6 +169,7 @@ func (handler *TextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &TextHandler{
 		w:      handler.w,
 		mu:     handler.mu,
+		level:  handler.level,
 		attrs:  newAttrs,
 		groups: handler.groups,
 	}
@@ -177,6 +183,7 @@ func (handler *TextHandler) WithGroup(name string) slog.Handler {
 	return &TextHandler{
 		w:      handler.w,
 		mu:     handler.mu,
+		level:  handler.level,
 		attrs:  handler.attrs,
 		groups: newGroups,
 	}

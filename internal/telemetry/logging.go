@@ -33,14 +33,19 @@ import (
 //
 // When egressProxyURL is non-nil and the endpoint is TLS, exporter traffic
 // is routed through the given HTTP forward proxy.
+//
+// The level parameter sets the minimum slog level emitted on both the stdout
+// JSON handler and the OTLP fanout; records below it are dropped before export.
 func InitLogging(
 	ctx context.Context,
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
+	level slog.Leveler,
 ) (*slog.Logger, func(context.Context) error, error) {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
+		Level:     level,
 	})
 
 	if otlpEndpoint == "" {
@@ -97,6 +102,7 @@ func InitLogging(
 
 	multiHandler := &fanoutHandler{
 		handlers: []slog.Handler{jsonHandler, otelHandler},
+		level:    level,
 	}
 
 	logger := slog.New(multiHandler)
@@ -167,11 +173,15 @@ func newHTTPLogExporter(
 // fanoutHandler sends every log record to multiple slog.Handlers.
 type fanoutHandler struct {
 	handlers []slog.Handler
+	level    slog.Leveler
 }
 
 func (f *fanoutHandler) Enabled(
 	ctx context.Context, level slog.Level,
 ) bool {
+	if f.level != nil && level < f.level.Level() {
+		return false
+	}
 	for _, h := range f.handlers {
 		if h.Enabled(ctx, level) {
 			return true
@@ -200,7 +210,7 @@ func (f *fanoutHandler) WithAttrs(
 	for i, h := range f.handlers {
 		handlers[i] = h.WithAttrs(attrs)
 	}
-	return &fanoutHandler{handlers: handlers}
+	return &fanoutHandler{handlers: handlers, level: f.level}
 }
 
 func (f *fanoutHandler) WithGroup(name string) slog.Handler {
@@ -208,5 +218,5 @@ func (f *fanoutHandler) WithGroup(name string) slog.Handler {
 	for i, h := range f.handlers {
 		handlers[i] = h.WithGroup(name)
 	}
-	return &fanoutHandler{handlers: handlers}
+	return &fanoutHandler{handlers: handlers, level: f.level}
 }
