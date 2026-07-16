@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -275,6 +276,42 @@ func validateControllerConnection(cfg Config) error {
 		)
 	}
 	return nil
+}
+
+// BuildClientTLSConfig builds the *tls.Config used for mTLS to the Traversal
+// SaaS, wiring the client certificate (TLSCert/TLSKey), the CA used to verify
+// the server (TLSCA), and the expected server name (TLSServerName). It is the
+// single source of TLS material shared by the control-plane transport and the
+// OTLP telemetry exporters so both authenticate and verify identically.
+//
+// Returns (nil, nil) when no client certificate/key is configured, leaving the
+// caller to choose its own fallback: h2c for the controller, default transport
+// for OTLP.
+func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
+	if cfg.TLSCert == nil || cfg.TLSKey == nil {
+		return nil, nil //nolint:nilnil // absence of certs is a valid state.
+	}
+	cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse client TLS certificate: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		ServerName:   cfg.TLSServerName,
+		Certificates: []tls.Certificate{cert},
+	}
+
+	if cfg.TLSCA != nil {
+		caCertPool := x509.NewCertPool()
+		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); ok {
+			tlsConfig.RootCAs = caCertPool
+		} else {
+			slog.Error("failed to parse CA certificate, using system CA bundle")
+		}
+	}
+
+	return tlsConfig, nil
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.
