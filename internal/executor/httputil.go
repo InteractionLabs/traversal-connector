@@ -21,6 +21,17 @@ func hostFromURL(rawURL string) string {
 	return parsed.Host
 }
 
+// hostnameFromURL extracts just the hostname (no port, IPv6 brackets stripped)
+// from a raw URL string. It is used to match redaction rule host allowlists.
+// Returns "" if the URL cannot be parsed or has no host component.
+func hostnameFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
 // contentTypeFromGoHeaders extracts and normalises the MIME type from a
 // Go http.Header map (e.g. "application/json"), stripping parameters such
 // as charset. Returns "unknown" if the header is absent or unparseable.

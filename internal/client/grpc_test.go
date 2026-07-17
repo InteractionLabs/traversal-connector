@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"buf.build/go/protovalidate"
+	"connectrpc.com/connect"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -276,6 +277,52 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 		t.Errorf("expected *http2.Transport for http URL, got %T", transport)
 	}
 }
+
+func TestHeaderInterceptor_WrapUnary_SetsHeader(t *testing.T) {
+	interceptor := newHeaderInterceptor(connectorIDHeader, "connector-42")
+
+	var got string
+	next := func(_ context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		got = req.Header().Get(connectorIDHeader)
+		return nil, nil
+	}
+
+	req := connect.NewRequest(&pb.ConnectorMessage{})
+	if _, err := interceptor.WrapUnary(next)(context.Background(), req); err != nil {
+		t.Fatalf("WrapUnary call returned error: %v", err)
+	}
+
+	if diff := cmp.Diff("connector-42", got); diff != "" {
+		t.Errorf("header mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestHeaderInterceptor_WrapStreamingClient_SetsHeader(t *testing.T) {
+	interceptor := newHeaderInterceptor(connectorIDHeader, "connector-42")
+
+	conn := &fakeStreamingClientConn{header: make(http.Header)}
+	next := func(_ context.Context, _ connect.Spec) connect.StreamingClientConn {
+		return conn
+	}
+
+	wrapped := interceptor.WrapStreamingClient(next)(context.Background(), connect.Spec{})
+
+	if wrapped != conn {
+		t.Fatal("expected interceptor to return the underlying connection")
+	}
+	if diff := cmp.Diff("connector-42", conn.header.Get(connectorIDHeader)); diff != "" {
+		t.Errorf("header mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// fakeStreamingClientConn is a minimal connect.StreamingClientConn that only
+// exposes a request header map; the interceptor under test touches nothing else.
+type fakeStreamingClientConn struct {
+	connect.StreamingClientConn
+	header http.Header
+}
+
+func (f *fakeStreamingClientConn) RequestHeader() http.Header { return f.header }
 
 // mockSender captures the last ConnectorMessage passed to Send.
 type mockSender struct {

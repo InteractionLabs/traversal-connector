@@ -82,6 +82,11 @@ type Config struct {
 	// TLSServerName is the expected server name for TLS verification
 	// when connecting to the Traversal control plane.
 	TLSServerName string
+	// ConnectorID is the identifier stamped on every gRPC request to the
+	// Traversal control plane via the X-Traversal-Connector-ID header, letting
+	// it attribute connections to a specific connector instance. Read from
+	// TRAVERSAL_CONNECTOR_ID, which is required at startup.
+	ConnectorID string
 	// OTELServiceName is the OpenTelemetry service name reported on traces,
 	// metrics, and logs.
 	OTELServiceName string
@@ -150,6 +155,17 @@ func Load() (Config, error) {
 		return Config{}, errors.New("TRAVERSAL_CONTROLLER_URL is required")
 	}
 
+	connectorID := env.GetEnvOptionalString("TRAVERSAL_CONNECTOR_ID")
+	if connectorID == nil {
+		return Config{}, errors.New("TRAVERSAL_CONNECTOR_ID is required")
+	}
+	// Strip surrounding quotes. docker-compose list-syntax env vars
+	// (- KEY="val") keep the quotes as part of the value, which would otherwise
+	// be sent verbatim in the X-Traversal-Connector-ID header and never match
+	// the unquoted routing key used by requests.
+	trimmedConnectorID := strings.Trim(*connectorID, `"'`)
+	connectorID = &trimmedConnectorID
+
 	cfg := Config{
 		HTTPPort:               env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL: *traversalControllerURL,
@@ -170,6 +186,7 @@ func Load() (Config, error) {
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
 		TLSCA:           decodeCertificate(env.GetEnvOptionalString("TLS_CA_BASE64")),
 		TLSServerName:   env.GetEnvString("TLS_SERVER_NAME", ""),
+		ConnectorID:     *connectorID,
 		OTELServiceName: env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
 		OTLPMetricsEndpoint: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "",
