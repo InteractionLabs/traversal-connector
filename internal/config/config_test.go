@@ -84,7 +84,6 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    32,
 				TLSCert:                 nil,
 				TLSKey:                  nil,
-				TLSServerName:           "",
 				OTELServiceName:         "traversal-connector",
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
@@ -111,7 +110,6 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    32,
 				TLSCert:                 nil,
 				TLSKey:                  nil,
-				TLSServerName:           "",
 				OTELServiceName:         "traversal-connector",
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
@@ -132,7 +130,6 @@ func TestLoad(t *testing.T) {
 				"MAX_REQUEST_BODY_SIZE_MB":            "16",
 				"TLS_CERT_BASE64":                     certPEM,
 				"TLS_KEY_BASE64":                      keyPEM,
-				"TLS_SERVER_NAME":                     "controller.example.com",
 				"OTEL_SERVICE_NAME":                   "custom-traversal-connector",
 				"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "localhost:4317",
 				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "localhost:4317",
@@ -152,7 +149,6 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    16,
 				TLSCert:                 &certPEM,
 				TLSKey:                  &keyPEM,
-				TLSServerName:           "controller.example.com",
 				OTELServiceName:         "custom-traversal-connector",
 				OTLPMetricsEndpoint:     "localhost:4317",
 				OTLPTracesEndpoint:      "localhost:4317",
@@ -183,7 +179,6 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    32,
 				TLSCert:                 nil,
 				TLSKey:                  nil,
-				TLSServerName:           "",
 				OTELServiceName:         "traversal-connector",
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
@@ -213,7 +208,6 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    32,
 				TLSCert:                 nil,
 				TLSKey:                  nil,
-				TLSServerName:           "",
 				OTELServiceName:         "traversal-connector",
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
@@ -498,12 +492,62 @@ func TestDecodeCertificate(t *testing.T) {
 	}
 }
 
+func TestBuildClientTLSConfig(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	caPEM, _ := generateTestKeyPair(t)
+
+	t.Run("nil when no client cert/key", func(t *testing.T) {
+		got, err := BuildClientTLSConfig(&Config{})
+		if err != nil {
+			t.Fatalf("BuildClientTLSConfig() error: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil config when certs absent, got %+v", got)
+		}
+	})
+
+	t.Run("error on malformed cert", func(t *testing.T) {
+		_, err := BuildClientTLSConfig(&Config{
+			TLSCert: ptrTo("not a cert"),
+			TLSKey:  ptrTo("not a key"),
+		})
+		if err == nil {
+			t.Error("expected error for malformed cert, got nil")
+		}
+	})
+
+	t.Run("CA populates RootCAs", func(t *testing.T) {
+		withCA, err := BuildClientTLSConfig(&Config{
+			TLSCert: ptrTo(certPEM),
+			TLSKey:  ptrTo(keyPEM),
+			TLSCA:   ptrTo(caPEM),
+		})
+		if err != nil {
+			t.Fatalf("BuildClientTLSConfig() error: %v", err)
+		}
+		if withCA.RootCAs == nil {
+			t.Error("RootCAs = nil, want populated pool from TLSCA")
+		}
+
+		withoutCA, err := BuildClientTLSConfig(&Config{
+			TLSCert: ptrTo(certPEM),
+			TLSKey:  ptrTo(keyPEM),
+		})
+		if err != nil {
+			t.Fatalf("BuildClientTLSConfig() error: %v", err)
+		}
+		if withoutCA.RootCAs != nil {
+			t.Error("RootCAs should be nil when TLSCA is unset (system roots)")
+		}
+	})
+}
+
 func clearEnv() {
 	envVars := []string{
 		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
 		"RECONNECT_INTERVAL", "MAX_BACKOFF_DELAY", "REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
-		"TLS_SERVER_NAME", "OTEL_SERVICE_NAME",
+		"OTEL_SERVICE_NAME",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",

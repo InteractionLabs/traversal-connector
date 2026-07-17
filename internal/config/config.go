@@ -80,9 +80,6 @@ type Config struct {
 	// certificate verification. Read from TLS_CA_BASE64;
 	// may be provided as raw PEM or base64-encoded PEM.
 	TLSCA *string
-	// TLSServerName is the expected server name for TLS verification
-	// when connecting to the Traversal control plane.
-	TLSServerName string
 	// ConnectorID is the identifier stamped on every gRPC request to the
 	// Traversal control plane via the X-Traversal-Connector-ID header, letting
 	// it attribute connections to a specific connector instance. Read from
@@ -186,7 +183,6 @@ func Load() (Config, error) {
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
 		TLSCA:           decodeCertificate(env.GetEnvOptionalString("TLS_CA_BASE64")),
-		TLSServerName:   env.GetEnvString("TLS_SERVER_NAME", ""),
 		ConnectorID:     *connectorID,
 		OTELServiceName: env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
 		OTLPMetricsEndpoint: env.GetEnvString(
@@ -279,10 +275,12 @@ func validateControllerConnection(cfg Config) error {
 }
 
 // BuildClientTLSConfig builds the *tls.Config used for mTLS to the Traversal
-// SaaS, wiring the client certificate (TLSCert/TLSKey), the CA used to verify
-// the server (TLSCA), and the expected server name (TLSServerName). It is the
-// single source of TLS material shared by the control-plane transport and the
-// OTLP telemetry exporters so both authenticate and verify identically.
+// SaaS, wiring the client certificate (TLSCert/TLSKey) and the CA used to
+// verify the server (TLSCA). These credentials are identical across every
+// destination, so this is the single builder shared by the control-plane
+// transport and the OTLP telemetry exporters. Each transport verifies against
+// the host it dials, which is correct for any destination whose certificate
+// matches its URL.
 //
 // Returns (nil, nil) when no client certificate/key is configured, leaving the
 // caller to choose its own fallback: h2c for the controller, default transport
@@ -298,7 +296,6 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 
 	tlsConfig := &tls.Config{
 		MinVersion:   tls.VersionTLS12,
-		ServerName:   cfg.TLSServerName,
 		Certificates: []tls.Certificate{cert},
 	}
 

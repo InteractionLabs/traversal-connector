@@ -87,6 +87,8 @@ type otlpTransport struct {
 // "TLS endpoint without mTLS config" is not a supported configuration
 // for this connector — the SaaS gateway requires mutual TLS — so we
 // don't model it as a third state.
+//
+// Each exporter verifies against its own endpoint host at connect time.
 func planOTLPTransport(
 	rawEndpoint string,
 	tlsConfig *tls.Config,

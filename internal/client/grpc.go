@@ -149,7 +149,6 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 			"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
 		)
 	}
-
 	var egressProxyURL *url.URL
 	if cfg.EgressProxyURL != nil {
 		var perr error
