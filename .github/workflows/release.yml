@@ -48,7 +48,6 @@ jobs:
           INPUT_BUMP: ${{ github.event.inputs.bump }}
           INPUT_DESC: ${{ github.event.inputs.description }}
           LABELS: ${{ toJson(github.event.pull_request.labels) }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -63,18 +62,14 @@ jobs:
               bump=patch
             fi
             # Release notes are the top-level "# Release Notes" section of the PR
-            # body (enforced by the Release Notes Check workflow). Fall back to the
-            # full body, then the PR title, if the section is somehow absent.
-            section=$(printf '%s\n' "$PR_BODY" | awk '
-              /^#[[:space:]]+[Rr]elease[[:space:]]+[Nn]otes[[:space:]]*$/ { found=1; next }
-              found && /^#[[:space:]]/ { found=0 }
-              found { print }
-            ')
-            if [[ -n "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
-              notes="$section"
-            else
-              notes="${PR_BODY:-$PR_TITLE}"
+            # body, enforced by the Release Notes Check workflow. Fail loudly if
+            # it is missing rather than publishing an arbitrary body as notes.
+            section=$(printf '%s\n' "$PR_BODY" | .github/scripts/extract-release-notes.sh)
+            if [[ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
+              echo "::error::Merged PR has a release:* label but no non-empty '# Release Notes' section."
+              exit 1
             fi
+            notes="$section"
           fi
 
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
@@ -119,22 +114,22 @@ jobs:
       - name: Push image
         run: docker push ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.version }}
 
-      - name: Tag release
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          NOTES: ${{ steps.meta.outputs.notes }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "$NOTES"
-          git push origin "$VERSION"
-
-      - name: Create GitHub Release
+      - name: Tag and publish release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           NOTES: ${{ steps.meta.outputs.notes }}
         run: |
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --notes "$NOTES"
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$NOTES"
+          git push origin "$VERSION"
+
+          # If the release fails after the tag is pushed, roll the tag back so a
+          # rerun recomputes the same version instead of orphaning it.
+          if ! gh release create "$VERSION" --title "$VERSION" --notes "$NOTES" --verify-tag; then
+            echo "::error::Failed to create GitHub Release; rolling back tag $VERSION."
+            git push origin ":refs/tags/$VERSION" || true
+            exit 1
+          fi
