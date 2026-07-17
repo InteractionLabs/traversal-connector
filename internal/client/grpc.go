@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -141,34 +140,15 @@ func newTransport(cfg *config.Config) (http.RoundTripper, error) {
 // mTLS is required: TLSCert and TLSKey must be non-nil and parseable. Both
 // are validated by config.Load; an error here indicates Load was bypassed.
 func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
-	if cfg.TLSCert == nil || cfg.TLSKey == nil {
+	tlsConfig, err := config.BuildClientTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if tlsConfig == nil {
 		return nil, errors.New(
 			"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
 		)
 	}
-	cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
-	if err != nil {
-		return nil, fmt.Errorf(
-			"failed to parse client TLS certificate: %w", err,
-		)
-	}
-
-	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		ServerName:   cfg.TLSServerName,
-		Certificates: []tls.Certificate{cert},
-	}
-
-	if cfg.TLSCA != nil {
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); ok {
-			tlsConfig.RootCAs = caCertPool
-			slog.Info("CA certificate loaded from PEM content")
-		} else {
-			slog.Error("failed to parse CA certificate, using system CA bundle")
-		}
-	}
-
 	var egressProxyURL *url.URL
 	if cfg.EgressProxyURL != nil {
 		var perr error

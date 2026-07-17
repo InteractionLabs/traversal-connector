@@ -111,13 +111,11 @@ func TestConnectivity(cfg *config.Config) error {
 		"address", addr,
 		"has_client_cert", len(clientCerts) > 0,
 		"has_ca", caPool != nil,
-		"server_name", cfg.TLSServerName,
 	)
 
 	secureTLS := &tls.Config{
 		Certificates: clientCerts,
 		RootCAs:      caPool,
-		ServerName:   cfg.TLSServerName,
 		MinVersion:   tls.VersionTLS12,
 		NextProtos:   []string{"h2"},
 	}

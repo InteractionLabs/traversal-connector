@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -79,9 +80,6 @@ type Config struct {
 	// certificate verification. Read from TLS_CA_BASE64;
 	// may be provided as raw PEM or base64-encoded PEM.
 	TLSCA *string
-	// TLSServerName is the expected server name for TLS verification
-	// when connecting to the Traversal control plane.
-	TLSServerName string
 	// ConnectorID is the identifier stamped on every gRPC request to the
 	// Traversal control plane via the X-Traversal-Connector-ID header, letting
 	// it attribute connections to a specific connector instance. Read from
@@ -185,7 +183,6 @@ func Load() (Config, error) {
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
 		TLSCA:           decodeCertificate(env.GetEnvOptionalString("TLS_CA_BASE64")),
-		TLSServerName:   env.GetEnvString("TLS_SERVER_NAME", ""),
 		ConnectorID:     *connectorID,
 		OTELServiceName: env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
 		OTLPMetricsEndpoint: env.GetEnvString(
@@ -275,6 +272,38 @@ func validateControllerConnection(cfg Config) error {
 		)
 	}
 	return nil
+}
+
+// BuildClientTLSConfig builds the *tls.Config for mTLS to the Traversal SaaS
+// from the configured client certificate and, when set, the CA that verifies
+// the server. Without a CA the system trust store applies.
+//
+// Returns (nil, nil) when no client certificate/key is configured, letting the
+// caller apply its own non-mTLS fallback.
+func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
+	if cfg.TLSCert == nil || cfg.TLSKey == nil {
+		return nil, nil //nolint:nilnil // absence of certs is a valid state.
+	}
+	cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse client TLS certificate: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+	}
+
+	if cfg.TLSCA != nil {
+		caCertPool := x509.NewCertPool()
+		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); ok {
+			tlsConfig.RootCAs = caCertPool
+		} else {
+			slog.Error("failed to parse CA certificate, using system CA bundle")
+		}
+	}
+
+	return tlsConfig, nil
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.

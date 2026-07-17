@@ -115,7 +115,6 @@ All certificate variables accept either raw PEM (starting with
 | `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
 | `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
 | `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. When set, replaces the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
-| `TLS_SERVER_NAME` | (none) | Expected server name for TLS verification. Set explicitly only if it differs from the URL host. |
 
 ### Upstream TLS (HTTPS to internal services)
 

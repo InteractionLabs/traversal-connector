@@ -198,7 +198,6 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 		EgressProxyURL:         ptrTo("http://proxy.example.com:3128"),
 		TLSCert:                &certPEM,
 		TLSKey:                 &keyPEM,
-		TLSServerName:          "controller.example.com",
 	}
 
 	transport, err := newTransport(cfg)
@@ -213,13 +212,6 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 
 	if httpTransport.TLSClientConfig == nil {
 		t.Fatal("expected TLSClientConfig to be set")
-	}
-
-	if diff := cmp.Diff(
-		"controller.example.com",
-		httpTransport.TLSClientConfig.ServerName,
-	); diff != "" {
-		t.Errorf("TLS ServerName mismatch (-want +got):\n%s", diff)
 	}
 
 	if len(httpTransport.TLSClientConfig.Certificates) != 1 {
