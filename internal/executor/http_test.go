@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,15 @@ func assertKind(t *testing.T, err error, want ErrorKind) {
 	if ue.Kind != want {
 		t.Errorf("kind mismatch: want %d got %d (err=%v)", want, ue.Kind, err)
 	}
+}
+
+func findHeader(headers []*pb.Header, key string) (string, bool) {
+	for _, h := range headers {
+		if strings.EqualFold(h.Key, key) {
+			return h.Value, true
+		}
+	}
+	return "", false
 }
 
 func newTestExecutor(t *testing.T, timeout time.Duration, maxBodyMB int64) *Executor {
@@ -338,6 +348,321 @@ func TestExecute_UpstreamErrorStatus(t *testing.T) {
 
 	if diff := cmp.Diff(`{"error":"internal"}`, string(resp.Body)); diff != "" {
 		t.Errorf("body mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestExecute_ContentLengthRewrittenAfterRedaction(t *testing.T) {
+	body := []byte("contact user@example.com for help")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Version: "v1",
+		Rules: []redact.Rule{
+			{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+				Replacement: "[REDACTED]",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantBody := "contact [REDACTED] for help"
+	if diff := cmp.Diff(wantBody, string(resp.Body)); diff != "" {
+		t.Errorf("body mismatch (-want +got):\n%s", diff)
+	}
+
+	got, ok := findHeader(resp.Headers, "Content-Length")
+	if !ok {
+		t.Fatal("Content-Length header missing from response")
+	}
+	if diff := cmp.Diff(strconv.Itoa(len(wantBody)), got); diff != "" {
+		t.Errorf("Content-Length mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestExecute_ContentLengthNotAddedWhenAbsent(t *testing.T) {
+	// When the handler doesn't set Content-Length and writes via chunked
+	// encoding, the Go client strips Content-Length from resp.Header. We
+	// must not synthesize one after redaction.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		// Force chunked by flushing before the full body is known.
+		_, _ = w.Write([]byte("contact user@example.com"))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte(" for help"))
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Version: "v1",
+		Rules: []redact.Rule{
+			{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+				Replacement: "[REDACTED]",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := findHeader(resp.Headers, "Content-Length"); ok {
+		t.Error("Content-Length should not be set when upstream did not send one")
+	}
+}
+
+func TestExecute_JSONResponse_StructuredRedactionRespectsFieldFilters(t *testing.T) {
+	const upstream = `{"message":"contact a@b.com","safe":"contact c@d.com"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(upstream))
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Rules: []redact.Rule{{
+			Name:         "email",
+			Type:         "regex-structured-data",
+			Pattern:      `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+			Replacement:  "[EMAIL]",
+			RedactFields: []string{"message"}, // only redact "message", not "safe"
+		}},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := string(resp.Body)
+	if !strings.Contains(body, `"message":"contact [EMAIL]"`) {
+		t.Errorf("expected message to be redacted, got %q", body)
+	}
+	if !strings.Contains(body, `"safe":"contact c@d.com"`) {
+		t.Errorf("expected safe to be unchanged, got %q", body)
+	}
+}
+
+func TestExecute_NonJSONContentType_StructuredRuleSkipped_LegacyFires(t *testing.T) {
+	// On non-JSON bodies, structured rules are skipped (their field filters
+	// can't be honored on raw bytes), but legacy regex rules still fire.
+	const upstream = "email a@b.com ssn 123-45-6789"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(upstream))
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Rules: []redact.Rule{
+			{
+				Name:         "email",
+				Type:         "regex-structured-data",
+				Pattern:      `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+				Replacement:  "[EMAIL]",
+				RedactFields: []string{"some-field"},
+			},
+			{
+				Name:        "ssn",
+				Type:        "regex",
+				Pattern:     `\b\d{3}-\d{2}-\d{4}\b`,
+				Replacement: "[SSN]",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if string(resp.Body) != "email a@b.com ssn [SSN]" {
+		t.Errorf(
+			"structured rule should be skipped, legacy ssn should fire; got %q",
+			string(resp.Body),
+		)
+	}
+}
+
+func TestExecute_JSONContentTypeButInvalidBody_StructuredSkipped_LegacyFires(t *testing.T) {
+	// Invalid JSON: per-field redaction can't run, structured rules are
+	// skipped. Legacy regex rules still fire byte-level.
+	const upstream = "not json a@b.com 123-45-6789"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(upstream))
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Rules: []redact.Rule{
+			{
+				Name:        "email",
+				Type:        "regex-structured-data",
+				Pattern:     `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+				Replacement: "[EMAIL]",
+			},
+			{
+				Name:        "ssn",
+				Type:        "regex",
+				Pattern:     `\b\d{3}-\d{2}-\d{4}\b`,
+				Replacement: "[SSN]",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if string(resp.Body) != "not json a@b.com [SSN]" {
+		t.Errorf(
+			"structured rule should be skipped, legacy ssn should fire; got %q",
+			string(resp.Body),
+		)
+	}
+}
+
+func TestExecute_JSONResponse_LegacyRulesAlsoFire(t *testing.T) {
+	// On JSON bodies, structured rules fire per-field AND legacy regex rules
+	// fire byte-level over the result.
+	const upstream = `{"key":"a@b.com","ss":"123-45-6789","not-key":"c@d.com"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(upstream))
+	}))
+	defer server.Close()
+
+	redactor := redact.NewRedactor()
+	if err := redactor.Update(&redact.RulesFile{
+		Rules: []redact.Rule{
+			{
+				Name:         "email",
+				Type:         "regex-structured-data",
+				Pattern:      `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
+				Replacement:  "[EMAIL]",
+				RedactFields: []string{"key"}, // only the "key" field
+			},
+			{
+				Name:        "ssn",
+				Type:        "regex",
+				Pattern:     `\b\d{3}-\d{2}-\d{4}\b`,
+				Replacement: "[SSN]",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("redactor.Update() error: %v", err)
+	}
+
+	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
+	exec, err := NewExecutor(cfg, redactor)
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+
+	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body := string(resp.Body)
+	if !strings.Contains(body, `"key":"[EMAIL]"`) {
+		t.Errorf("key should be redacted by structured rule; got %q", body)
+	}
+	if !strings.Contains(body, `"not-key":"c@d.com"`) {
+		t.Errorf("not-key should NOT be redacted (filter excludes it); got %q", body)
+	}
+	if !strings.Contains(body, `"ss":"[SSN]"`) {
+		t.Errorf("ssn should be redacted byte-level by legacy rule; got %q", body)
 	}
 }
 

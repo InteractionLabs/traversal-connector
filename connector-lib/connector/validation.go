@@ -62,23 +62,35 @@ func FilterHopByHopHeaders(headers []*pb.Header) []*pb.Header {
 }
 
 // HTTPToProtoHeaders converts Go http.Header to protobuf Header slice.
+//
+// Each value in a multi-valued header becomes its own Header proto, preserving
+// the original header lines verbatim. Joining values with ", " is lossy for
+// headers whose values legitimately contain commas (Set-Cookie's Expires date,
+// any field that comma-separates internally), so emit them as separate entries
+// and let the receiver Add each one.
 func HTTPToProtoHeaders(h http.Header) []*pb.Header {
 	if len(h) == 0 {
 		return nil
 	}
 
-	headers := iter.Map(iter.Keys(h), func(key string) *pb.Header {
-		return &pb.Header{
-			Key:   key,
-			Value: strings.Join(h[key], ", "),
+	headers := make([]*pb.Header, 0, len(h))
+	for _, key := range iter.Keys(h) {
+		for _, value := range h[key] {
+			headers = append(headers, &pb.Header{Key: key, Value: value})
 		}
-	})
+	}
 
 	slog.Debug("converted HTTP headers to proto", "count", len(headers))
 	return headers
 }
 
 // ProtoToHTTPHeaders converts protobuf Header slice to Go http.Header.
+//
+// Each Header proto contributes one value via http.Header.Add. Splitting on
+// ", " here would corrupt headers whose values contain commas (e.g. the
+// Expires attribute of a Set-Cookie, or the Accept header that the MCP
+// streamable-http spec mandates contain both "application/json" and
+// "text/event-stream" on a single line).
 func ProtoToHTTPHeaders(headers []*pb.Header) http.Header {
 	if len(headers) == 0 {
 		return make(http.Header)
@@ -87,11 +99,7 @@ func ProtoToHTTPHeaders(headers []*pb.Header) http.Header {
 	httpHeaders := make(http.Header)
 	for _, header := range headers {
 		if header.Key != "" && header.Value != "" {
-			// Split comma-separated values back into multiple values
-			values := strings.SplitSeq(header.Value, ", ")
-			for value := range values {
-				httpHeaders.Add(header.Key, strings.TrimSpace(value))
-			}
+			httpHeaders.Add(header.Key, header.Value)
 		}
 	}
 

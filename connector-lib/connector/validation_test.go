@@ -181,14 +181,38 @@ func TestHTTPToProtoHeaders(t *testing.T) {
 			},
 		},
 		{
-			name: "multi-value headers",
+			name: "multi-value headers emit one proto per value",
 			headers: http.Header{
 				"Accept":        []string{"application/json", "text/html"},
 				"Cache-Control": []string{"no-cache", "must-revalidate"},
 			},
 			expected: []*pb.Header{
-				{Key: "Accept", Value: "application/json, text/html"},
-				{Key: "Cache-Control", Value: "no-cache, must-revalidate"},
+				{Key: "Accept", Value: "application/json"},
+				{Key: "Accept", Value: "text/html"},
+				{Key: "Cache-Control", Value: "no-cache"},
+				{Key: "Cache-Control", Value: "must-revalidate"},
+			},
+		},
+		{
+			name: "single value with internal comma preserved",
+			headers: http.Header{
+				"Accept": []string{"application/json, text/event-stream"},
+			},
+			expected: []*pb.Header{
+				{Key: "Accept", Value: "application/json, text/event-stream"},
+			},
+		},
+		{
+			name: "Set-Cookie with comma in Expires not split",
+			headers: http.Header{
+				"Set-Cookie": []string{
+					"a=1; Expires=Wed, 03 Jun 2026 16:31:26 GMT; Path=/",
+					"b=2; Expires=Thu, 04 Jun 2026 16:31:26 GMT; Path=/",
+				},
+			},
+			expected: []*pb.Header{
+				{Key: "Set-Cookie", Value: "a=1; Expires=Wed, 03 Jun 2026 16:31:26 GMT; Path=/"},
+				{Key: "Set-Cookie", Value: "b=2; Expires=Thu, 04 Jun 2026 16:31:26 GMT; Path=/"},
 			},
 		},
 	}
@@ -196,22 +220,19 @@ func TestHTTPToProtoHeaders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := HTTPToProtoHeaders(tt.headers)
-			// Sort both slices for comparison since map iteration order is not guaranteed
-			if len(result) > 0 && len(tt.expected) > 0 {
-				// Simple comparison - check if we have the expected headers
-				resultMap := make(map[string]string)
-				for _, h := range result {
-					resultMap[h.Key] = h.Value
+			// Map iteration order over http.Header is non-deterministic, so
+			// compare as multisets of (key, value) pairs rather than ordered
+			// slices.
+			type kv struct{ K, V string }
+			toBag := func(headers []*pb.Header) map[kv]int {
+				bag := make(map[kv]int)
+				for _, h := range headers {
+					bag[kv{h.Key, h.Value}]++
 				}
-				expectedMap := make(map[string]string)
-				for _, h := range tt.expected {
-					expectedMap[h.Key] = h.Value
-				}
-				if diff := cmp.Diff(expectedMap, resultMap); diff != "" {
-					t.Errorf("HTTPToProtoHeaders() mismatch (-want +got):\n%s", diff)
-				}
-			} else if diff := cmp.Diff(len(tt.expected), len(result)); diff != "" {
-				t.Errorf("HTTPToProtoHeaders() length mismatch (-want +got):\n%s", diff)
+				return bag
+			}
+			if diff := cmp.Diff(toBag(tt.expected), toBag(result)); diff != "" {
+				t.Errorf("HTTPToProtoHeaders() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -245,14 +266,35 @@ func TestProtoToHTTPHeaders(t *testing.T) {
 			},
 		},
 		{
-			name: "multi-value headers",
+			name: "comma-joined value preserved verbatim",
 			headers: []*pb.Header{
-				{Key: "Accept", Value: "application/json, text/html"},
-				{Key: "Cache-Control", Value: "no-cache, must-revalidate"},
+				{Key: "Accept", Value: "application/json, text/event-stream"},
 			},
 			expected: http.Header{
-				"Accept":        []string{"application/json", "text/html"},
-				"Cache-Control": []string{"no-cache", "must-revalidate"},
+				"Accept": []string{"application/json, text/event-stream"},
+			},
+		},
+		{
+			name: "repeated protos collapse into one multi-value slice",
+			headers: []*pb.Header{
+				{Key: "Accept", Value: "application/json"},
+				{Key: "Accept", Value: "text/html"},
+			},
+			expected: http.Header{
+				"Accept": []string{"application/json", "text/html"},
+			},
+		},
+		{
+			name: "Set-Cookie with embedded comma stays one value",
+			headers: []*pb.Header{
+				{Key: "Set-Cookie", Value: "a=1; Expires=Wed, 03 Jun 2026 16:31:26 GMT; Path=/"},
+				{Key: "Set-Cookie", Value: "b=2; Expires=Thu, 04 Jun 2026 16:31:26 GMT; Path=/"},
+			},
+			expected: http.Header{
+				"Set-Cookie": []string{
+					"a=1; Expires=Wed, 03 Jun 2026 16:31:26 GMT; Path=/",
+					"b=2; Expires=Thu, 04 Jun 2026 16:31:26 GMT; Path=/",
+				},
 			},
 		},
 		{
@@ -279,17 +321,48 @@ func TestProtoToHTTPHeaders(t *testing.T) {
 }
 
 func TestHeaderConversionRoundTrip(t *testing.T) {
-	original := http.Header{
-		"Content-Type":  []string{"application/json"},
-		"Accept":        []string{"application/json", "text/html"},
-		"Cache-Control": []string{"no-cache"},
+	tests := []struct {
+		name   string
+		header http.Header
+	}{
+		{
+			name: "multi-value slice",
+			header: http.Header{
+				"Content-Type":  []string{"application/json"},
+				"Accept":        []string{"application/json", "text/html"},
+				"Cache-Control": []string{"no-cache"},
+			},
+		},
+		{
+			name: "Accept with internal comma stays one value",
+			header: http.Header{
+				"Accept": []string{"application/json, text/event-stream"},
+			},
+		},
+		{
+			name: "Set-Cookie with comma in Expires byte-equal",
+			header: http.Header{
+				"Set-Cookie": []string{
+					"a=1; Expires=Wed, 03 Jun 2026 16:31:26 GMT; Path=/",
+					"b=2; Expires=Thu, 04 Jun 2026 16:31:26 GMT; Path=/",
+				},
+			},
+		},
+		{
+			name: "Date with comma stays one value",
+			header: http.Header{
+				"Date": []string{"Wed, 27 May 2026 16:31:26 GMT"},
+			},
+		},
 	}
 
-	// Convert to proto and back
-	proto := HTTPToProtoHeaders(original)
-	result := ProtoToHTTPHeaders(proto)
-
-	if diff := cmp.Diff(original, result); diff != "" {
-		t.Errorf("Round-trip conversion mismatch (-want +got):\n%s", diff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proto := HTTPToProtoHeaders(tt.header)
+			result := ProtoToHTTPHeaders(proto)
+			if diff := cmp.Diff(tt.header, result); diff != "" {
+				t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
