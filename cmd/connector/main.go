@@ -30,10 +30,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// mTLS credentials for OTLP exporters: the same client cert/key and CA
-	// used to reach the control plane. Each exporter verifies against its own
-	// endpoint host. Nil when no client cert/key is configured, leaving
-	// exporters on their default transport.
+	// Reuse the control-plane mTLS credentials for the OTLP exporters. Nil when
+	// no client cert/key is configured, leaving exporters on their default
+	// transport.
 	otlpTLS, tlsErr := config.BuildClientTLSConfig(&cfg)
 	if tlsErr != nil {
 		slog.Error("failed to build OTLP mTLS config", "err", tlsErr)

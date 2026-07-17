@@ -274,17 +274,12 @@ func validateControllerConnection(cfg Config) error {
 	return nil
 }
 
-// BuildClientTLSConfig builds the *tls.Config used for mTLS to the Traversal
-// SaaS, wiring the client certificate (TLSCert/TLSKey) and the CA used to
-// verify the server (TLSCA). These credentials are identical across every
-// destination, so this is the single builder shared by the control-plane
-// transport and the OTLP telemetry exporters. Each transport verifies against
-// the host it dials, which is correct for any destination whose certificate
-// matches its URL.
+// BuildClientTLSConfig builds the *tls.Config for mTLS to the Traversal SaaS
+// from the configured client certificate and, when set, the CA that verifies
+// the server. Without a CA the system trust store applies.
 //
-// Returns (nil, nil) when no client certificate/key is configured, leaving the
-// caller to choose its own fallback: h2c for the controller, default transport
-// for OTLP.
+// Returns (nil, nil) when no client certificate/key is configured, letting the
+// caller apply its own non-mTLS fallback.
 func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 	if cfg.TLSCert == nil || cfg.TLSKey == nil {
 		return nil, nil //nolint:nilnil // absence of certs is a valid state.
