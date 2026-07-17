@@ -1,0 +1,67 @@
+name: Release Notes Check
+
+# Fails a PR (and blocks the merge queue) when it carries a release:* label
+# but its description is missing a non-empty top-level "# Release Notes" section.
+on:
+  pull_request:
+    types: [opened, edited, labeled, unlabeled, synchronize, reopened]
+  merge_group:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          MERGE_GROUP_REF: ${{ github.event.merge_group.head_ref }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Gather labels + body for whichever event triggered us. The merge_group
+          # payload has no PR context, so resolve the PR number from the queue ref
+          # (gh-readonly-queue/<base>/pr-<number>-<sha>). The head_sha is the queue's
+          # synthetic commit and does not resolve back to the PR.
+          if [[ "$EVENT_NAME" == "merge_group" ]]; then
+            if [[ ! "$MERGE_GROUP_REF" =~ pr-([0-9]+)- ]]; then
+              echo "Could not determine PR from merge group ref '$MERGE_GROUP_REF'; nothing to validate."
+              exit 0
+            fi
+            pr=$(gh api "repos/$REPO/pulls/${BASH_REMATCH[1]}")
+            labels=$(echo "$pr" | jq -c '.labels')
+            body=$(echo "$pr" | jq -r '.body // ""')
+          else
+            labels="$PR_LABELS"
+            body="$PR_BODY"
+          fi
+
+          # Only enforce when a release:* label is present.
+          if ! echo "$labels" | jq -e '.[] | select(.name == "release:major" or .name == "release:minor" or .name == "release:patch")' > /dev/null; then
+            echo "No release:* label present; skipping release notes check."
+            exit 0
+          fi
+
+          section=$(printf '%s\n' "$body" | .github/scripts/extract-release-notes.sh)
+
+          if [[ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
+            echo "::error::This PR has a release:* label but its description has no non-empty '# Release Notes' section."
+            echo "Add a top-level header at the bottom of your description like:"
+            echo ""
+            echo "# Release Notes"
+            echo "<what changed in this release>"
+            exit 1
+          fi
+
+          echo "Release notes section found:"
+          echo "----------------------------------------"
+          printf '%s\n' "$section"
+          echo "----------------------------------------"
