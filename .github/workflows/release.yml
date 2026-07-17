@@ -9,8 +9,12 @@ on:
       bump:
         description: 'Version component to bump'
         type: choice
-        options: [patch, minor, major]
+        options: [major, minor, patch]
         default: patch
+      description:
+        description: 'Description of the release (release notes)'
+        type: string
+        required: true
 
 concurrency:
   group: release
@@ -22,7 +26,13 @@ env:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    # Run on manual dispatch, or when a PR is merged carrying a release:* label.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && (
+        contains(github.event.pull_request.labels.*.name, 'release:major') ||
+        contains(github.event.pull_request.labels.*.name, 'release:minor') ||
+        contains(github.event.pull_request.labels.*.name, 'release:patch')))
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
@@ -31,22 +41,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine bump type
-        id: bump
+      - name: Determine bump and release notes
+        id: meta
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUMP: ${{ github.event.inputs.bump }}
+          INPUT_DESC: ${{ github.event.inputs.description }}
           LABELS: ${{ toJson(github.event.pull_request.labels) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            bump="${{ github.event.inputs.bump }}"
-          elif echo "$LABELS" | jq -e '.[] | select(.name == "release:major")' > /dev/null; then
-            bump=major
-          elif echo "$LABELS" | jq -e '.[] | select(.name == "release:minor")' > /dev/null; then
-            bump=minor
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            bump="$INPUT_BUMP"
+            notes="$INPUT_DESC"
           else
-            bump=patch
+            if echo "$LABELS" | jq -e '.[] | select(.name == "release:major")' > /dev/null; then
+              bump=major
+            elif echo "$LABELS" | jq -e '.[] | select(.name == "release:minor")' > /dev/null; then
+              bump=minor
+            else
+              bump=patch
+            fi
+            # Release notes are the top-level "# Release Notes" section of the PR
+            # body, enforced by the Release Notes Check workflow. Fail loudly if
+            # it is missing rather than publishing an arbitrary body as notes.
+            section=$(printf '%s\n' "$PR_BODY" | .github/scripts/extract-release-notes.sh)
+            if [[ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
+              echo "::error::Merged PR has a release:* label but no non-empty '# Release Notes' section."
+              exit 1
+            fi
+            notes="$section"
           fi
+
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
           echo "Bump type: $bump"
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            echo "$notes"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute new version
         id: version
@@ -54,7 +86,7 @@ jobs:
           latest=$(git tag -l 'v*.*.*' --sort=-v:refname | head -n1)
           latest=${latest:-v0.0.0}
           IFS='.' read -r major minor patch <<< "${latest#v}"
-          case "${{ steps.bump.outputs.bump }}" in
+          case "${{ steps.meta.outputs.bump }}" in
             major) major=$((major+1)); minor=0; patch=0 ;;
             minor) minor=$((minor+1)); patch=0 ;;
             patch) patch=$((patch+1)) ;;
@@ -89,11 +121,22 @@ jobs:
           provenance: false
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.version }}
 
-      - name: Tag release
+      - name: Tag and publish release
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          NOTES: ${{ steps.meta.outputs.notes }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "Release $VERSION"
+          git tag -a "$VERSION" -m "$NOTES"
           git push origin "$VERSION"
+
+          # If the release fails after the tag is pushed, roll the tag back so a
+          # rerun recomputes the same version instead of orphaning it.
+          if ! gh release create "$VERSION" --title "$VERSION" --notes "$NOTES" --verify-tag; then
+            echo "::error::Failed to create GitHub Release; rolling back tag $VERSION."
+            git push origin ":refs/tags/$VERSION" || true
+            exit 1
+          fi
