@@ -72,6 +72,7 @@ func TestLoad(t *testing.T) {
 				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
 			},
 			expected: Config{
+				LogSink:                 LogSinkStdout,
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "test",
@@ -98,6 +99,7 @@ func TestLoad(t *testing.T) {
 				"TRAVERSAL_CONNECTOR_ID":   `"connector-1"`,
 			},
 			expected: Config{
+				LogSink:                 LogSinkStdout,
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "test",
@@ -135,8 +137,10 @@ func TestLoad(t *testing.T) {
 				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "localhost:4317",
 				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "localhost:4317",
 				"OTEL_EXPORTER_OTLP_PROTOCOL":         "grpc",
+				"LOG_FILE_PATH":                       "/var/log/traversal/connector.log",
 			},
 			expected: Config{
+				LogSink:                 LogSinkStdout,
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "https://controller.example.com:9080",
 				EnvName:                 "production",
@@ -154,6 +158,7 @@ func TestLoad(t *testing.T) {
 				OTLPTracesEndpoint:      "localhost:4317",
 				OTLPLogsEndpoint:        "localhost:4317",
 				OTLPProtocol:            "grpc",
+				LogFilePath:             ptrTo("/var/log/traversal/connector.log"),
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
 				RedactionReloadInterval: 10 * time.Second,
@@ -167,6 +172,7 @@ func TestLoad(t *testing.T) {
 				"TRAVERSAL_CONNECTOR_ID":   "connector-staging",
 			},
 			expected: Config{
+				LogSink:                 LogSinkStdout,
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "staging",
@@ -196,6 +202,7 @@ func TestLoad(t *testing.T) {
 				"REQUEST_TIMEOUT":          "nope",
 			},
 			expected: Config{
+				LogSink:                 LogSinkStdout,
 				HTTPPort:                "8080",
 				TraversalControllerURL:  "http://localhost:9080",
 				EnvName:                 "test",
@@ -208,6 +215,92 @@ func TestLoad(t *testing.T) {
 				MaxRequestBodySizeMB:    32,
 				TLSCert:                 nil,
 				TLSKey:                  nil,
+				OTELServiceName:         "traversal-connector",
+				MaxConcurrentRequests:   10,
+				UpstreamTLSVerify:       true,
+				RedactionReloadInterval: 10 * time.Second,
+			},
+		},
+		{
+			name: "log sink file with path",
+			envVars: map[string]string{
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
+				"LOG_SINK":                 "file",
+				"LOG_FILE_PATH":            "/var/log/traversal/connector.log",
+			},
+			expected: Config{
+				LogSink:                 LogSinkFile,
+				LogFilePath:             ptrTo("/var/log/traversal/connector.log"),
+				HTTPPort:                "8080",
+				TraversalControllerURL:  "http://localhost:9080",
+				EnvName:                 "test",
+				ConnectorID:             "connector-1",
+				EnvLevel:                env.EnvLevelDevelopment,
+				MaxTunnelsAllowed:       2,
+				ReconnectInterval:       5 * time.Second,
+				MaxBackoffDelay:         60 * time.Second,
+				RequestTimeout:          60 * time.Second,
+				MaxRequestBodySizeMB:    32,
+				OTELServiceName:         "traversal-connector",
+				MaxConcurrentRequests:   10,
+				UpstreamTLSVerify:       true,
+				RedactionReloadInterval: 10 * time.Second,
+			},
+		},
+		{
+			name: "log sink otlp with endpoint",
+			envVars: map[string]string{
+				"ENV_NAME":                         "test",
+				"TRAVERSAL_CONTROLLER_URL":         "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":           "connector-1",
+				"LOG_SINK":                         "otlp",
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "localhost:4317",
+			},
+			expected: Config{
+				LogSink:                 LogSinkOTLP,
+				OTLPLogsEndpoint:        "localhost:4317",
+				HTTPPort:                "8080",
+				TraversalControllerURL:  "http://localhost:9080",
+				EnvName:                 "test",
+				ConnectorID:             "connector-1",
+				EnvLevel:                env.EnvLevelDevelopment,
+				MaxTunnelsAllowed:       2,
+				ReconnectInterval:       5 * time.Second,
+				MaxBackoffDelay:         60 * time.Second,
+				RequestTimeout:          60 * time.Second,
+				MaxRequestBodySizeMB:    32,
+				OTELServiceName:         "traversal-connector",
+				MaxConcurrentRequests:   10,
+				UpstreamTLSVerify:       true,
+				RedactionReloadInterval: 10 * time.Second,
+			},
+		},
+		{
+			// A stray LOG_FILE_PATH must not flip the sink: only LOG_SINK
+			// selects the destination.
+			name: "log sink stdout ignores log file path",
+			envVars: map[string]string{
+				"ENV_NAME":                 "test",
+				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
+				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
+				"LOG_SINK":                 "stdout",
+				"LOG_FILE_PATH":            "/var/log/traversal/connector.log",
+			},
+			expected: Config{
+				LogSink:                 LogSinkStdout,
+				LogFilePath:             ptrTo("/var/log/traversal/connector.log"),
+				HTTPPort:                "8080",
+				TraversalControllerURL:  "http://localhost:9080",
+				EnvName:                 "test",
+				ConnectorID:             "connector-1",
+				EnvLevel:                env.EnvLevelDevelopment,
+				MaxTunnelsAllowed:       2,
+				ReconnectInterval:       5 * time.Second,
+				MaxBackoffDelay:         60 * time.Second,
+				RequestTimeout:          60 * time.Second,
+				MaxRequestBodySizeMB:    32,
 				OTELServiceName:         "traversal-connector",
 				MaxConcurrentRequests:   10,
 				UpstreamTLSVerify:       true,
@@ -426,6 +519,49 @@ func TestLoad_RejectsUnsupportedScheme(t *testing.T) {
 	}
 }
 
+func TestLoad_FileSinkRequiresPath(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("LOG_SINK", "file")
+
+	if _, err := Load(); err == nil {
+		t.Fatal(
+			"Load() returned nil error for LOG_SINK=file without LOG_FILE_PATH; expected an error",
+		)
+	}
+}
+
+func TestLoad_OTLPSinkRequiresEndpoint(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("LOG_SINK", "otlp")
+
+	if _, err := Load(); err == nil {
+		t.Fatal(
+			"Load() returned nil error for LOG_SINK=otlp without a logs endpoint; expected an error",
+		)
+	}
+}
+
+func TestLoad_RejectsInvalidLogSink(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("LOG_SINK", "syslog")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() returned nil error for an unrecognized LOG_SINK; expected an error")
+	}
+}
+
 func TestDecodeCertificate(t *testing.T) {
 	pemCert := "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----"
 	pemKey := "-----BEGIN EC PRIVATE KEY-----\nMIIByyy\n-----END EC PRIVATE KEY-----" //nolint:gosec // test fixture, not a real key
@@ -552,6 +688,8 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"LOG_SINK",
+		"LOG_FILE_PATH",
 		"UPSTREAM_TLS_VERIFY",
 	}
 	for _, key := range envVars {

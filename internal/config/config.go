@@ -32,6 +32,21 @@ const (
 	defaultRedactionReloadInterval = 10 * time.Second
 )
 
+// LogSink selects the single destination for the connector's own logs. It is
+// chosen solely by LOG_SINK; the presence of LOG_FILE_PATH or an OTLP logs
+// endpoint never changes the destination on its own — each is only a parameter
+// of the sink that consumes it.
+type LogSink string
+
+const (
+	// LogSinkStdout writes formatted logs to stdout only.
+	LogSinkStdout LogSink = "stdout"
+	// LogSinkFile writes formatted logs to the file at LOG_FILE_PATH.
+	LogSinkFile LogSink = "file"
+	// LogSinkOTLP exports logs via OTLP to OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.
+	LogSinkOTLP LogSink = "otlp"
+)
+
 // Config holds all configuration for the Traversal Connector service.
 type Config struct {
 	// HTTPPort is the HTTP server port for health/readiness endpoints.
@@ -103,6 +118,14 @@ type Config struct {
 	// OTLPProtocol selects the OTLP exporter transport.
 	// "grpc" or "http/protobuf" → gRPC; "http/json" or "" → HTTP.
 	OTLPProtocol string
+	// LogSink selects where the connector emits its own logs. Read from
+	// LOG_SINK; defaults to stdout. See LogSink for the valid values.
+	LogSink LogSink
+	// LogFilePath is the file destination used when LogSink is LogSinkFile.
+	// Read from LOG_FILE_PATH; typically a shared-volume path such as
+	// /var/log/traversal/connector.log tailed by a co-located log-collector
+	// sidecar. Ignored by every other sink.
+	LogFilePath *string
 	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
 	// this traversal connector can handle per tunnel when multiplexing is active.
 	MaxConcurrentRequests int
@@ -197,6 +220,8 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
+		LogSink:     LogSink(env.GetEnvString("LOG_SINK", string(LogSinkStdout))),
+		LogFilePath: env.GetEnvOptionalString("LOG_FILE_PATH"),
 		MaxConcurrentRequests: env.GetEnvInt(
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
@@ -215,7 +240,37 @@ func Load() (Config, error) {
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateLogSink(cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// validateLogSink enforces that the selected sink has the parameter it needs,
+// so a misconfigured destination fails at startup rather than silently falling
+// back to a different one. The sink is chosen solely by LOG_SINK.
+func validateLogSink(cfg Config) error {
+	switch cfg.LogSink {
+	case LogSinkStdout:
+		return nil
+	case LogSinkFile:
+		if cfg.LogFilePath == nil {
+			return errors.New("LOG_FILE_PATH is required when LOG_SINK=file")
+		}
+		return nil
+	case LogSinkOTLP:
+		if cfg.OTLPLogsEndpoint == "" {
+			return errors.New(
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is required when LOG_SINK=otlp",
+			)
+		}
+		return nil
+	default:
+		return fmt.Errorf(
+			"invalid LOG_SINK %q; expected one of: %s, %s, %s",
+			cfg.LogSink, LogSinkStdout, LogSinkFile, LogSinkOTLP,
+		)
+	}
 }
 
 // validateControllerConnection enforces the controller-URL / TLS rules so

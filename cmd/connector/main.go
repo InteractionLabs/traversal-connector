@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -45,11 +46,14 @@ func main() {
 	otlpEgressProxyURL := parseOTLPEgressProxyURL(cfg.EgressProxyURL)
 
 	// --- Logging ---
-	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
-	// Non-local              → stdout JSON
-	// Local                  → pretty text
-	switch {
-	case cfg.OTLPLogsEndpoint != "":
+	// LOG_SINK selects a single destination; the format (dev text /
+	// production JSON) is independent of it. Each sink writes to exactly one
+	// place — stdout, the LOG_FILE_PATH file (feeding a co-located
+	// log-collector sidecar that tails the shared volume), or the OTLP logs
+	// endpoint — so the destination never depends on which parameters happen
+	// to be set.
+	switch cfg.LogSink {
+	case config.LogSinkOTLP:
 		logger, shutdownLogs, logErr := telemetry.InitLogging(
 			context.Background(),
 			cfg.OTELServiceName,
@@ -60,9 +64,8 @@ func main() {
 			otlpEgressProxyURL,
 		)
 		if logErr != nil {
-			slog.Error("failed to initialize OTLP log export",
-				"err", logErr)
-			return
+			slog.Error("failed to initialize OTLP log export", "err", logErr)
+			os.Exit(1)
 		}
 		if shutdownLogs != nil {
 			defer func() {
@@ -72,20 +75,26 @@ func main() {
 				defer cancel()
 				if err := shutdownLogs(ctx); err != nil {
 					slog.ErrorContext(ctx,
-						"failed to shutdown log exporter",
-						"err", err)
+						"failed to shutdown log exporter", "err", err)
 				}
 			}()
 		}
 		slog.SetDefault(logger)
-	case !cfg.EnvLevel.IsDev():
-		slog.SetDefault(slog.New(
-			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-				AddSource: true,
-			}),
-		))
-	default:
-		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout)))
+	case config.LogSinkFile:
+		// LOG_FILE_PATH is guaranteed non-nil for this sink by config.Load.
+		logWriter, closeLog, err := logging.NewLogWriter(*cfg.LogFilePath)
+		if err != nil {
+			slog.Error("failed to open log file", "err", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := closeLog(); err != nil {
+				slog.Error("failed to close log file", "err", err)
+			}
+		}()
+		slog.SetDefault(newFormattedLogger(cfg, logWriter))
+	default: // config.LogSinkStdout
+		slog.SetDefault(newFormattedLogger(cfg, os.Stdout))
 	}
 
 	// --- Metrics ---
@@ -216,6 +225,18 @@ func main() {
 	}
 
 	slog.InfoContext(ctx, "traversal connector service shutting down")
+}
+
+// newFormattedLogger builds the logger for the stdout and file sinks, choosing
+// the pretty text handler for development and structured JSON for production.
+// The format is independent of which destination the caller writes to.
+func newFormattedLogger(cfg config.Config, w io.Writer) *slog.Logger {
+	if cfg.EnvLevel.IsDev() {
+		return slog.New(logging.NewTextHandler(w))
+	}
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
+		AddSource: true,
+	}))
 }
 
 // parseOTLPEgressProxyURL parses cfg.EgressProxyURL for use by the OTLP

@@ -3,10 +3,10 @@ package telemetry
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
@@ -17,9 +17,10 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
-// InitLogging initializes an OTLP log exporter and returns a
-// multi-handler slog.Logger that writes to both stdout (JSON) and
-// the OTLP endpoint. Returns a shutdown function to flush logs.
+// InitLogging initializes an OTLP log exporter and returns an slog.Logger
+// that ships records to the OTLP endpoint, along with a shutdown function to
+// flush logs. This is the otlp log sink: records go to the endpoint only, so
+// the caller is responsible for any stdout/file destination in other sinks.
 //
 // The protocol parameter controls the exporter type:
 //
@@ -39,14 +40,10 @@ func InitLogging(
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
 ) (*slog.Logger, func(context.Context) error, error) {
-	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource: true,
-	})
-
 	if otlpEndpoint == "" {
-		slog.InfoContext(ctx,
-			"skipping OTLP log export — no endpoint configured")
-		return slog.New(jsonHandler), nil, nil
+		return nil, nil, errors.New(
+			"OTLP logs endpoint is required for the otlp log sink",
+		)
 	}
 
 	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
@@ -93,13 +90,7 @@ func InitLogging(
 	global.SetLoggerProvider(loggerProvider)
 	slog.InfoContext(ctx, "global OTel LoggerProvider set")
 
-	otelHandler := otelslog.NewHandler(serviceName)
-
-	multiHandler := &fanoutHandler{
-		handlers: []slog.Handler{jsonHandler, otelHandler},
-	}
-
-	logger := slog.New(multiHandler)
+	logger := slog.New(otelslog.NewHandler(serviceName))
 
 	slog.InfoContext(ctx,
 		"OTLP log export active — logs are being shipped",
@@ -162,51 +153,4 @@ func newHTTPLogExporter(
 	}
 
 	return otlploghttp.New(ctx, opts...)
-}
-
-// fanoutHandler sends every log record to multiple slog.Handlers.
-type fanoutHandler struct {
-	handlers []slog.Handler
-}
-
-func (f *fanoutHandler) Enabled(
-	ctx context.Context, level slog.Level,
-) bool {
-	for _, h := range f.handlers {
-		if h.Enabled(ctx, level) {
-			return true
-		}
-	}
-	return false
-}
-
-func (f *fanoutHandler) Handle(
-	ctx context.Context, record slog.Record,
-) error {
-	for _, h := range f.handlers {
-		if h.Enabled(ctx, record.Level) {
-			if err := h.Handle(ctx, record); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (f *fanoutHandler) WithAttrs(
-	attrs []slog.Attr,
-) slog.Handler {
-	handlers := make([]slog.Handler, len(f.handlers))
-	for i, h := range f.handlers {
-		handlers[i] = h.WithAttrs(attrs)
-	}
-	return &fanoutHandler{handlers: handlers}
-}
-
-func (f *fanoutHandler) WithGroup(name string) slog.Handler {
-	handlers := make([]slog.Handler, len(f.handlers))
-	for i, h := range f.handlers {
-		handlers[i] = h.WithGroup(name)
-	}
-	return &fanoutHandler{handlers: handlers}
 }
