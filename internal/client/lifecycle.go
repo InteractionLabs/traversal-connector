@@ -19,34 +19,15 @@ const (
 )
 
 // Run manages the full lifecycle of tunnel connections to the Traversal control plane.
-// It opens up to MaxTunnelsAllowed tunnels concurrently, supervises them, and
-// periodically tops up to the desired count on a ReconnectInterval tick.
+// It launches exactly MaxTunnelsAllowed tunnel slots, each of which owns one
+// tunnel for the lifetime of the process and reconnects on its own.
 // It blocks until ctx is canceled and all tunnel goroutines have exited.
 func (cm *ConnectionManager) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	// Buffered so goroutines never block signaling a drop.
-	reconnectCh := make(chan struct{}, cm.config.MaxTunnelsAllowed)
-
-	// Initial startup: open up to MaxTunnelsAllowed tunnels.
-	cm.openTunnels(ctx, &wg, reconnectCh, cm.config.MaxTunnelsAllowed)
-
-	// Rebalance on both a periodic tick and an immediate signal from a dropped tunnel.
-	ticker := time.NewTicker(cm.config.ReconnectInterval)
-	defer ticker.Stop()
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-reconnectCh:
-				cm.rebalance(ctx, &wg, reconnectCh)
-			case <-ticker.C:
-				cm.rebalance(ctx, &wg, reconnectCh)
-			}
-		}
-	}()
+	for range cm.config.MaxTunnelsAllowed {
+		wg.Go(func() { cm.runTunnelSlot(ctx) })
+	}
 
 	// Block until shutdown signal.
 	<-ctx.Done()
@@ -57,41 +38,41 @@ func (cm *ConnectionManager) Run(ctx context.Context) error {
 	return nil
 }
 
-// openTunnels launches count tunnel goroutines concurrently. Each goroutine
-// calls RunTunnel which handles its own connection lifecycle (add/remove from
-// cm.connections). Errors such as capacity limits (ResourceExhausted) are
-// logged by the goroutine and do not crash the process — the rebalance ticker
-// will attempt to top up later.
-func (cm *ConnectionManager) openTunnels(
-	ctx context.Context,
-	wg *sync.WaitGroup,
-	reconnectCh chan struct{},
-	count int,
-) {
-	for range count {
+// runTunnelSlot owns a single tunnel slot for the lifetime of the process. It
+// keeps one tunnel open, reconnecting after a drop until ctx is canceled.
+// Because the slot never yields to a reconciler, the number of in-flight
+// connection attempts can never exceed MaxTunnelsAllowed — including while a
+// slot is still dialing or waiting out a backoff delay.
+func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
+	for ctx.Err() == nil {
+		start := time.Now()
+		err := cm.tunnelFunc(ctx)
+
 		if ctx.Err() != nil {
+			// Process shutdown.
+			if time.Since(start) >= backoffResetThreshold {
+				cm.resetBackoff()
+			}
 			return
 		}
 
-		wg.Go(func() {
-			start := time.Now()
-			err := cm.tunnelFunc(ctx)
+		switch {
+		case err == nil:
+			// The controller can cleanly close a stream to request reconnect.
+			cm.resetBackoff()
 
-			if err == nil || ctx.Err() != nil {
-				// Clean shutdown. Reset backoff if the tunnel was long-lived.
-				if time.Since(start) >= backoffResetThreshold {
-					cm.resetBackoff()
-				}
+		case isCapacityError(err):
+			// The controller is full. Hold the slot and retry on the reconnect
+			// interval rather than advancing the backoff, since this is a
+			// transient property of the fleet and not a fault of this tunnel.
+			slog.WarnContext(ctx, "controller at capacity, tunnel not opened",
+				"active_tunnels", cm.ActiveCount(),
+				"max_tunnels", cm.config.MaxTunnelsAllowed)
+			if !sleepOrDone(ctx, cm.config.ReconnectInterval) {
 				return
 			}
 
-			if isCapacityError(err) {
-				slog.WarnContext(ctx, "controller at capacity, tunnel not opened",
-					"active_tunnels", cm.ActiveCount(),
-					"max_tunnels", cm.config.MaxTunnelsAllowed)
-				return
-			}
-
+		default:
 			// Unexpected drop.
 			slog.ErrorContext(ctx, "tunnel exited with error", "error", err)
 
@@ -102,46 +83,26 @@ func (cm *ConnectionManager) openTunnels(
 				// Short-lived failure — back off before reconnecting.
 				delay := cm.nextBackoff()
 				slog.InfoContext(ctx, "backing off before reconnect", "delay", delay)
-				select {
-				case <-time.After(delay):
-				case <-ctx.Done():
+				if !sleepOrDone(ctx, delay) {
 					return
 				}
 			}
+		}
 
-			select {
-			case reconnectCh <- struct{}{}:
-			default:
-			}
-		})
+		cm.metrics.reconnectsTotal.Add(ctx, 1)
 	}
 }
 
-// rebalance checks the current tunnel count and opens new tunnels to reach
-// MaxTunnelsAllowed. It is called periodically by the Run loop.
-func (cm *ConnectionManager) rebalance(
-	ctx context.Context,
-	wg *sync.WaitGroup,
-	reconnectCh chan struct{},
-) {
-	current := cm.ActiveCount()
-	desired := cm.config.MaxTunnelsAllowed
-
-	if current >= desired {
-		slog.DebugContext(ctx, "rebalance: tunnel count at desired level",
-			"current", current,
-			"desired", desired)
-		return
+// sleepOrDone waits for d, returning false if ctx was canceled first.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
-
-	deficit := desired - current
-	cm.metrics.reconnectsTotal.Add(ctx, int64(deficit))
-	slog.InfoContext(ctx, "rebalance: topping up tunnels",
-		"current", current,
-		"desired", desired,
-		"opening", deficit)
-
-	cm.openTunnels(ctx, wg, reconnectCh, deficit)
 }
 
 // ActiveCount returns the current number of active tunnel connections.
