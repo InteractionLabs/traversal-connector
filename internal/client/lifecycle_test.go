@@ -74,7 +74,8 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 	cm := &ConnectionManager{
 		config: &config.Config{
 			MaxTunnelsAllowed: 1,
-			// Long interval so only reconnectCh — not the ticker — triggers reconnect.
+			// Long interval so the slot's own retry — not a capacity wait —
+			// is what drives the reconnect.
 			ReconnectInterval: time.Hour,
 		},
 		connections: make([]*StreamConnection, 0),
@@ -106,6 +107,133 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 		// Reconnect happened after backoff delay.
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for reconnect after tunnel drop")
+	}
+}
+
+func TestRun_ReconnectsOnCleanControllerClose(t *testing.T) {
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatalf("initConnectionMetrics: %v", err)
+	}
+
+	cm := &ConnectionManager{
+		config: &config.Config{
+			MaxTunnelsAllowed: 1,
+			ReconnectInterval: time.Hour,
+		},
+		connections: make([]*StreamConnection, 0),
+		metrics:     metrics,
+	}
+
+	reconnected := make(chan struct{})
+	var callCount atomic.Int32
+	cm.tunnelFunc = func(ctx context.Context) error {
+		if callCount.Add(1) == 1 {
+			return nil
+		}
+		close(reconnected)
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = cm.Run(ctx) }()
+
+	select {
+	case <-reconnected:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for reconnect after clean controller close")
+	}
+}
+
+func TestRun_DoesNotExceedDesiredWorkersWhileConnecting(t *testing.T) {
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatalf("initConnectionMetrics: %v", err)
+	}
+
+	const desired = 3
+	cm := &ConnectionManager{
+		config: &config.Config{
+			MaxTunnelsAllowed: desired,
+			// Short enough that a reconciler-style top-up would fire many times
+			// during the sleep below if one still existed.
+			ReconnectInterval: 5 * time.Millisecond,
+		},
+		connections: make([]*StreamConnection, 0),
+		metrics:     metrics,
+	}
+
+	// Every slot blocks in "connecting" without ever registering a connection,
+	// so nothing observable reports the slot as filled.
+	var calls atomic.Int32
+	cm.tunnelFunc = func(ctx context.Context) error {
+		calls.Add(1)
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = cm.Run(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != desired {
+		t.Fatalf("tunnel workers started = %d, want %d", got, desired)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connection manager did not stop")
+	}
+}
+
+func TestRun_RetriesOnReconnectIntervalAfterCapacityError(t *testing.T) {
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatalf("initConnectionMetrics: %v", err)
+	}
+
+	cm := &ConnectionManager{
+		config: &config.Config{
+			MaxTunnelsAllowed: 1,
+			ReconnectInterval: 10 * time.Millisecond,
+		},
+		connections: make([]*StreamConnection, 0),
+		metrics:     metrics,
+	}
+
+	// A capacity rejection must not retire the slot, and must not advance the
+	// backoff — the retry is paced by ReconnectInterval, well under the 1s
+	// initial backoff the timeout below would otherwise not accommodate.
+	retried := make(chan struct{})
+	var calls atomic.Int32
+	cm.tunnelFunc = func(ctx context.Context) error {
+		if calls.Add(1) == 1 {
+			return connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New("tunnel capacity exceeded: 10/10"),
+			)
+		}
+		close(retried)
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go func() { _ = cm.Run(ctx) }()
+
+	select {
+	case <-retried:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for retry after capacity error")
 	}
 }
 
