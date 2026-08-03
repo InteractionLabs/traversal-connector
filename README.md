@@ -216,16 +216,49 @@ Rules are applied in order; each rule operates on the output of the previous one
 
 ### Telemetry (OpenTelemetry)
 
-The connector emits OpenTelemetry traces, metrics, and logs. Endpoints are
-**unset by default** — when an endpoint is empty, that signal is not exported.
+The connector emits OpenTelemetry traces, metrics, and logs. Telemetry is the
+only view Traversal has into a connector running inside a customer network, so
+exporting all three signals is **required**. Outside `ENV_LEVEL=development`,
+the connector refuses to start without it.
 
 | Variable | Default | Description |
 |---|---|---|
 | `OTEL_SERVICE_NAME` | `traversal-connector` | Service name reported on all signals. |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | (none) | OTLP endpoint for metrics. Full URL or `host:port`. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | (none) | OTLP endpoint for traces. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | (none) | OTLP endpoint for logs. When unset, logs go to stdout only. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | (required) | OTLP endpoint for metrics. Must be an `https://` URL. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | (required) | OTLP endpoint for traces. Must be an `https://` URL. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | (required) | OTLP endpoint for logs. Must be an `https://` URL. Logs also always go to stdout. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | (empty) | `grpc` or `http/protobuf` selects gRPC; `http/json` (or empty) selects HTTP. |
+| `TRAVERSAL_DISABLE_TELEMETRY` | `false` | Opts out of all telemetry export. **Strongly discouraged**. Traversal cannot diagnose or assist with issues in a deployment that reports nothing. |
+
+Point all three endpoints either at a collector you operate or at the ingest
+endpoints supplied with your deployment. Their shape follows the protocol: `grpc`
+takes a host and port and names the signal in the request
+(`https://collector.example.com:4317`), while `http/*` names it in the path
+(`https://collector.example.com/v1/metrics`). The deployment chart fills these in;
+a deployment that sets the environment directly has to provide them.
+
+Startup rejects a telemetry configuration that would export nothing or export in
+cleartext:
+
+- All three endpoints must be set. A partially configured exporter looks healthy
+  from the outside while leaving a gap nobody finds until an incident.
+- Each must be an `https://` URL naming a host. A scheme-less `host:port` is
+  rejected with `http://`, because the exporters read the scheme to decide
+  whether to negotiate TLS at all.
+- `http://` is accepted only on loopback: anything in `127.0.0.0/8`,
+  `localhost`, `[::1]`, or the IPv4-mapped form. A telemetry forwarder colocated
+  with the connector receives it. That hop never leaves the pod's network
+  namespace. The forwarder holds the mTLS identity for the egress that does.
+
+Two exemptions: `ENV_LEVEL=development`, and `TRAVERSAL_DISABLE_TELEMETRY=true`,
+which drops any endpoints that were configured anyway so the opt-out is absolute.
+
+Note what the first exemption means in practice. `ENV_LEVEL` defaults to
+`development`, and only the published container image sets it to `production`
+(see the `Dockerfile`), so a connector built from source or repackaged into a
+custom image gets no telemetry enforcement at all until `ENV_LEVEL` says
+otherwise. This mirrors the exemption that allows an `http://`
+`TRAVERSAL_CONTROLLER_URL` in development.
 
 The connector also reads the OTel-standard
 [`OTEL_RESOURCE_ATTRIBUTES`](https://opentelemetry.io/docs/specs/otel/resource/sdk/#specifying-resource-information-via-an-environment-variable)
