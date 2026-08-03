@@ -88,6 +88,16 @@ func main() {
 		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout)))
 	}
 
+	// Emitted here rather than where the opt-out is read, so the one line saying
+	// this deployment is unobservable lands on the same stream, in the same
+	// format, as everything an operator reads after it.
+	if cfg.DisableTelemetry {
+		slog.Warn(
+			"telemetry export disabled by TRAVERSAL_DISABLE_TELEMETRY; " +
+				"Traversal cannot diagnose issues in this deployment",
+		)
+	}
+
 	// --- Metrics ---
 	shutdownMetrics, err := telemetry.InitMetrics(
 		context.Background(),

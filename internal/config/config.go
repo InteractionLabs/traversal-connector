@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,8 @@ const (
 	defaultUpstreamTLSVerify     = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
+	// maxTCPPort is the highest port an endpoint URL can name.
+	maxTCPPort = 65535
 	// Default timeout and interval durations.
 	defaultReconnectInterval       = 5 * time.Second
 	defaultMaxBackoffDelay         = 60 * time.Second
@@ -89,20 +93,27 @@ type Config struct {
 	// metrics, and logs.
 	OTELServiceName string
 	// OTLPMetricsEndpoint is the OTLP endpoint for metrics export.
-	// Supports full URLs (https://host/path) and bare host:port.
 	// Empty means metrics export is skipped.
+	//
+	// applyTelemetryPolicy decides which values are accepted, and when empty is
+	// one of them. The same applies to the two endpoints below.
 	OTLPMetricsEndpoint string
 	// OTLPTracesEndpoint is the OTLP endpoint for traces export.
-	// Supports full URLs (https://host/path) and bare host:port.
 	// Empty means traces export is skipped.
 	OTLPTracesEndpoint string
 	// OTLPLogsEndpoint is the OTLP endpoint for logs export.
-	// Supports full URLs (https://host/path) and bare host:port.
 	// Empty means OTLP log export is skipped (stdout-only).
 	OTLPLogsEndpoint string
 	// OTLPProtocol selects the OTLP exporter transport.
 	// "grpc" or "http/protobuf" → gRPC; "http/json" or "" → HTTP.
 	OTLPProtocol string
+	// DisableTelemetry opts the deployment out of all telemetry export. Read
+	// from TRAVERSAL_DISABLE_TELEMETRY, false by default.
+	//
+	// Telemetry is the only view Traversal has into a running connector, so this
+	// is strongly discouraged: with it set, Traversal cannot diagnose or assist
+	// with issues in this deployment. applyTelemetryPolicy enforces its inverse.
+	DisableTelemetry bool
 	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
 	// this traversal connector can handle per tunnel when multiplexing is active.
 	MaxConcurrentRequests int
@@ -197,6 +208,7 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
+		DisableTelemetry: env.GetEnvBool("TRAVERSAL_DISABLE_TELEMETRY", false),
 		MaxConcurrentRequests: env.GetEnvInt(
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
@@ -215,7 +227,127 @@ func Load() (Config, error) {
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := applyTelemetryPolicy(&cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// applyTelemetryPolicy is the single place deciding how this deployment exports
+// telemetry.
+//
+// Exporting is required outside development: Traversal cannot support a connector
+// it cannot observe, and a partly configured exporter is worse than none because
+// it still looks healthy from the outside. Failing at startup surfaces that at
+// deploy time rather than at the first incident.
+//
+// Opting out is absolute. TRAVERSAL_DISABLE_TELEMETRY drops any endpoints
+// configured anyway, so an empty endpoint keeps one meaning downstream: no
+// exporter starts. The caller announces that state, because config loading runs
+// before a logger exists.
+func applyTelemetryPolicy(cfg *Config) error {
+	if cfg.DisableTelemetry {
+		cfg.OTLPMetricsEndpoint = ""
+		cfg.OTLPTracesEndpoint = ""
+		cfg.OTLPLogsEndpoint = ""
+		return nil
+	}
+
+	// Local development runs without a collector to export to, the same
+	// exemption http:// controller URLs get.
+	if cfg.EnvLevel.IsDev() {
+		return nil
+	}
+
+	for _, endpoint := range []otlpEndpoint{
+		{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", cfg.OTLPMetricsEndpoint},
+		{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", cfg.OTLPTracesEndpoint},
+		{"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", cfg.OTLPLogsEndpoint},
+	} {
+		if err := endpoint.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// otlpEndpoint pairs a configured OTLP endpoint with the variable that set it,
+// so a rejection can name what the operator has to fix.
+type otlpEndpoint struct {
+	envVar string
+	value  string
+}
+
+// validate rejects an endpoint that is unset, malformed, or would export in
+// cleartext.
+//
+// A bare host:port is rejected along with http://: the exporters read the scheme
+// to decide whether to negotiate TLS at all, so a scheme-less endpoint silently
+// ships telemetry in cleartext.
+//
+// Loopback is the one exception, and it is a colocated telemetry forwarder: that
+// hop never leaves the pod's network namespace, and the forwarder holds the mTLS
+// identity for the egress that does leave it.
+func (e otlpEndpoint) validate() error {
+	if e.value == "" {
+		return fmt.Errorf(
+			"%s is required: set all three OTLP endpoints, or set "+
+				"TRAVERSAL_DISABLE_TELEMETRY=true to run without telemetry "+
+				"(Traversal cannot then support this deployment)",
+			e.envVar,
+		)
+	}
+
+	u, err := url.Parse(e.value)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", e.envVar, err)
+	}
+	// Hostname(), not Host: "https://:4317" parses with a non-empty Host of
+	// ":4317" and no hostname at all. An exporter resolves that to localhost and
+	// drops every batch. This check closes that silent gap.
+	if u.Hostname() == "" {
+		return fmt.Errorf(
+			"%s must be an https:// URL including a host (got %q)",
+			e.envVar, u.Redacted(),
+		)
+	}
+	// url.Parse rejects a non-numeric port but not an out-of-range one, and a
+	// port nothing can listen on fails at export rather than at startup.
+	if port := u.Port(); port != "" {
+		if n, convErr := strconv.Atoi(port); convErr != nil || n < 1 || n > maxTCPPort {
+			return fmt.Errorf(
+				"%s has an out-of-range port %q", e.envVar, port,
+			)
+		}
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		return nil
+	}
+	// Redacted() keeps a credential embedded in the endpoint out of the startup
+	// error, which is logged and may be shipped off-host.
+	return fmt.Errorf(
+		"%s must be an https:// URL (got %q); http:// is accepted only on "+
+			"loopback, where a colocated telemetry forwarder receives it",
+		e.envVar, u.Redacted(),
+	)
+}
+
+// isLoopbackHost reports whether host addresses the local pod. Host names are
+// case-insensitive and may carry the root dot, and both spellings reach the
+// same forwarder.
+//
+// Shorthand IPv4 ("127.1") is deliberately not accepted even though a resolver
+// expands it: recognizing it means resolving, and startup validation that
+// depends on resolution answers a different question than the one asked.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // validateControllerConnection enforces the controller-URL / TLS rules so
