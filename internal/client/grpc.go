@@ -24,6 +24,7 @@ import (
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/executor"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
@@ -396,7 +397,7 @@ func (cm *ConnectionManager) handleMessage(
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
 					ErrorResponse: &pb.ErrorResponse{
-						Code:    string(connector.ErrorCodeUpstreamError),
+						Code:    string(connector.ErrorCodeInvalidRequest),
 						Message: fmt.Sprintf("invalid request: %s", err),
 					},
 				},
@@ -406,11 +407,16 @@ func (cm *ConnectionManager) handleMessage(
 		httpResp, err := cm.executor.Execute(reqCtx, m.HttpRequest)
 		if err != nil {
 			span.RecordError(err)
+			code := connector.ErrorCodeInternal
+			var ue *executor.UpstreamError
+			if errors.As(err, &ue) {
+				code = executor.ErrorCodeFor(ue.Kind)
+			}
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
 					ErrorResponse: &pb.ErrorResponse{
-						Code:    string(connector.ErrorCodeUpstreamError),
+						Code:    string(code),
 						Message: err.Error(),
 					},
 				},
@@ -448,7 +454,7 @@ func (cm *ConnectionManager) handleMessage(
 			RequestId: msg.RequestId,
 			Message: &pb.ConnectorMessage_ErrorResponse{
 				ErrorResponse: &pb.ErrorResponse{
-					Code:    string(connector.ErrorCodeUpstreamError),
+					Code:    string(connector.ErrorCodeUnsupported),
 					Message: "connection requests are not supported",
 				},
 			},
@@ -463,7 +469,7 @@ func (cm *ConnectionManager) handleMessage(
 			RequestId: msg.RequestId,
 			Message: &pb.ConnectorMessage_ErrorResponse{
 				ErrorResponse: &pb.ErrorResponse{
-					Code:    string(connector.ErrorCodeUpstreamError),
+					Code:    string(connector.ErrorCodeUnsupported),
 					Message: fmt.Sprintf("unknown message type: %s", msgType),
 				},
 			},
