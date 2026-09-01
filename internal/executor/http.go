@@ -333,11 +333,13 @@ func (e *Executor) buildResponse(
 
 	return finalizeResponse(resp, finalBody, responseDisposition{
 		redacted: changed,
-		// Compared against the bytes that arrived, so this covers every way the
-		// connector can move a representation without redacting anything: a gzip
-		// re-encode, and a JSON body the upstream pretty-printed that comes back
-		// re-serialized.
-		representationChanged: !bytes.Equal(finalBody, body),
+		// On the gzip path the connector produced the wire bytes itself, so the
+		// upstream's validators stop describing them even when this compressor
+		// happens to emit an identical stream. Depending on that coincidence would
+		// tie header hygiene to a compression library's output. Otherwise a real
+		// byte difference is the test, which is what catches a JSON body that came
+		// back re-serialized with nothing redacted.
+		representationChanged: coding == codingGzip || !bytes.Equal(finalBody, body),
 	}), nil
 }
 

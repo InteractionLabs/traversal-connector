@@ -147,13 +147,16 @@ func ungzip(t *testing.T, src []byte) []byte {
 	return decoded
 }
 
-// gzipServer serves body as gzip, echoing back that coding.
+// gzipServer serves body as gzip, echoing back that coding. It carries an ETag
+// because a real upstream does, and because an assertion that a validator was
+// stripped proves nothing against a response that never had one.
 func gzipServer(t *testing.T, contentType string, body []byte) *httptest.Server {
 	t.Helper()
 	encoded := gzipped(t, body)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(headerContentType, contentType)
 		w.Header().Set(headerContentEncoding, "gzip")
+		w.Header().Set("ETag", `"v1"`)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(encoded)
 	}))
