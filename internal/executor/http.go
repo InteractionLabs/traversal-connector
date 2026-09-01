@@ -33,18 +33,35 @@ const (
 	bytesPerKB = 1024
 	kbPerMB    = 1024
 
-	headerContentLength = "Content-Length"
-	headerContentType   = "Content-Type"
+	headerContentLength   = "Content-Length"
+	headerContentType     = "Content-Type"
+	headerContentEncoding = "Content-Encoding"
+	headerAcceptRanges    = "Accept-Ranges"
+	// headerRedacted tells the SaaS side that the body it received is not the
+	// body the upstream sent.
+	headerRedacted = "X-Traversal-Redacted"
+)
+
+// Reasons a response was dropped rather than forwarded. The set is closed so the
+// refusal counter stays cheap to alert on.
+const (
+	refusalUnsupportedEncoding = "unsupported_encoding"
+	refusalPartialContent      = "partial_content"
+	refusalBodyTooLarge        = "body_too_large"
+	refusalDecodedTooLarge     = "decoded_too_large"
+	refusalDecodeFailed        = "decode_failed"
 )
 
 // Executor handles executing HTTP requests against upstream services
 // within the customer network on behalf of the Traversal control plane.
 type Executor struct {
-	client                  *http.Client
-	maxRequestBodySizeBytes int64
-	tracer                  trace.Tracer
-	metrics                 *executorMetrics
-	redactor                *redact.Redactor
+	client                          *http.Client
+	maxRequestBodySizeBytes         int64
+	maxResponseBodySizeBytes        int64
+	maxDecodedResponseBodySizeBytes int64
+	tracer                          trace.Tracer
+	metrics                         *executorMetrics
+	redactor                        *redact.Redactor
 }
 
 // NewExecutor creates a new HTTP executor with the given configuration.
@@ -79,11 +96,14 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 	}
 
 	return &Executor{
-		client:                  httpClient,
-		maxRequestBodySizeBytes: cfg.MaxRequestBodySizeMB * bytesPerKB * kbPerMB,
-		tracer:                  otel.Tracer(InstrumentationName),
-		metrics:                 metrics,
-		redactor:                r,
+		client:                   httpClient,
+		maxRequestBodySizeBytes:  cfg.MaxRequestBodySizeMB * bytesPerKB * kbPerMB,
+		maxResponseBodySizeBytes: cfg.MaxResponseBodySizeMB * bytesPerKB * kbPerMB,
+		maxDecodedResponseBodySizeBytes: cfg.MaxDecodedResponseBodySizeMB *
+			bytesPerKB * kbPerMB,
+		tracer:   otel.Tracer(InstrumentationName),
+		metrics:  metrics,
+		redactor: r,
 	}, nil
 }
 
@@ -188,49 +208,14 @@ func (e *Executor) Execute(
 	}
 	defer resp.Body.Close()
 
-	// Read the response body.
-	respBody, err := io.ReadAll(resp.Body)
+	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
 	if err != nil {
 		span.RecordError(err)
-		duration := time.Since(startTime)
-		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
-			"error", err,
-			"target_host", targetHost,
-			"duration_ms", duration.Milliseconds())
-		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
+		return nil, err
 	}
-
-	// Apply redaction rules to the response body before it leaves the customer
-	// network. Structured (regex-structured-data) rules fire per-field via
-	// ApplyJSON — only when the Content-Type is JSON and the body parses. If
-	// either fails, structured rules are skipped (their field filters can't be
-	// honored on raw bytes). Legacy byte-level "regex" rules always fire via
-	// Apply, regardless of content type.
-	redactHost := hostnameFromURL(protoReq.Url)
-	if isJSONContentType(resp.Header.Get(headerContentType)) {
-		redacted, jerr := e.redactor.ApplyJSON(ctx, redactHost, respBody)
-		if jerr == nil {
-			respBody = redacted
-		} else {
-			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
-				"error", jerr, "target_host", targetHost)
-		}
-	}
-	respBody = e.redactor.Apply(ctx, redactHost, respBody)
-
-	// Redaction can change the body length, so refresh Content-Length if the
-	// upstream set one. Go's http.Client strips Content-Length on transparent
-	// gzip decompression, so we only touch the header when it's actually present.
-	if resp.Header.Get(headerContentLength) != "" {
-		resp.Header.Set(headerContentLength, strconv.Itoa(len(respBody)))
-	}
-
-	// Convert response headers to protobuf, filtering hop-by-hop.
-	respHeaders := connector.HTTPToProtoHeaders(resp.Header)
-	respHeaders = connector.FilterHopByHopHeaders(respHeaders)
 
 	// Record response body size.
-	e.metrics.upstreamResponseBodySizeBytes.Record(ctx, int64(len(respBody)),
+	e.metrics.upstreamResponseBodySizeBytes.Record(ctx, int64(len(protoResp.Body)),
 		metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
 
 	requestStatus = connector.StatusSuccess
@@ -241,15 +226,231 @@ func (e *Executor) Execute(
 		"target_host", targetHost,
 		"status", resp.StatusCode,
 		"duration_ms", duration.Milliseconds(),
-		"response_body_size", len(respBody))
+		"response_body_size", len(protoResp.Body))
+
+	return protoResp, nil
+}
+
+// buildResponse turns an upstream response into the one that leaves the customer
+// network.
+//
+// The connector forwards the caller's Accept-Encoding unchanged, so Go's
+// transport does not decompress on its own and the body arrives in whatever
+// coding the upstream chose. Redacting it therefore means decoding it here:
+// a regex over a deflate stream matches nothing and would ship the plaintext
+// out intact.
+//
+// Every decision is made against what the upstream actually returned rather
+// than what the request predicted, and a body the connector cannot scan is
+// dropped rather than forwarded.
+func (e *Executor) buildResponse(
+	ctx context.Context,
+	resp *http.Response,
+	targetURL string,
+	targetHost string,
+) (*pb.HttpResponse, error) {
+	body, err := readLimited(resp.Body, e.maxResponseBodySizeBytes)
+	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			return nil, e.refuse(ctx, targetHost, refusalBodyTooLarge,
+				connector.ErrorCodeUpstreamError,
+				fmt.Errorf("upstream response body exceeds %d bytes",
+					e.maxResponseBodySizeBytes))
+		}
+		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
+			"error", err,
+			"target_host", targetHost)
+		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
+	}
+
+	// Recorded before the rules check so the metric answers what the whole fleet
+	// receives, including from hosts nothing redacts today.
+	coding := classifyContentCoding(resp.Header.Values(headerContentEncoding))
+	e.metrics.responseContentEncoding.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(connector.AttrTargetHost, targetHost),
+		attribute.String(attrContentEncoding, string(coding)),
+	))
+
+	redactHost := hostnameFromURL(targetURL)
+	if !e.redactor.HasRulesForHost(redactHost) {
+		// Nothing to scan, so nothing is decoded or re-encoded and the feature
+		// costs a host with no rules only the classification above.
+		return finalizeResponse(resp, body, responseDisposition{}), nil
+	}
+
+	// A rule applies, so a range request against this host would be refused
+	// below. Stop advertising a capability the connector no longer honors.
+	resp.Header.Del(headerAcceptRanges)
+
+	// 204, 304, and a HEAD reply carry no body, so there is nothing to decode
+	// and nothing that could leak.
+	if len(body) == 0 {
+		return finalizeResponse(resp, body, responseDisposition{}), nil
+	}
+
+	// A pattern straddling a chunk boundary is invisible to both halves, so a
+	// partial body cannot be redacted soundly.
+	if resp.StatusCode == http.StatusPartialContent {
+		return nil, e.refuse(ctx, targetHost, refusalPartialContent,
+			connector.ErrorCodeUpstreamError,
+			errors.New("partial response cannot be redacted"))
+	}
+
+	if !coding.canDecode() {
+		return nil, e.refuse(ctx, targetHost, refusalUnsupportedEncoding,
+			connector.ErrorCodeUnsupportedEncoding,
+			fmt.Errorf("response content encoding %q cannot be redacted",
+				resp.Header.Get(headerContentEncoding)))
+	}
+
+	plaintext := body
+	if coding == codingGzip {
+		plaintext, err = decodeGzip(body, e.maxDecodedResponseBodySizeBytes)
+		if err != nil {
+			reason := refusalDecodeFailed
+			if errors.Is(err, errBodyTooLarge) {
+				reason = refusalDecodedTooLarge
+			}
+			return nil, e.refuse(ctx, targetHost, reason,
+				connector.ErrorCodeUpstreamError, err)
+		}
+		e.metrics.decodedResponseBodySizeBytes.Record(ctx, int64(len(plaintext)),
+			metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
+	}
+
+	redacted, changed := e.redactBody(
+		ctx, redactHost, resp.Header.Get(headerContentType), plaintext, targetHost,
+	)
+
+	finalBody := redacted
+	if coding == codingGzip {
+		if finalBody, err = encodeGzip(redacted); err != nil {
+			return nil, fmt.Errorf("failed to re-encode upstream response body: %w", err)
+		}
+		// Normalizes a header the upstream may have spelled with different case.
+		resp.Header.Set(headerContentEncoding, string(codingGzip))
+	}
+
+	return finalizeResponse(resp, finalBody, responseDisposition{
+		redacted: changed,
+		// On the gzip path the connector produced the wire bytes itself, so the
+		// upstream's validators stop describing them even when this compressor
+		// happens to emit an identical stream. Depending on that coincidence would
+		// tie header hygiene to a compression library's output. Otherwise a real
+		// byte difference is the test, which is what catches a JSON body that came
+		// back re-serialized with nothing redacted.
+		representationChanged: coding == codingGzip || !bytes.Equal(finalBody, body),
+	}), nil
+}
+
+// responseDisposition records what the connector did to a body. Each fact
+// governs different headers, and they are not interchangeable: redacting always
+// moves the representation, but the representation moves on its own too, so
+// representationChanged is the wider of the two.
+type responseDisposition struct {
+	// redacted is true when a rule matched and content was removed.
+	redacted bool
+	// representationChanged is true when the bytes leaving are not the bytes that
+	// arrived, whether or not anything was redacted. A gzip re-encode and a
+	// re-serialized JSON document both qualify with no rule matching.
+	representationChanged bool
+}
+
+// finalizeResponse rewrites the headers the connector invalidated and converts
+// the response for the tunnel.
+func finalizeResponse(
+	resp *http.Response,
+	body []byte,
+	disposition responseDisposition,
+) *pb.HttpResponse {
+	// Cleared unconditionally before it is written, so the header is present only
+	// because the connector put it there. It is a claim about what the connector
+	// did, and nothing downstream can check it against the body, so an upstream
+	// sending one of its own would be forging a signal the far side trusts.
+	resp.Header.Del(headerRedacted)
+	if disposition.redacted {
+		resp.Header.Set(headerRedacted, "true")
+	}
+
+	// Derived from the slice that becomes the body, so the header and the bytes
+	// cannot disagree. A bodyless response keeps whatever the upstream sent: a
+	// HEAD reply legitimately describes a body it does not carry, while 204 and
+	// 304 send no length to preserve.
+	if len(body) > 0 {
+		resp.Header.Set(headerContentLength, strconv.Itoa(len(body)))
+	}
+
+	headers := connector.HTTPToProtoHeaders(resp.Header)
+	headers = connector.FilterHopByHopHeaders(headers)
+	// Keyed on the representation rather than on redaction: a validator the
+	// upstream computed over its own bytes is stale the moment those bytes change,
+	// whatever the reason.
+	if disposition.representationChanged {
+		headers = connector.FilterContentDependentHeaders(headers)
+	}
 
 	return &pb.HttpResponse{
 		HttpStatus: int32( //nolint:gosec // HTTP status codes are always in the int32 range
 			resp.StatusCode,
 		),
-		Headers: respHeaders,
-		Body:    respBody,
-	}, nil
+		Headers: headers,
+		Body:    body,
+	}
+}
+
+// redactBody applies the redaction rules to a decoded body and reports whether
+// any of them changed it.
+//
+// Structured (regex-structured-data) rules fire per-field via ApplyJSON — only
+// when the Content-Type is JSON and the body parses. If either fails, structured
+// rules are skipped, because their field filters cannot be honored on raw bytes.
+// Legacy byte-level "regex" rules always fire via Apply, regardless of content
+// type.
+func (e *Executor) redactBody(
+	ctx context.Context,
+	redactHost string,
+	contentType string,
+	body []byte,
+	targetHost string,
+) ([]byte, bool) {
+	changed := false
+	if isJSONContentType(contentType) {
+		redacted, jsonChanged, err := e.redactor.ApplyJSON(ctx, redactHost, body)
+		if err == nil {
+			body = redacted
+			changed = jsonChanged
+		} else {
+			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
+				"error", err, "target_host", targetHost)
+		}
+	}
+
+	redacted, byteChanged := e.redactor.Apply(ctx, redactHost, body)
+	return redacted, changed || byteChanged
+}
+
+// refuse drops a response the connector cannot scan, rather than forwarding a
+// body it could not redact. There is no degraded mode: forwarding unscanned
+// content is the defect this path exists to prevent.
+//
+// The reason rides on a counter separate from the encoding metric, so an
+// operator can alert on refusals without watching ordinary traffic.
+func (e *Executor) refuse(
+	ctx context.Context,
+	targetHost string,
+	reason string,
+	code connector.ErrorCode,
+	err error,
+) error {
+	e.metrics.responseRefusals.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(connector.AttrTargetHost, targetHost),
+		attribute.String(attrRefusalReason, reason),
+	))
+	slog.ErrorContext(ctx, "upstream response dropped: body could not be redacted",
+		"target_host", targetHost,
+		"reason", reason,
+		"error", err)
+	return connector.NewCodedError(code, err)
 }
 
 // isJSONContentType reports whether the given Content-Type header indicates a

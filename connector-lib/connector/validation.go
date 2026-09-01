@@ -43,12 +43,24 @@ func ValidateTargetURL(targetURL string) error {
 
 // FilterHopByHopHeaders removes hop-by-hop headers that should not be forwarded.
 func FilterHopByHopHeaders(headers []*pb.Header) []*pb.Header {
+	return filterHeaders(headers, HopByHopHeaders)
+}
+
+// FilterContentDependentHeaders removes the headers that describe a body the
+// connector has rewritten, so a client cannot validate a redacted response
+// against a fingerprint of the original. See ContentDependentHeaders.
+func FilterContentDependentHeaders(headers []*pb.Header) []*pb.Header {
+	return filterHeaders(headers, ContentDependentHeaders)
+}
+
+// filterHeaders drops every header whose lowercased name is in exclude.
+func filterHeaders(headers []*pb.Header, exclude map[string]bool) []*pb.Header {
 	if len(headers) == 0 {
 		return headers
 	}
 
 	filtered := iter.Filter(headers, func(header *pb.Header) bool {
-		return !HopByHopHeaders[strings.ToLower(header.Key)]
+		return !exclude[strings.ToLower(header.Key)]
 	})
 
 	slog.Debug(

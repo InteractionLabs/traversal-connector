@@ -23,4 +23,8 @@ const (
 	MetricResponseSendWaitLatency          = "connector.response_send_wait_latency"
 	MetricRequestBodySizeLimitHitConnector = "connector.request_body_size_limit_hit_total"
 	MetricRedactionLatencyPerByte          = "connector.redaction_latency_per_byte"
+	MetricRedactionHitsTotal               = "connector.redaction_hits_total"
+	MetricResponseContentEncodingTotal     = "connector.response_content_encoding_total"
+	MetricResponseRefusalsTotal            = "connector.response_refusals_total"
+	MetricDecodedResponseBodySize          = "connector.decoded_response_body_size"
 )

@@ -348,10 +348,10 @@ func TestExecute_ContentLengthRewrittenAfterRedaction(t *testing.T) {
 	}
 }
 
-func TestExecute_ContentLengthNotAddedWhenAbsent(t *testing.T) {
-	// When the handler doesn't set Content-Length and writes via chunked
-	// encoding, the Go client strips Content-Length from resp.Header. We
-	// must not synthesize one after redaction.
+func TestExecute_ContentLengthSetWhenUpstreamOmitted(t *testing.T) {
+	// A chunked response reaches the client with no Content-Length at all, so
+	// deriving the header only when the upstream sent one leaves the redacted
+	// length unstated. It is written from the bytes that ship instead.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
@@ -391,8 +391,17 @@ func TestExecute_ContentLengthNotAddedWhenAbsent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, ok := findHeader(resp.Headers, "Content-Length"); ok {
-		t.Error("Content-Length should not be set when upstream did not send one")
+	wantBody := "contact [REDACTED] for help"
+	if diff := cmp.Diff(wantBody, string(resp.Body)); diff != "" {
+		t.Errorf("body mismatch (-want +got):\n%s", diff)
+	}
+
+	got, ok := findHeader(resp.Headers, "Content-Length")
+	if !ok {
+		t.Fatal("Content-Length header missing from response")
+	}
+	if diff := cmp.Diff(strconv.Itoa(len(wantBody)), got); diff != "" {
+		t.Errorf("Content-Length mismatch (-want +got):\n%s", diff)
 	}
 }
 
