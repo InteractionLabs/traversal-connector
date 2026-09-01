@@ -363,6 +363,11 @@ func finalizeResponse(
 	body []byte,
 	disposition responseDisposition,
 ) *pb.HttpResponse {
+	// Cleared unconditionally before it is written, so the header is present only
+	// because the connector put it there. It is a claim about what the connector
+	// did, and nothing downstream can check it against the body, so an upstream
+	// sending one of its own would be forging a signal the far side trusts.
+	resp.Header.Del(headerRedacted)
 	if disposition.redacted {
 		resp.Header.Set(headerRedacted, "true")
 	}

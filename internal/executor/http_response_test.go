@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -772,5 +773,83 @@ func TestExecute_UnchangedResponseKeepsItsValidators(t *testing.T) {
 	}
 	if _, ok := findHeader(resp.Headers, headerRedacted); ok {
 		t.Error("an unchanged body should not carry the redaction flag")
+	}
+}
+
+// countHeader reports how many entries carry key, so a header the connector owns
+// can be checked for duplication as well as presence.
+func countHeader(headers []*pb.Header, key string) int {
+	count := 0
+	for _, header := range headers {
+		if strings.EqualFold(header.Key, key) {
+			count++
+		}
+	}
+	return count
+}
+
+func TestExecute_UpstreamCannotForgeTheRedactionFlag(t *testing.T) {
+	// The flag states what the connector did, and the far side cannot check it
+	// against the body. An upstream that sets one itself must not be believed, on
+	// any path, so it is cleared before the connector decides whether to set it.
+	tests := []struct {
+		name      string
+		rules     []redact.Rule
+		body      string
+		status    int
+		wantFlags int
+	}{
+		{
+			name: "no rules target the host",
+			body: "contact user@example.com",
+		},
+		{
+			name:  "a rule matches nothing",
+			rules: []redact.Rule{emailRule()},
+			body:  "nothing sensitive here",
+		},
+		{
+			name:   "the response carries no body",
+			rules:  []redact.Rule{emailRule()},
+			status: http.StatusNoContent,
+		},
+		{
+			name:      "a rule matches, so the connector sets its own",
+			rules:     []redact.Rule{emailRule()},
+			body:      "contact user@example.com",
+			wantFlags: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := tt.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, "text/plain")
+					w.Header().Set(headerRedacted, "true")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tt.body))
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, tt.rules...))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, "identity"),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := countHeader(resp.Headers, headerRedacted); got != tt.wantFlags {
+				t.Errorf("%s count = %d, want %d", headerRedacted, got, tt.wantFlags)
+			}
+		})
 	}
 }
