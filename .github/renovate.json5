@@ -16,11 +16,6 @@
     {
       matchManagers: ["gomod"],
       matchDepTypes: ["indirect"],
-      enabled: false,
-    },
-    {
-      matchManagers: ["gomod"],
-      matchDepTypes: ["indirect"],
       matchPackageNames: [
         "github.com/google/cel-go",
         "github.com/quic-go/quic-go",
