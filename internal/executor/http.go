@@ -343,13 +343,16 @@ func (e *Executor) buildResponse(
 	}), nil
 }
 
-// responseDisposition records what the connector did to a body. The two facts
-// are independent, and each governs different headers.
+// responseDisposition records what the connector did to a body. Each fact
+// governs different headers, and they are not interchangeable: redacting always
+// moves the representation, but the representation moves on its own too, so
+// representationChanged is the wider of the two.
 type responseDisposition struct {
 	// redacted is true when a rule matched and content was removed.
 	redacted bool
-	// representationChanged is true when the bytes leaving differ from the bytes
-	// that arrived, whether or not anything was redacted.
+	// representationChanged is true when the bytes leaving are not the bytes that
+	// arrived, whether or not anything was redacted. A gzip re-encode and a
+	// re-serialized JSON document both qualify with no rule matching.
 	representationChanged bool
 }
 
