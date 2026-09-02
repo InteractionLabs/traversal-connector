@@ -1,5 +1,5 @@
 # --- Builder stage ---
-FROM golang:1.25.9 AS builder
+FROM golang:1.25.13 AS builder
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/connector
 
 # --- Development stage (with hot reload) ---
-FROM golang:1.25.9 AS dev
+FROM golang:1.25.13 AS dev
 
 WORKDIR /app
 
