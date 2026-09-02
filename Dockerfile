@@ -27,11 +27,12 @@ EXPOSE 8080
 # CMD will be overridden in docker-compose.yml
 
 # --- Production runtime stage ---
-FROM alpine:latest AS production
+FROM scratch AS production
 
 WORKDIR /app
 
-RUN apk --no-cache add ca-certificates
+# Preserve system trust roots for controller, telemetry, and upstream TLS.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Copy binary from builder stage
 COPY --from=builder /app/server .
