@@ -410,7 +410,7 @@ func (cm *ConnectionManager) handleMessage(
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
 					ErrorResponse: &pb.ErrorResponse{
-						Code:    string(connector.ErrorCodeUpstreamError),
+						Code:    string(connector.ErrorCodeFor(err)),
 						Message: err.Error(),
 					},
 				},

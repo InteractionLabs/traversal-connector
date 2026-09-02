@@ -20,8 +20,11 @@ import (
 
 const (
 	// Default configuration values.
-	defaultMaxTunnelsAllowed     = 2
-	defaultBodySizeMB            = 32
+	defaultMaxTunnelsAllowed = 2
+	defaultBodySizeMB        = 32
+	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
+	// deliberately far above the wire ceiling rather than equal to it.
+	defaultDecodedBodySizeMB     = 256
 	defaultHTTPPort              = "8080"
 	defaultMaxConcurrentRequests = 10
 	defaultUpstreamTLSVerify     = true
@@ -64,6 +67,17 @@ type Config struct {
 	// MaxRequestBodySizeMB is the maximum size (in MB) allowed for HTTP
 	// request bodies sent upstream.
 	MaxRequestBodySizeMB int64
+	// MaxResponseBodySizeMB is the maximum size (in MB) read off the wire from
+	// an upstream response, before any decoding. Applies on every path,
+	// including hosts no redaction rule targets.
+	MaxResponseBodySizeMB int64
+	// MaxDecodedResponseBodySizeMB is the maximum size (in MB) a compressed
+	// response may expand to when the connector decodes it to redact.
+	//
+	// It cannot be derived from the compressed length, and the gzip trailer
+	// cannot supply it either: ISIZE sits at the end of the stream, is modulo
+	// 2^32, and is written by the same upstream whose output is in question.
+	MaxDecodedResponseBodySizeMB int64
 	// EgressProxyURL is the optional HTTP forward proxy URL used for any
 	// connector-initiated egress to the Traversal SaaS — both the bidi
 	// control-plane tunnel and OTLP telemetry export. Read from
@@ -189,6 +203,14 @@ func Load() (Config, error) {
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
 			defaultBodySizeMB,
+		),
+		MaxResponseBodySizeMB: env.GetEnvInt64(
+			"MAX_RESPONSE_BODY_SIZE_MB",
+			defaultBodySizeMB,
+		),
+		MaxDecodedResponseBodySizeMB: env.GetEnvInt64(
+			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
+			defaultDecodedBodySizeMB,
 		),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),

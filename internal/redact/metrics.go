@@ -16,6 +16,7 @@ const (
 
 type redactorMetrics struct {
 	latencyPerByte metric.Float64Histogram
+	hitsTotal      metric.Int64Counter
 }
 
 func initRedactorMetrics() (*redactorMetrics, error) {
@@ -30,5 +31,13 @@ func initRedactorMetrics() (*redactorMetrics, error) {
 		return nil, fmt.Errorf("failed to create redaction latency per byte histogram: %w", err)
 	}
 
-	return &redactorMetrics{latencyPerByte: latencyPerByte}, nil
+	hitsTotal, err := meter.Int64Counter(
+		telemetry.MetricRedactionHitsTotal,
+		metric.WithDescription("Redactions applied, counted per rule"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create redaction hits counter: %w", err)
+	}
+
+	return &redactorMetrics{latencyPerByte: latencyPerByte, hitsTotal: hitsTotal}, nil
 }

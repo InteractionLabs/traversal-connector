@@ -109,6 +109,20 @@ func (cr *compiledRule) appliesToHost(host string) bool {
 	return false
 }
 
+// HasRulesForHost reports whether any rule of either type fires for host, which
+// is the request hostname with the port stripped. Callers use it to skip the
+// whole redaction pipeline, including response decoding, on hosts no rule
+// targets.
+func (r *Redactor) HasRulesForHost(host string) bool {
+	rules := *r.rules.Load()
+	for i := range rules {
+		if rules[i].appliesToHost(host) {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
 // ancestor paths, appears in set. "" never matches unless "" is in set.
 // E.g. for field="body|message|inner" the prefixes checked are "body",
@@ -261,20 +275,27 @@ func toFieldSet(fields []string) map[string]struct{} {
 // request hostname (port stripped). A rule with no hosts filter matches every
 // host.
 //
+// The second return value reports whether any rule changed src. Callers use it
+// to flag the response and to count redaction hits; it does not affect the
+// returned bytes.
+//
 // If there are no legacy rules the original slice is returned unchanged.
-func (r *Redactor) Apply(ctx context.Context, host string, src []byte) []byte {
+func (r *Redactor) Apply(ctx context.Context, host string, src []byte) ([]byte, bool) {
 	rules := *r.rules.Load()
 	if len(rules) == 0 {
-		return src
+		return src, false
 	}
 	result := src
+	changed := false
 	for i := range rules {
 		if rules[i].structured || !rules[i].appliesToHost(host) {
 			continue
 		}
-		result = r.applyOneRule(ctx, &rules[i], result)
+		var ruleChanged bool
+		result, ruleChanged = r.applyOneRule(ctx, &rules[i], result)
+		changed = changed || ruleChanged
 	}
-	return result
+	return result, changed
 }
 
 // ApplyJSON parses src as JSON and applies regex-structured-data rules
@@ -289,10 +310,20 @@ func (r *Redactor) Apply(ctx context.Context, host string, src []byte) []byte {
 // request hostname (port stripped). A rule with no hosts filter matches every
 // host.
 //
+// The second return value reports whether a rule actually matched, which is not
+// the same as the output differing from src: this path re-serializes the
+// document, so a body the upstream pretty-printed comes back with different bytes
+// and nothing redacted. Callers needing to know that the representation moved
+// have to compare the bytes themselves.
+//
 // If there are no structured rules in scope for host, src is returned
 // unchanged. If src is not valid JSON, an error is returned and the caller
 // should fall back to Apply.
-func (r *Redactor) ApplyJSON(ctx context.Context, host string, src []byte) ([]byte, error) {
+func (r *Redactor) ApplyJSON(
+	ctx context.Context,
+	host string,
+	src []byte,
+) ([]byte, bool, error) {
 	rules := *r.rules.Load()
 	// Pre-filter to the structured rules in scope for this host so the host
 	// regexes run once per request rather than once per JSON node.
@@ -303,27 +334,28 @@ func (r *Redactor) ApplyJSON(ctx context.Context, host string, src []byte) ([]by
 		}
 	}
 	if len(active) == 0 {
-		return src, nil
+		return src, false, nil
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(src))
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		return nil, fmt.Errorf("redact: parse json: %w", err)
+		return nil, false, fmt.Errorf("redact: parse json: %w", err)
 	}
 
-	value = r.redactValue(ctx, value, "", active)
+	matched := false
+	value = r.redactValue(ctx, value, "", active, &matched)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(value); err != nil {
-		return nil, fmt.Errorf("redact: marshal json: %w", err)
+		return nil, false, fmt.Errorf("redact: marshal json: %w", err)
 	}
 	// json.Encoder.Encode appends a trailing newline; strip it to keep the
 	// output byte-for-byte comparable to a normal Marshal.
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+	return bytes.TrimRight(buf.Bytes(), "\n"), matched, nil
 }
 
 // redactValue runs every structured rule over v independently. Each rule's
@@ -334,12 +366,13 @@ func (r *Redactor) redactValue(
 	v any,
 	fieldPath string,
 	rules []compiledRule,
+	matched *bool,
 ) any {
 	for i := range rules {
 		if !rules[i].structured {
 			continue
 		}
-		v = r.redactValueForRule(ctx, v, fieldPath, &rules[i])
+		v = r.redactValueForRule(ctx, v, fieldPath, &rules[i], matched)
 	}
 	return v
 }
@@ -366,6 +399,7 @@ func (r *Redactor) redactValueForRule(
 	v any,
 	fieldPath string,
 	rule *compiledRule,
+	matched *bool,
 ) any {
 	if rule.skipFields != nil && hasPathPrefixInSet(fieldPath, rule.skipFields) {
 		return v
@@ -390,26 +424,30 @@ func (r *Redactor) redactValueForRule(
 			}
 			newKey := k
 			if inScope {
-				newKey = string(r.applyOneRule(ctx, rule, []byte(k)))
+				redactedKey, hit := r.applyOneRule(ctx, rule, []byte(k))
+				newKey = string(redactedKey)
+				*matched = *matched || hit
 			}
-			out[newKey] = r.redactValueForRule(ctx, child, childPath, rule)
+			out[newKey] = r.redactValueForRule(ctx, child, childPath, rule, matched)
 		}
 		return out
 	case []any:
 		for i, item := range val {
-			val[i] = r.redactValueForRule(ctx, item, fieldPath, rule)
+			val[i] = r.redactValueForRule(ctx, item, fieldPath, rule, matched)
 		}
 		return val
 	case string:
 		if inScope {
-			return string(r.applyOneRule(ctx, rule, []byte(val)))
+			out, hit := r.applyOneRule(ctx, rule, []byte(val))
+			*matched = *matched || hit
+			return string(out)
 		}
 		return val
 	case json.Number:
 		if inScope {
-			orig := []byte(val)
-			redacted := r.applyOneRule(ctx, rule, orig)
-			if !bytes.Equal(redacted, orig) {
+			redacted, hit := r.applyOneRule(ctx, rule, []byte(val))
+			if hit {
+				*matched = true
 				// A match touched the number — emit as a string so the redacted
 				// output (which may not be a valid number anymore) survives
 				// re-marshaling.
@@ -422,16 +460,32 @@ func (r *Redactor) redactValueForRule(
 	}
 }
 
-func (r *Redactor) applyOneRule(ctx context.Context, rule *compiledRule, src []byte) []byte {
+// applyOneRule runs rule over src, returning the result and whether it matched.
+//
+// The hit counter is per-rule, so an operator can tell a rule that never fires
+// from one carrying the whole redaction load. It counts applications, not
+// occurrences: one per body for a byte-level rule, one per field for a
+// structured rule.
+func (r *Redactor) applyOneRule(
+	ctx context.Context,
+	rule *compiledRule,
+	src []byte,
+) ([]byte, bool) {
 	inputLen := len(src)
 	start := time.Now()
 	out := rule.re.ReplaceAll(src, rule.replacement)
-	if r.metrics != nil && inputLen > 0 {
-		latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
-		r.metrics.latencyPerByte.Record(ctx, latencyMs/float64(inputLen),
-			metric.WithAttributes(attribute.String(attrRuleName, rule.name)))
+	changed := !bytes.Equal(out, src)
+	if r.metrics != nil {
+		ruleAttr := metric.WithAttributes(attribute.String(attrRuleName, rule.name))
+		if inputLen > 0 {
+			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+			r.metrics.latencyPerByte.Record(ctx, latencyMs/float64(inputLen), ruleAttr)
+		}
+		if changed {
+			r.metrics.hitsTotal.Add(ctx, 1, ruleAttr)
+		}
 	}
-	return out
+	return out, changed
 }
 
 // FileLoader watches a TOML redaction rules file at a configurable interval and

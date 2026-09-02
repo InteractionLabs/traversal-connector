@@ -96,6 +96,8 @@ checked in.
 | `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
+| `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |
+| `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
 | `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. When unset, the connector dials its destinations directly (h2c for the controller; default OTLP transport for telemetry). |
 
@@ -213,6 +215,41 @@ How the two rule types are applied:
 If you need a pattern to redact everywhere unconditionally, use `regex`. If you need per-field control, use `regex-structured-data` and ensure the upstream returns valid JSON with the right `Content-Type`.
 
 Rules are applied in order; each rule operates on the output of the previous one.
+
+#### Compressed responses
+
+Redaction patterns run against the plaintext of a response, so the connector has
+to reach it. Request headers pass through untouched, which means an upstream may
+answer in whatever coding the original caller negotiated, and the connector
+handles the response by what actually came back:
+
+| Response `Content-Encoding` | Behavior when a rule targets the host |
+|---|---|
+| absent, or `identity` | Redacted in place. |
+| `gzip` | Decoded, redacted, and re-encoded as `gzip`. |
+| anything else | **Dropped.** The response never reaches the requester. |
+
+Anything else covers `deflate`, `zstd`, `br`, a stacked value such as
+`gzip, br`, and a `gzip` stream that is corrupt, truncated, or expands past
+`MAX_DECODED_RESPONSE_BODY_SIZE_MB`. Forwarding a body the connector cannot scan
+would ship the very content the rules exist to remove, so there is no degraded
+mode: the requester receives an `UNSUPPORTED_ENCODING` error, and
+`connector.response_refusals_total` carries the reason. A `206 Partial Content`
+is dropped for the same reason, because a pattern straddling the boundary
+between two ranges is invisible to both.
+
+Hosts no rule targets are unaffected: their responses are forwarded byte for
+byte, in whatever coding they arrived, with nothing decoded or re-encoded.
+
+Two response headers change when the connector rewrites a body. It sets
+`X-Traversal-Redacted: true`, and it strips the headers that fingerprint the
+original bytes (`ETag`, `Last-Modified`, `Content-MD5`, and the `Digest` family)
+so a client cannot validate a redacted body against them. On hosts with rules it
+also stops advertising `Accept-Ranges`, since a range request would be refused.
+
+Regardless of rules, `connector.response_content_encoding_total` reports the
+coding of every upstream response, so a deployment can see which of its
+upstreams would be affected before configuring anything.
 
 ### Telemetry (OpenTelemetry)
 
