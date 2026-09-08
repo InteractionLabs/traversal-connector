@@ -196,6 +196,10 @@ func (e *Executor) Execute(
 	httpReq.Header = httpHeaders
 
 	// Execute the HTTP request.
+	// Forwarding authenticated controller-supplied URLs to private-network upstreams is the
+	// connector's intended product behavior. ValidateTargetURL restricts the scheme and requires
+	// a host.
+	//nolint:gosec // G704: intentional validated upstream request
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
 		span.RecordError(err)
