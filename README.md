@@ -88,12 +88,6 @@ IMAGE="docker.io/traversalext/traversal-connector@${DIGEST}"
 cosign verify --key cosign.pub "$IMAGE"
 ```
 
-`cosign.pub` is the public half of the infrastructure KMS key
-`alias/ecr-image-signing`. Verification is public and does not require AWS
-credentials. A successful result proves that this exact image digest was signed
-with the corresponding private key; it does not inspect the image's build
-attestations.
-
 ### Inspecting SBOM and provenance attestations
 
 BuildKit publishes a platform-specific SPDX SBOM and provenance alongside each
@@ -110,13 +104,6 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .SBOM }}' \
 docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
   | jq --arg platform "$PLATFORM" '.[$platform]'
 ```
-
-These commands inspect BuildKit metadata; they are distinct from the Cosign
-signature check above. BuildKit scans the final production stage by default, not
-the builder stage. This image's production stage is `scratch`, containing the
-statically linked Go connector binary and the copied CA certificate bundle, so
-the SBOM describes that minimal runtime content rather than the Go toolchain or
-builder dependencies.
 
 ## Configuration
 
