@@ -25,7 +25,7 @@ env:
   IMAGE: traversalext/traversal-connector
 
 jobs:
-  release:
+  prepare:
     # Run on manual dispatch, or when a PR is merged carrying a release:* label.
     if: >
       github.event_name == 'workflow_dispatch' ||
@@ -35,9 +35,12 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'release:patch')))
     runs-on: [ubuntu-latest]
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.meta.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
@@ -51,15 +54,15 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            bump="$INPUT_BUMP"
-            notes="$INPUT_DESC"
+            bump=$INPUT_BUMP
+            notes=$INPUT_DESC
           else
             if echo "$LABELS" | jq -e '.[] | select(.name == "release:major")' > /dev/null; then
-              bump=major
+              bump='major'
             elif echo "$LABELS" | jq -e '.[] | select(.name == "release:minor")' > /dev/null; then
-              bump=minor
+              bump='minor'
             else
-              bump=patch
+              bump='patch'
             fi
             # Release notes are the top-level "# Release Notes" section of the PR
             # body, enforced by the Release Notes Check workflow. Fail loudly if
@@ -69,7 +72,7 @@ jobs:
               echo "::error::Merged PR has a release:* label but no non-empty '# Release Notes' section."
               exit 1
             fi
-            notes="$section"
+            notes=$section
           fi
 
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
@@ -95,9 +98,19 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Previous: $latest -> New: $version"
 
-      - uses: docker/setup-qemu-action@v3
+  build:
+    needs: prepare
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
         with:
           # Pull public base images (golang, alpine) anonymously via a
           # pull-through mirror. The scoped DOCKERHUB_TOKEN can push to our
@@ -107,25 +120,53 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: traversalext
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        id: build
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           target: production
           push: true
-          provenance: false
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          sbom: true
+          provenance: mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.prepare.outputs.version }}
+
+  sign:
+    needs: build
+    permissions:
+      id-token: write
+      contents: read
+    uses: InteractionLabs/infrastructure/.github/workflows/sign-image.yaml@5cb7d88ad58f958cafcb7c4194ba5476e30268f2
+    with:
+      registry: docker.io
+      repo: traversalext/traversal-connector
+      digest: ${{ needs.build.outputs.digest }}
+    secrets:
+      REGISTRY_USERNAME: traversalext
+      REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+
+  publish:
+    needs: [prepare, sign]
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Tag and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          NOTES: ${{ steps.meta.outputs.notes }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NOTES: ${{ needs.prepare.outputs.notes }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
