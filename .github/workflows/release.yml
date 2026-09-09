@@ -143,7 +143,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    uses: InteractionLabs/infrastructure/.github/workflows/sign-image.yaml@main
+    uses: ./.github/workflows/sign-image.yaml
     with:
       registry: docker.io
       repo: traversalext/traversal-connector
