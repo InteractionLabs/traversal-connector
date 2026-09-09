@@ -134,14 +134,16 @@ jobs:
           push: true
           sbom: true
           provenance: mode=max
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ needs.prepare.outputs.version }}
+          # Push an untagged manifest by digest. The version tag is attached only
+          # after this exact digest has passed scanning and signing.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
   sign:
     needs: build
     permissions:
       id-token: write
       contents: read
-    uses: InteractionLabs/infrastructure/.github/workflows/sign-image.yaml@5cb7d88ad58f958cafcb7c4194ba5476e30268f2
+    uses: InteractionLabs/infrastructure/.github/workflows/sign-image.yaml@main
     with:
       registry: docker.io
       repo: traversalext/traversal-connector
@@ -153,31 +155,48 @@ jobs:
       WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
 
   publish:
-    needs: [prepare, sign]
+    needs: [prepare, build, sign]
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
     steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          username: traversalext
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
-      - name: Tag and publish release
+      - name: Tag image and publish release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           NOTES: ${{ needs.prepare.outputs.notes }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Apply the public version tag only after the immutable digest has
+          # passed the signer workflow's scan and signature steps.
+          docker buildx imagetools create \
+            --tag "${IMAGE_REF}:${VERSION}" \
+            "${IMAGE_REF}@${DIGEST}"
+
           git tag -a "$VERSION" -m "$NOTES"
           git push origin "$VERSION"
 
-          # If the release fails after the tag is pushed, roll the tag back so a
-          # rerun recomputes the same version instead of orphaning it.
+          # If the release fails after the tag is pushed, roll the Git tag back so a
+          # rerun recomputes the same version instead of orphaning it. The image tag
+          # is safe to retain because it names the already scanned and signed digest.
           if ! gh release create "$VERSION" --title "$VERSION" --notes "$NOTES" --verify-tag; then
-            echo "::error::Failed to create GitHub Release; rolling back tag $VERSION."
+            echo "::error::Failed to create GitHub Release; rolling back Git tag $VERSION."
             git push origin ":refs/tags/$VERSION" || true
             exit 1
           fi

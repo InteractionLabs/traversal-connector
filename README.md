@@ -92,7 +92,7 @@ cosign verify --key cosign.pub "$IMAGE"
 
 BuildKit publishes a platform-specific SPDX SBOM and provenance alongside each
 release image. Choose the platform you will run, then inspect each attestation
-separately with Docker Buildx (also without AWS access):
+separately with Docker Buildx:
 
 ```bash
 DIGEST=sha256:<64-lowercase-hex-release-digest>
