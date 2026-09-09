@@ -1,5 +1,8 @@
+# golang:1.25.13 — multi-architecture manifest pinned for reproducible builds.
+ARG GO_IMAGE=golang:1.25.13@sha256:cbff9d1a9041b316010f2da6b701b6c0d597718cb90928c85eb597334a0d23d4
+
 # --- Builder stage ---
-FROM golang:1.25.13 AS builder
+FROM ${GO_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -14,12 +17,12 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/connector
 
 # --- Development stage (with hot reload) ---
-FROM golang:1.25.13 AS dev
+FROM ${GO_IMAGE} AS dev
 
 WORKDIR /app
 
 # Install Air for hot reload
-RUN go install github.com/air-verse/air@latest
+RUN go install github.com/air-verse/air@v1.66.0
 
 EXPOSE 8080
 
@@ -32,10 +35,12 @@ FROM scratch AS production
 WORKDIR /app
 
 # Preserve system trust roots for controller, telemetry, and upstream TLS.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder --chown=65532:65532 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Copy binary from builder stage
-COPY --from=builder /app/server .
+COPY --from=builder --chown=65532:65532 /app/server .
+
+USER 65532:65532
 
 ENV ENV_LEVEL=production
 
