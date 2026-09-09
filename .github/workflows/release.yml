@@ -54,8 +54,8 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            bump=$INPUT_BUMP
-            notes=$INPUT_DESC
+            bump="$INPUT_BUMP"
+            notes="$INPUT_DESC"
           else
             if echo "$LABELS" | jq -e '.[] | select(.name == "release:major")' > /dev/null; then
               bump='major'
@@ -72,7 +72,7 @@ jobs:
               echo "::error::Merged PR has a release:* label but no non-empty '# Release Notes' section."
               exit 1
             fi
-            notes=$section
+            notes="$section"
           fi
 
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
