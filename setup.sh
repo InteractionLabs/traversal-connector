@@ -20,13 +20,13 @@ else
 fi
 
 echo "==> Installing golangci-lint..."
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
 echo "==> Installing golines..."
-go install github.com/segmentio/golines@latest
+go install github.com/segmentio/golines@v0.13.0
 
 echo "==> Installing deadcode..."
-go install golang.org/x/tools/cmd/deadcode@latest
+go install golang.org/x/tools/cmd/deadcode@v0.38.0
 
 echo ""
 echo "Done. Run 'just --list' to see available commands."

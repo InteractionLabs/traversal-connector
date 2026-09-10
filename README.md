@@ -74,6 +74,37 @@ cd connector-lib && buf format -w
 Generated code lives under [`connector-lib/gen/`](connector-lib/gen/) and is
 checked in.
 
+## Verifying a release image
+
+Released images are published as
+`docker.io/traversalext/traversal-connector`. Verify the immutable digest, not a
+mutable tag. Set `DIGEST` to the release digest (a `sha256:` value), then verify
+the image with [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+and the public key checked into this repository:
+
+```bash
+DIGEST=sha256:<64-lowercase-hex-release-digest>
+IMAGE="docker.io/traversalext/traversal-connector@${DIGEST}"
+cosign verify --key cosign.pub "$IMAGE"
+```
+
+### Inspecting SBOM and provenance attestations
+
+BuildKit publishes a platform-specific SPDX SBOM and provenance alongside each
+release image. Choose the platform you will run, then inspect each attestation
+separately with Docker Buildx:
+
+```bash
+DIGEST=sha256:<64-lowercase-hex-release-digest>
+IMAGE="docker.io/traversalext/traversal-connector@${DIGEST}"
+PLATFORM=linux/amd64 # or linux/arm64
+
+docker buildx imagetools inspect "$IMAGE" --format '{{ json .SBOM }}' \
+  | jq --arg platform "$PLATFORM" '.[$platform]'
+docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
+  | jq --arg platform "$PLATFORM" '.[$platform]'
+```
+
 ## Configuration
 
 ### Core
