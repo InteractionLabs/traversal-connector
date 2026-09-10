@@ -9,8 +9,7 @@ permissions:
 
 jobs:
   dependency-cooldown:
-    uses: InteractionLabs/infrastructure/.github/workflows/dependency-cooldown.yaml@dab0aba4cea65f66b28d96d6a9297eae012073d0 # policy-v1
-    secrets:
-      DEPENDENCY_EVIDENCE_URL: ${{ secrets.DEPENDENCY_EVIDENCE_URL }}
-      DEPENDENCY_EVIDENCE_HMAC_KEY: ${{ secrets.DEPENDENCY_EVIDENCE_HMAC_KEY }}
-      DEPENDENCY_EVIDENCE_TOKEN: ${{ secrets.DEPENDENCY_EVIDENCE_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: InteractionLabs/infrastructure/.github/workflows/dependency-cooldown.yaml@f28dca6cfb0f6c4bc5fce4991c4bb25b8cb93809 # policy-v1
