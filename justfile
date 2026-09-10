@@ -43,6 +43,15 @@ format:
 build:
     go build ./...
 
+deps-update:
+    scripts/cooldown_update.sh deps
+
+tools-update:
+    scripts/cooldown_update.sh tools
+
+dependency-policy-check:
+    python3 scripts/verify_immutable_dependencies.py
+
 # Run all tests
 test:
     go test ./...

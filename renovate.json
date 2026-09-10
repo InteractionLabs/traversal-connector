@@ -1,0 +1,72 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "enabledManagers": [
+    "dockerfile",
+    "github-actions",
+    "gomod"
+  ],
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
+  "constraintsFiltering": "strict",
+  "dependencyDashboard": true,
+  "automerge": false,
+  "prHourlyLimit": 1,
+  "prConcurrentLimit": 1,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "osvVulnerabilityAlerts": false,
+  "vulnerabilityAlerts": {
+    "enabled": false
+  },
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["pinDigest"],
+      "groupName": "GitHub Actions SHA pins"
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true
+    },
+    {
+      "matchPackageNames": [
+        "github.com/google/cel-go",
+        "github.com/quic-go/quic-go",
+        "golang.org/x/crypto",
+        "golang.org/x/text"
+      ],
+      "enabled": true
+    },
+    {
+      "matchPackageNames": ["github.com/google/cel-go"],
+      "allowedVersions": ">=0.30.0"
+    },
+    {
+      "matchPackageNames": ["/^go\\.opentelemetry\\.io\\//"],
+      "groupName": "OpenTelemetry"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "go install (?<depName>[^\\s@]+)@(?<currentValue>v[^\\s]+)"
+      ],
+      "datasourceTemplate": "go"
+    }
+  ]
+}

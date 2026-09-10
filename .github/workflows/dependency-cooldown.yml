@@ -1,0 +1,16 @@
+name: dependency-cooldown
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-cooldown:
+    uses: InteractionLabs/infrastructure/.github/workflows/dependency-cooldown.yaml@dab0aba4cea65f66b28d96d6a9297eae012073d0 # policy-v1
+    secrets:
+      DEPENDENCY_EVIDENCE_URL: ${{ secrets.DEPENDENCY_EVIDENCE_URL }}
+      DEPENDENCY_EVIDENCE_HMAC_KEY: ${{ secrets.DEPENDENCY_EVIDENCE_HMAC_KEY }}
+      DEPENDENCY_EVIDENCE_TOKEN: ${{ secrets.DEPENDENCY_EVIDENCE_TOKEN }}
