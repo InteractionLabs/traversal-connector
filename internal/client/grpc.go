@@ -56,6 +56,14 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 
 	opts := []connect.ClientOption{
 		connect.WithGRPC(),
+		// Bound both directions so an oversized message is refused by the transport
+		// rather than buffered and deserialized first: the gRPC envelope declares
+		// its payload length in a prefix, and the limit is applied to that prefix
+		// before the payload is read. Each direction derives from the body limit it
+		// carries - inbound an upstream request body, outbound an upstream response
+		// body - so neither ceiling needs configuration of its own.
+		connect.WithReadMaxBytes(tunnelReadMaxBytes(cfg)),
+		connect.WithSendMaxBytes(tunnelSendMaxBytes(cfg)),
 		connect.WithInterceptors(
 			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
 		),
@@ -309,6 +317,16 @@ func (cm *ConnectionManager) receiveLoop(
 					conn.ID,
 				)
 				return nil
+			}
+			if connect.CodeOf(err) == connect.CodeResourceExhausted {
+				// A message refused for exceeding the ceiling is indistinguishable by
+				// code from the controller refusing the tunnel for capacity, and the
+				// capacity path reports neither a size nor a ceiling. Logged here so an
+				// operator can tell an oversized message from a full controller.
+				slog.WarnContext(ctx, "tunnel receive refused as resource exhausted",
+					"tunnel_id", conn.ID,
+					"inbound_ceiling_bytes", tunnelReadMaxBytes(cm.config),
+					"error", err)
 			}
 			return fmt.Errorf("receive error: %w", err)
 		}
