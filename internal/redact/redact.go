@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -337,9 +339,11 @@ func (r *Redactor) Apply(ctx context.Context, host string, src []byte) ([]byte, 
 // and nothing redacted. Callers needing to know that the representation moved
 // have to compare the bytes themselves.
 //
-// If there are no structured rules in scope for host, src is returned
-// unchanged. If src is not valid JSON, an error is returned and the caller
-// should fall back to Apply.
+// If there are no structured rules in scope for host, src is returned unchanged
+// and is never parsed. Otherwise src must be exactly one complete JSON document;
+// anything else returns an error. Callers drop such a response rather than
+// falling back to Apply, since a byte-level pass cannot honor the field filters
+// that made the rule structured in the first place.
 func (r *Redactor) ApplyJSON(
 	ctx context.Context,
 	host string,
@@ -364,6 +368,13 @@ func (r *Redactor) ApplyJSON(
 	var value any
 	if err := dec.Decode(&value); err != nil {
 		return nil, false, fmt.Errorf("redact: parse json: %w", err)
+	}
+	// A decode stops at the end of the first value, so without this check a body
+	// holding several documents (or one document plus junk) would be scanned only
+	// as far as the first and re-encoded to just that, quietly discarding the rest.
+	// Reading to EOF turns that into an error the caller can act on.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, false, errors.New("redact: json body is more than one document")
 	}
 
 	matched := false

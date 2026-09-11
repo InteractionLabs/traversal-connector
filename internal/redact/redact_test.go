@@ -602,3 +602,102 @@ func TestApplyJSON_ReSerializationIsNotAMatch(t *testing.T) {
 		t.Errorf("body = %q, want %q", got, want)
 	}
 }
+
+func TestApplyJSON_RequiresExactlyOneDocument(t *testing.T) {
+	rules := []Rule{{
+		Name:        "email",
+		Type:        "regex-structured-data",
+		Pattern:     `\S+@\S+`,
+		Replacement: "[REDACTED]",
+	}}
+
+	tests := []struct {
+		name    string
+		src     string
+		wantErr bool
+	}{
+		{name: "one object", src: `{"msg":"user@example.com"}`},
+		{name: "one array", src: `[{"msg":"user@example.com"}]`},
+		{name: "one bare string", src: `"user@example.com"`},
+		{name: "trailing whitespace is still one document", src: "{\"msg\":\"a@b.com\"}\n\t "},
+		{name: "truncated object", src: `{"msg":`, wantErr: true},
+		{name: "not json at all", src: `nope`, wantErr: true},
+		{name: "empty body", src: ``, wantErr: true},
+		{name: "two concatenated documents", src: `{"a":1}{"b":2}`, wantErr: true},
+		{name: "two documents separated by space", src: `{"a":1} {"b":2}`, wantErr: true},
+		{name: "junk after a complete value", src: `{"a":1}garbage`, wantErr: true},
+		{
+			// A closing bracket reads as the end of an enclosing array rather
+			// than as a further value, so it is the shape most likely to slip
+			// past a looser check for whether more input follows.
+			name:    "stray closing bracket after a complete value",
+			src:     `{"a":1}]`,
+			wantErr: true,
+		},
+		{name: "stray comma after a complete value", src: `{"a":1},`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			_, _, err := r.ApplyJSON(context.Background(), "api.example.com", []byte(tt.src))
+			if tt.wantErr && err == nil {
+				t.Errorf("ApplyJSON(%q) returned no error, want one", tt.src)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ApplyJSON(%q) error = %v, want none", tt.src, err)
+			}
+		})
+	}
+}
+
+// TestApplyJSON_UnparseableBodyIsNotAnErrorWithoutStructuredRules pins the
+// narrowness of the parse requirement: it exists to serve per-field rules, so a
+// host none of them cover must not start failing on bodies nothing would have
+// inspected.
+func TestApplyJSON_UnparseableBodyIsNotAnErrorWithoutStructuredRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []Rule
+	}{
+		{name: "no rules configured"},
+		{
+			name:  "only a byte-level rule",
+			rules: []Rule{{Name: "email", Type: "regex", Pattern: `\S+@\S+`}},
+		},
+		{
+			name: "structured rule scoped to another host",
+			rules: []Rule{{
+				Name:    "email",
+				Type:    "regex-structured-data",
+				Pattern: `\S+@\S+`,
+				Hosts:   []string{"other.test"},
+			}},
+		},
+	}
+
+	src := []byte(`{"msg":"user@example.com" trailing junk`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: tt.rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			got, changed, err := r.ApplyJSON(context.Background(), "api.example.com", src)
+			if err != nil {
+				t.Fatalf("ApplyJSON() error = %v, want none", err)
+			}
+			if changed {
+				t.Error("no structured rule was in scope, so nothing can have matched")
+			}
+			if string(got) != string(src) {
+				t.Errorf("body = %q, want it returned unchanged", got)
+			}
+		})
+	}
+}

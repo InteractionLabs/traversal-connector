@@ -200,8 +200,8 @@ pattern     = '(?i)(api[_-]?key\s*[:=]\s*)\S+'
 replacement = '$1[REDACTED]'
 
 # Per-field rule for JSON response bodies. Email is only redacted when it
-# appears in `body.message` and the response body parses as JSON. On non-JSON
-# bodies (or JSON that fails to parse) the rule is skipped entirely.
+# appears in `body.message`. On non-JSON bodies the rule is skipped; a body
+# that claims to be JSON but is not one complete document is dropped.
 [[rules]]
 name   = "email"
 type   = "regex-structured-data"
@@ -243,9 +243,13 @@ Field names use pipe-delimited notation for nested objects: `body|message` match
 How the two rule types are applied:
 
 - **`regex` rules** always run byte-level over the full response body, regardless of `Content-Type` or whether the body parses as JSON. They have no concept of fields, so `redact_fields` / `skip_fields` don't apply.
-- **`regex-structured-data` rules** only run when the response has a JSON `Content-Type` *and* the body parses successfully — they fire per-field, honoring `redact_fields` / `skip_fields`. If the body isn't JSON or fails to parse, these rules are **skipped entirely** (their field filters can't be honored on raw bytes, so applying them globally would cross the boundaries the filters were configured to enforce).
+- **`regex-structured-data` rules** fire per-field, honoring `redact_fields` / `skip_fields`, and require a JSON `Content-Type`. On any other content type they are **skipped entirely** (their field filters can't be honored on raw bytes, so applying them globally would cross the boundaries the filters were configured to enforce).
 
-If you need a pattern to redact everywhere unconditionally, use `regex`. If you need per-field control, use `regex-structured-data` and ensure the upstream returns valid JSON with the right `Content-Type`.
+When a per-field rule is in scope *and* the response declares a JSON `Content-Type`, the body has to be exactly one complete JSON document, since that is the only way the configured fields can be located. A body that does not parse, or that carries anything beyond its first complete value, is **dropped**: the requester receives an error and `connector.response_refusals_total` records the reason `malformed_json`. Trailing content counts because parsing stops at the end of the first document, so forwarding such a body would silently shorten it to that first value.
+
+A host no per-field rule covers is unaffected. With only `regex` rules in scope nothing needs parsing, so an unparseable body is still forwarded with byte-level redaction applied.
+
+If you need a pattern to redact everywhere unconditionally, use `regex`. If you need per-field control, use `regex-structured-data` and ensure the upstream answers with one complete JSON document under a JSON `Content-Type`.
 
 Rules are applied in order; each rule operates on the output of the previous one.
 
