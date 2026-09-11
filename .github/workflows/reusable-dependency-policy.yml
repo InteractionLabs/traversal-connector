@@ -55,7 +55,7 @@ jobs:
           role-session-name: dependency-evidence-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Enforce dependency policy
-        uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@cd125a827ad0e110520ee079a0b2c92380fbbf30 # policy-v1
+        uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@3dd4f49d284677e9af104b50f837072bcd2448c8 # policy-v1
         with:
           base-sha: ${{ steps.comparison.outputs.base }}
           head-sha: ${{ steps.comparison.outputs.head }}
@@ -67,6 +67,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dependency-cooldown-results
-          path: dependency-cooldown-results.json
+          name: dependency-policy-results
+          path: dependency-policy-results.json
           if-no-files-found: warn
