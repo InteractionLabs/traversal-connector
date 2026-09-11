@@ -118,7 +118,7 @@ def private_first_observed(module, version):
 
 
 def exact_exception(module, version, now, eligible=None):
-    path = Path(".github/dependency-cooldown-exceptions.json")
+    path = Path(".github/dependency-policy/exceptions.json")
     data = json.loads(path.read_text()) if path.exists() else {"exceptions": []}
     if set(data) != {"exceptions"} or not isinstance(data["exceptions"], list):
         raise ValueError("exception file must contain only an exceptions array")

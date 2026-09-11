@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location(
-    "go_dependency_cooldown", Path(__file__).with_name("go_dependency_cooldown.py")
+    "go_dependency_policy", Path(__file__).with_name("go_dependency_policy.py")
 )
 POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)

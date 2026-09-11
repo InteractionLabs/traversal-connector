@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 CALLER = re.compile(
     r"InteractionLabs/infrastructure/\.github/workflows/"
     r"reusable-dependency-policy\.yml@([0-9a-f]{40})(?:\s|#|$)"
@@ -99,8 +100,93 @@ def validate_action_pins(repository: Path) -> list[str]:
     return failures
 
 
+def dockerfiles(repository: Path) -> list[Path]:
+    ignored = {".git", ".terragrunt-cache", ".venv", "node_modules"}
+    return sorted(
+        path
+        for path in repository.rglob("*")
+        if path.is_file()
+        and "Dockerfile" in path.name
+        and not ignored.intersection(path.relative_to(repository).parts)
+    )
+
+
+def validate_container_pins(repository: Path) -> list[str]:
+    failures: list[str] = []
+    for path in dockerfiles(repository):
+        arguments: dict[str, str] = {}
+        stages: set[str] = set()
+        relative = path.relative_to(repository)
+        for line_number, line in enumerate(
+            path.read_text(errors="ignore").splitlines(), start=1
+        ):
+            argument = re.match(
+                r"\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)", line
+            )
+            if argument:
+                arguments[argument.group(1)] = argument.group(2)
+            base = re.match(
+                r"\s*FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)"
+                r"(?:\s+AS\s+([^\s]+))?",
+                line,
+                re.IGNORECASE,
+            )
+            if not base:
+                continue
+            image, alias = base.groups()
+            if image.lower() == "scratch" or image.lower() in stages:
+                if alias:
+                    stages.add(alias.lower())
+                continue
+            variable = re.fullmatch(
+                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                image,
+            )
+            variable_name = (
+                next((group for group in variable.groups() if group), None)
+                if variable
+                else None
+            )
+            resolved = arguments.get(variable_name, image) if variable_name else image
+            digest = resolved.rsplit("@", 1)[1] if "@" in resolved else ""
+            if not SHA256_DIGEST.fullmatch(digest):
+                failures.append(
+                    f"{relative}:{line_number}: container base images must use "
+                    "a sha256 digest"
+                )
+            if re.search(r":(?:latest|main|master)(?:@|$)", resolved):
+                failures.append(
+                    f"{relative}:{line_number}: container base images cannot use "
+                    "a floating tag"
+                )
+            if alias:
+                stages.add(alias.lower())
+    return failures
+
+
+def validate_go_tool_pins(repository: Path) -> list[str]:
+    failures: list[str] = []
+    paths = [repository / "justfile"]
+    scripts = repository / "scripts"
+    if scripts.exists():
+        paths.extend(path for path in scripts.rglob("*") if path.is_file())
+    paths.extend(dockerfiles(repository))
+    for path in sorted(set(paths)):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(repository)
+        for line_number, line in enumerate(
+            path.read_text(errors="ignore").splitlines(), start=1
+        ):
+            if re.search(r"\bgo\s+install\s+\S+@(?:latest|main|master)\b", line):
+                failures.append(
+                    f"{relative}:{line_number}: Go tools must use an exact version"
+                )
+    return failures
+
+
 def validate_exception_boundary(repository: Path) -> list[str]:
-    exception_path = ".github/dependency-cooldown-exceptions.json"
+    exception_path = ".github/dependency-policy/exceptions.json"
     if not (repository / exception_path).exists():
         return [f"{exception_path} is required"]
     return []
@@ -110,26 +196,26 @@ def validate_caller(repository: Path) -> list[str]:
     candidates = [repository / ".github/workflows/dependency-policy.yml"]
     caller = next((path for path in candidates if path.exists()), None)
     if not caller:
-        return ["the dependency-cooldown caller workflow is required"]
+        return ["the dependency-policy caller workflow is required"]
     content = caller.read_text()
     failures: list[str] = []
     if not CALLER.search(content):
         failures.append("the shared dependency workflow must use a full commit SHA")
     if not re.search(r"(?m)^\s*pull_request\s*:", content):
-        failures.append("the dependency-cooldown caller must run for pull requests")
+        failures.append("the dependency-policy caller must run for pull requests")
     if not re.search(r"(?m)^\s*contents:\s*read\s*$", content):
-        failures.append("the dependency-cooldown caller must grant contents: read")
+        failures.append("the dependency-policy caller must grant contents: read")
     if not re.search(r"(?m)^\s*id-token:\s*write\s*$", content):
-        failures.append("the dependency-cooldown caller must grant id-token: write")
+        failures.append("the dependency-policy caller must grant id-token: write")
     write_permissions = re.findall(
         r"(?m)^\s*([A-Za-z_-]+):\s*write\s*$", content
     )
     if any(permission != "id-token" for permission in write_permissions):
         failures.append(
-            "the dependency-cooldown caller cannot request other write permissions"
+            "the dependency-policy caller cannot request other write permissions"
         )
     if "DEPENDENCY_EVIDENCE_" in content:
-        failures.append("the dependency-cooldown caller must use OIDC instead of secrets")
+        failures.append("the dependency-policy caller must use OIDC instead of secrets")
     return failures
 
 
@@ -142,6 +228,8 @@ def main() -> int:
     failures = [
         *validate_renovate(repository),
         *validate_action_pins(repository),
+        *validate_container_pins(repository),
+        *validate_go_tool_pins(repository),
         *validate_exception_boundary(repository),
     ]
     if arguments.require_caller:

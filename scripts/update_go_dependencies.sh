@@ -34,7 +34,7 @@ case "$mode" in
     ;;
 esac
 
-if ! scripts/go_dependency_cooldown.py --base "$base"; then
+if ! scripts/go_dependency_policy.py --base "$base"; then
   echo "update rejected; go.mod and go.sum restored to their locked state" >&2
   exit 1
 fi

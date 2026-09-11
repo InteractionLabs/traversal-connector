@@ -27,7 +27,9 @@ except ModuleNotFoundError:
 
 UTC = dt.timezone.utc
 COOLDOWN = dt.timedelta(hours=168)
-USER_AGENT = "InteractionLabs-dependency-cooldown/3"
+USER_AGENT = "InteractionLabs-dependency-policy/3"
+GO_PROXY = "https://proxy.golang.org"
+GO_INDEX = "https://index.golang.org/index"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
@@ -419,6 +421,53 @@ def request(url: str) -> tuple[object, str]:
         return json.load(response), url
 
 
+def request_json_lines(url: str) -> tuple[list[dict], str]:
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    with urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=20
+    ) as response:
+        return [json.loads(line) for line in response if line.strip()], url
+
+
+def go_proxy_escape(value: str) -> str:
+    escaped = "".join(
+        f"!{character.lower()}" if "A" <= character <= "Z" else character
+        for character in value
+    )
+    return urllib.parse.quote(escaped, safe="/!")
+
+
+def go_index_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
+    module = go_proxy_escape(dependency.artifact)
+    version = go_proxy_escape(dependency.version)
+    info, _ = request(f"{GO_PROXY}/{module}/@v/{version}.info")
+    if not isinstance(info, dict) or "Time" not in info:
+        raise ValueError("Go proxy returned no version time")
+    since = parse_time(info["Time"]) - dt.timedelta(seconds=1)
+    for _ in range(200):
+        query = urllib.parse.urlencode(
+            {
+                "since": since.isoformat().replace("+00:00", "Z"),
+                "limit": 2000,
+                "include": "all",
+            }
+        )
+        entries, source = request_json_lines(f"{GO_INDEX}?{query}")
+        if not entries:
+            break
+        for entry in entries:
+            if (
+                entry.get("Path") == dependency.artifact
+                and entry.get("Version") == dependency.version
+            ):
+                return parse_time(entry["Timestamp"]), source
+        next_since = parse_time(entries[-1]["Timestamp"])
+        if next_since <= since:
+            break
+        since = next_since
+    raise ValueError("Go module index returned no first-observed timestamp")
+
+
 def ledger_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
     bucket = os.getenv("DEPENDENCY_EVIDENCE_BUCKET")
     repository = os.getenv("GITHUB_REPOSITORY")
@@ -580,10 +629,11 @@ def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
         published = data.get("published_at")
         if published:
             return parse_time(published), url
+    if dependency.ecosystem == "go":
+        return go_index_evidence(dependency)
     if dependency.ecosystem in {
         "github-commit",
         "github-tag",
-        "go",
         "helm",
         "mise",
         "oci",
@@ -726,7 +776,7 @@ def main() -> int:
     parser.add_argument(
         "--exceptions",
         type=Path,
-        default=Path(".github/dependency-cooldown-exceptions.json"),
+        default=Path(".github/dependency-policy/exceptions.json"),
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--now", help=argparse.SUPPRESS)
@@ -747,7 +797,7 @@ def main() -> int:
         tomllib.TOMLDecodeError,
         ValueError,
     ) as error:
-        print(f"dependency-cooldown: {error}", file=sys.stderr)
+        print(f"dependency-policy: {error}", file=sys.stderr)
         return 2
     report = {
         "threshold_hours": 168,

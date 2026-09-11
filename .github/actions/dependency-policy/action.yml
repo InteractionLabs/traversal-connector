@@ -14,7 +14,7 @@ inputs:
   output:
     description: JSON evidence report path
     required: false
-    default: dependency-cooldown-results.json
+    default: dependency-policy-results.json
 runs:
   using: composite
   steps:
@@ -28,7 +28,7 @@ runs:
         if [[ "$INPUT_REQUIRE_CALLER" == "true" ]]; then
           arguments+=(--require-caller)
         fi
-        python3 "$GITHUB_ACTION_PATH/dependency_policy_invariants.py" "${arguments[@]}"
+        python3 "$GITHUB_ACTION_PATH/repository_invariants.py" "${arguments[@]}"
     - name: Enforce dependency publication age
       shell: bash
       env:
@@ -37,7 +37,7 @@ runs:
         INPUT_OUTPUT: ${{ inputs.output }}
       run: |
         set -euo pipefail
-        python3 "$GITHUB_ACTION_PATH/dependency_policy.py" \
+        python3 "$GITHUB_ACTION_PATH/policy.py" \
           --repo "$GITHUB_WORKSPACE" \
           --base "$INPUT_BASE_SHA" \
           --head "$INPUT_HEAD_SHA" \
