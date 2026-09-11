@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,17 @@ const queryCanary = "canary-3e5d80fa2c"
 
 func canaryURL(base string) string {
 	return base + "/orders/" + queryCanary + "?token=" + queryCanary
+}
+
+// hostOf returns the authority a test server was bound to, which is what
+// telemetry is expected to name.
+func hostOf(t *testing.T, rawURL string) string {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parsing test server URL %q: %v", rawURL, err)
+	}
+	return parsed.Host
 }
 
 // newTelemetryTestManager builds a manager whose spans are recorded and whose
@@ -133,6 +145,21 @@ func assertNoCanary(t *testing.T, subject, text string) {
 	}
 }
 
+// assertLogsCorrelatable checks the log stream still ties records back to one
+// request. Records emitted below this layer correlate through the span context
+// the bridge attaches; the identifier is asserted here because it is what an
+// operator searches on.
+func assertLogsCorrelatable(t *testing.T, logs *logCapture, requestID, targetHost string) {
+	t.Helper()
+	text := logs.text()
+	if !strings.Contains(text, requestID) {
+		t.Errorf("no log record names the request id %q:\n%s", requestID, text)
+	}
+	if !strings.Contains(text, targetHost) {
+		t.Errorf("no log record names the destination host %q:\n%s", targetHost, text)
+	}
+}
+
 // assertCorrelatable checks the span still names both the destination and the
 // request it belongs to. Stripping the URL must not leave a span nothing can be
 // traced back to.
@@ -185,6 +212,7 @@ func TestHandleMessage_HTTPRequestSuccessKeepsRequestPathOutOfTelemetry(t *testi
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
 	assertCorrelatable(t, spans.Ended(), reqID)
+	assertLogsCorrelatable(t, logs, reqID, hostOf(t, server.URL))
 }
 
 // The transport reports an unreachable upstream with the whole URL inside its
@@ -213,6 +241,7 @@ func TestHandleMessage_HTTPRequestFailureKeepsRequestPathOutOfTelemetry(t *testi
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
 	assertCorrelatable(t, spans.Ended(), reqID)
+	assertLogsCorrelatable(t, logs, reqID, "127.0.0.1:1")
 
 	// The control plane issued this URL, so the reply it receives still names it.
 	errResp := sender.sent.GetErrorResponse()
