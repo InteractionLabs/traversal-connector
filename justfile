@@ -43,10 +43,10 @@ format:
 build:
     go build ./...
 
-deps-update:
+go-dependencies-update:
     scripts/update_go_dependencies.sh deps
 
-tools-update:
+go-tools-update:
     scripts/update_go_dependencies.sh tools
 
 dependency-policy-check:

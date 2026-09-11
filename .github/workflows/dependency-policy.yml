@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  dependency-cooldown:
+  dependency-policy:
     permissions:
       contents: read
       id-token: write

@@ -17,8 +17,8 @@ permissions:
   id-token: write
 
 jobs:
-  dependency-cooldown:
-    name: dependency-cooldown
+  dependency-policy:
+    name: dependency-policy
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout proposed repository state
