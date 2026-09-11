@@ -2,10 +2,12 @@ package telemetry
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -41,6 +43,12 @@ func HostFromURL(rawURL string) string {
 // exception carved out for one call site is invisible to whoever later routes a
 // URL-bearing error into it.
 //
+// Applying the rule everywhere is not the same as a guarantee, and the limit is
+// worth knowing. Reduction reaches a URL only where the tree still holds it in a
+// *url.Error. A URL that an error type formats into a message of its own, or one
+// flattened into plain text by a %v wrap that leaves no *url.Error behind,
+// survives. Those are the two shapes to check when adding an error to this path.
+//
 // Errors travelling back to the control plane are deliberately left untouched:
 // it issued the URL, so shortening its copy costs diagnosis and withholds
 // nothing.
@@ -63,15 +71,38 @@ func SanitizeError(err error) error {
 	return errors.New(message)
 }
 
-// RecordError attaches err to span reduced by SanitizeError, and hands the
-// reduced copy back for the caller's log record.
+// Name and attribute keys of the event a span carries an error under. The event
+// is assembled here rather than delegated, so the conventional spellings are
+// named locally.
+const (
+	eventException       = "exception"
+	attrExceptionType    = "exception.type"
+	attrExceptionMessage = "exception.message"
+)
+
+// RecordError attaches err to span as an exception event whose message is reduced
+// by SanitizeError, and hands the reduced copy back for the caller's log record.
 //
 // Recording and reducing are deliberately the same call. It leaves no shorter
 // way to report an error on a span than the correct one, and a bare
 // span.RecordError in request handling reads as the anomaly it is.
+//
+// The event is built here instead of through span.RecordError because that
+// helper derives the type attribute by reflecting over whichever error it is
+// handed, which for a reduced copy is one and the same wrapper on every failure.
+// Naming the original's type costs no message text and keeps a deliberate
+// refusal, a timeout and a transport failure apart at a glance, which a host and
+// a free-text message cannot recover.
 func RecordError(span trace.Span, err error) error {
+	if err == nil {
+		return nil
+	}
+
 	safe := SanitizeError(err)
-	span.RecordError(safe)
+	span.AddEvent(eventException, trace.WithAttributes(
+		attribute.String(attrExceptionType, fmt.Sprintf("%T", err)),
+		attribute.String(attrExceptionMessage, safe.Error()),
+	))
 	return safe
 }
 

@@ -196,17 +196,27 @@ func TestRecordError_ReducesOnTheSpanAndInTheReturnedCopy(t *testing.T) {
 		t.Fatalf("recorded %d spans, want 1", len(ended))
 	}
 
-	var recorded string
+	recorded := map[string]string{}
 	for _, event := range ended[0].Events() {
+		if event.Name != eventException {
+			continue
+		}
 		for _, attr := range event.Attributes {
-			recorded += " " + attr.Value.String()
+			recorded[string(attr.Key)] = attr.Value.String()
 		}
 	}
-	if recorded == "" {
-		t.Fatal("no error was recorded on the span")
+	if len(recorded) == 0 {
+		t.Fatal("no exception event was recorded on the span")
 	}
-	if strings.Contains(recorded, canary) {
-		t.Errorf("span event still carries the query:%s", recorded)
+
+	if strings.Contains(recorded[attrExceptionMessage], canary) {
+		t.Errorf("span event still carries the query: %q", recorded[attrExceptionMessage])
+	}
+
+	// Reducing the message must not cost the class. Every failure would otherwise
+	// export the same type and stop being groupable.
+	if got := recorded[attrExceptionType]; got != "*url.Error" {
+		t.Errorf("exception type = %q, want the original error's class", got)
 	}
 }
 
