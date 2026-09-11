@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // unknownTarget stands in for a URL that does not parse or names no host.
@@ -33,6 +35,12 @@ func HostFromURL(rawURL string) string {
 // even when no attribute names it. Dropping URL-valued attributes is therefore
 // not sufficient by itself.
 //
+// Every error handed to a span or a log record while serving a request goes
+// through here, including the many that cannot embed a URL today. The rule holds
+// without exception on purpose: an error's origin is free to change, and an
+// exception carved out for one call site is invisible to whoever later routes a
+// URL-bearing error into it.
+//
 // Errors travelling back to the control plane are deliberately left untouched:
 // it issued the URL, so shortening its copy costs diagnosis and withholds
 // nothing.
@@ -53,6 +61,18 @@ func SanitizeError(err error) error {
 		message = strings.ReplaceAll(message, requestURL, origin)
 	}
 	return errors.New(message)
+}
+
+// RecordError attaches err to span reduced by SanitizeError, and hands the
+// reduced copy back for the caller's log record.
+//
+// Recording and reducing are deliberately the same call. It leaves no shorter
+// way to report an error on a span than the correct one, and a bare
+// span.RecordError in request handling reads as the anomaly it is.
+func RecordError(span trace.Span, err error) error {
+	safe := SanitizeError(err)
+	span.RecordError(safe)
+	return safe
 }
 
 // requestURLsIn collects the URL of every *url.Error in err's tree.

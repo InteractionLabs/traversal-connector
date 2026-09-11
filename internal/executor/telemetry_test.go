@@ -225,6 +225,60 @@ func TestExecute_UnparseableURLKeepsRequestPathOutOfTelemetry(t *testing.T) {
 	assertNoCanary(t, "log", logs.text())
 }
 
+// A refused response reports through errors the connector builds itself, on the
+// span and in the log. They carry no URL today and are reduced anyway, so a
+// later change that routes a URL-bearing error through here cannot quietly
+// undo this.
+func TestExecute_RefusedResponseKeepsRequestPathOutOfTelemetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "br")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"email":"someone@example.com"}`))
+	}))
+	defer server.Close()
+
+	exec := newExecutor(t, responseTestConfig(), newRedactor(t, emailRule()))
+	spans := captureSpans(t, exec)
+	logs := captureLogs(t)
+
+	// A coding the connector cannot decode cannot be scanned, so it is dropped.
+	_, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    canaryURL(server.URL),
+	})
+	if err == nil {
+		t.Fatal("expected an unscannable response to be refused")
+	}
+
+	assertNoCanary(t, "span", spanText(spans.Ended()))
+	assertNoCanary(t, "log", logs.text())
+}
+
+// The per-field redaction path reports a body it could not parse. Whether such a
+// response is forwarded or dropped is decided elsewhere, so only the exported
+// records are asserted here.
+func TestExecute_UnparseableJSONBodyKeepsRequestPathOutOfTelemetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"email": "someone@example.com"`))
+	}))
+	defer server.Close()
+
+	exec := newExecutor(t, responseTestConfig(), newRedactor(t, emailRule()))
+	spans := captureSpans(t, exec)
+	logs := captureLogs(t)
+
+	_, _ = exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "GET",
+		Url:    canaryURL(server.URL),
+	})
+
+	assertNoCanary(t, "span", spanText(spans.Ended()))
+	assertNoCanary(t, "log", logs.text())
+}
+
 func TestExecute_BodyTooLargeKeepsRequestPathOutOfTelemetry(t *testing.T) {
 	exec := newTestExecutor(t, 5*time.Second, 1)
 	spans := captureSpans(t, exec)

@@ -1,11 +1,15 @@
 package telemetry
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestHostFromURL(t *testing.T) {
@@ -166,6 +170,43 @@ func TestSanitizeError(t *testing.T) {
 				t.Errorf("SanitizeError() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecordError_ReducesOnTheSpanAndInTheReturnedCopy(t *testing.T) {
+	const canary = "canary-77bd0e91"
+
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	_, span := provider.Tracer("test").Start(context.Background(), "test")
+
+	returned := RecordError(span, &url.Error{
+		Op:  "Get",
+		URL: "https://api.internal/orders?token=" + canary,
+		Err: errors.New("connection refused"),
+	})
+	span.End()
+
+	if strings.Contains(returned.Error(), canary) {
+		t.Errorf("returned copy still carries the query: %v", returned)
+	}
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(ended))
+	}
+
+	var recorded string
+	for _, event := range ended[0].Events() {
+		for _, attr := range event.Attributes {
+			recorded += " " + attr.Value.String()
+		}
+	}
+	if recorded == "" {
+		t.Fatal("no error was recorded on the span")
+	}
+	if strings.Contains(recorded, canary) {
+		t.Errorf("span event still carries the query:%s", recorded)
 	}
 }
 

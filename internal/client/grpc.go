@@ -332,7 +332,7 @@ func (cm *ConnectionManager) receiveLoop(
 					slog.ErrorContext(ctx, "concurrent http request failed",
 						"tunnel_id", conn.ID,
 						"request_id", m.RequestId,
-						"error", err)
+						"error", telemetry.SanitizeError(err))
 				}
 			}(msg)
 			continue
@@ -389,10 +389,7 @@ func (cm *ConnectionManager) handleMessage(
 			"target_host", targetHost)
 
 		if err := protovalidate.Validate(m.HttpRequest); err != nil {
-			// The reply below keeps the full text; only the exported copy is
-			// reduced.
-			safeErr := telemetry.SanitizeError(err)
-			span.RecordError(safeErr)
+			safeErr := telemetry.RecordError(span, err)
 			slog.WarnContext(reqCtx, "received invalid http request",
 				"request_id", msg.RequestId,
 				"target_host", targetHost,
@@ -410,7 +407,7 @@ func (cm *ConnectionManager) handleMessage(
 
 		httpResp, err := cm.executor.Execute(reqCtx, m.HttpRequest)
 		if err != nil {
-			span.RecordError(telemetry.SanitizeError(err))
+			_ = telemetry.RecordError(span, err)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{

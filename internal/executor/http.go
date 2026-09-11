@@ -148,9 +148,7 @@ func (e *Executor) Execute(
 
 	// Validate the target URL.
 	if err := connector.ValidateTargetURL(protoReq.Url); err != nil {
-		// The returned error keeps the URL; only the exported copy is reduced.
-		safeErr := telemetry.SanitizeError(err)
-		span.RecordError(safeErr)
+		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: invalid URL",
 			"error", safeErr,
 			"target_host", targetHost)
@@ -164,7 +162,7 @@ func (e *Executor) Execute(
 			len(protoReq.Body),
 			e.maxRequestBodySizeBytes,
 		)
-		span.RecordError(bodySizeErr)
+		_ = telemetry.RecordError(span, bodySizeErr)
 		e.metrics.requestBodySizeLimitHit.Add(ctx, 1)
 		slog.WarnContext(ctx, "upstream request failed: body too large",
 			"body_size", len(protoReq.Body),
@@ -185,8 +183,7 @@ func (e *Executor) Execute(
 
 	httpReq, err := http.NewRequestWithContext(ctx, protoReq.Method, protoReq.Url, body)
 	if err != nil {
-		safeErr := telemetry.SanitizeError(err)
-		span.RecordError(safeErr)
+		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: cannot create request",
 			"error", safeErr,
 			"target_host", targetHost)
@@ -207,8 +204,7 @@ func (e *Executor) Execute(
 	if err != nil {
 		// The transport puts the whole URL it was given into its own error text,
 		// so dropping URL attributes does not by itself keep it out of telemetry.
-		safeErr := telemetry.SanitizeError(err)
-		span.RecordError(safeErr)
+		safeErr := telemetry.RecordError(span, err)
 		duration := time.Since(startTime)
 		slog.ErrorContext(ctx, "upstream request failed",
 			"error", safeErr,
@@ -220,7 +216,7 @@ func (e *Executor) Execute(
 
 	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
 	if err != nil {
-		span.RecordError(err)
+		_ = telemetry.RecordError(span, err)
 		return nil, err
 	}
 
@@ -268,7 +264,7 @@ func (e *Executor) buildResponse(
 					e.maxResponseBodySizeBytes))
 		}
 		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
-			"error", err,
+			"error", telemetry.SanitizeError(err),
 			"target_host", targetHost)
 		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
@@ -431,7 +427,7 @@ func (e *Executor) redactBody(
 			changed = jsonChanged
 		} else {
 			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
-				"error", err, "target_host", targetHost)
+				"error", telemetry.SanitizeError(err), "target_host", targetHost)
 		}
 	}
 
@@ -459,7 +455,7 @@ func (e *Executor) refuse(
 	slog.ErrorContext(ctx, "upstream response dropped: body could not be redacted",
 		"target_host", targetHost,
 		"reason", reason,
-		"error", err)
+		"error", telemetry.SanitizeError(err))
 	return connector.NewCodedError(code, err)
 }
 
