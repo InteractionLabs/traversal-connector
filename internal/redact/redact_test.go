@@ -438,6 +438,31 @@ func TestHostMatchingFollowsDNSSpelling(t *testing.T) {
 			want:        true,
 		},
 		{
+			// An upper-case RE2 escape means the opposite of its lower-case form,
+			// so this case fails if case is ever folded by lowercasing the pattern
+			// text instead of by wrapping it. \D+ matches the letters of "api";
+			// \d+ would not.
+			name:        "an upper-case escape keeps its meaning",
+			hostPattern: `\D+\.example\.com`,
+			host:        "api.example.com",
+			want:        true,
+		},
+		{
+			// The hostname has any trailing dot removed before matching, so the
+			// name a pattern is compared against never ends in one. The rules
+			// reference states this, because a pattern written in absolute form
+			// matches nothing and RE2 spells a trailing dot too many ways for the
+			// pattern text to be trimmed safely.
+			name:        "a pattern in absolute form matches nothing",
+			hostPattern: `example\.com\.`,
+			host:        "example.com",
+		},
+		{
+			name:        "a pattern in absolute form matches no absolute host either",
+			hostPattern: `example\.com\.`,
+			host:        "example.com.",
+		},
+		{
 			name:        "a different host does not match",
 			hostPattern: `example\.com`,
 			host:        "notexample.com",

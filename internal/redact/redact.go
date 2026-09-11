@@ -63,7 +63,8 @@ type Rule struct {
 	// ".*github.com" matches "api.github.com" and "github.com" but not
 	// "github.com.evil.com". Matching follows DNS rather than byte equality:
 	// patterns are case-insensitive and the hostname is compared without a
-	// trailing dot.
+	// trailing dot. A pattern must therefore not carry a trailing dot of its
+	// own, since the name it is matched against never ends in one.
 	Hosts []string `toml:"hosts"`
 }
 
@@ -267,6 +268,12 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 		// folded here rather than by lowercasing p, which would rewrite RE2
 		// escapes into their opposites (\D into \d) and silently invert the
 		// pattern's meaning.
+		//
+		// p is otherwise used exactly as written. The hostname side has already
+		// lost any trailing dot, but the matching dot cannot be trimmed from p in
+		// turn: RE2 spells a trailing dot several ways (\., [.], or inside a
+		// group), and trimming the text turns some of them into invalid patterns.
+		// The documented contract is that a pattern carries no trailing dot.
 		m, err := regexp.Compile("^(?i:" + p + ")$")
 		if err != nil {
 			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
