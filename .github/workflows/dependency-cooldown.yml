@@ -12,4 +12,4 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: InteractionLabs/infrastructure/.github/workflows/dependency-cooldown.yaml@f28dca6cfb0f6c4bc5fce4991c4bb25b8cb93809 # policy-v1
+    uses: InteractionLabs/traversal-connector/.github/workflows/dependency-cooldown.yaml@652a775bbd292bad4b4c0b98c53a2c64a4799468 # policy-v1
