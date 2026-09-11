@@ -43,18 +43,11 @@ format:
 build:
     go build ./...
 
-go-dependencies-update:
-    scripts/update_go_dependencies.sh deps
-
-go-tools-update:
-    scripts/update_go_dependencies.sh tools
-
 dependency-policy-check:
     python3 .github/actions/dependency-policy/repository_invariants.py --repo .
 
 dependency-policy-test:
     python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_*.py'
-    python3 -m unittest discover -s scripts -p 'test_go_*.py'
     just dependency-policy-check
 
 # Run all tests
