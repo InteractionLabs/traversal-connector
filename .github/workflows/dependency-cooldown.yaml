@@ -55,7 +55,7 @@ jobs:
           role-session-name: dependency-evidence-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Enforce dependency policy
-        uses: InteractionLabs/traversal-connector/.github/actions/dependency-cooldown@7050e2fb241689dcadd0d816b4f1011f1c98c1e1 # policy-v1
+        uses: InteractionLabs/traversal-connector/.github/actions/dependency-cooldown@9055d8c2ad64e942666009107f9fb9104420cca6 # policy-v1
         with:
           base-sha: ${{ steps.comparison.outputs.base }}
           head-sha: ${{ steps.comparison.outputs.head }}
