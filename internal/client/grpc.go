@@ -38,6 +38,10 @@ const (
 	// every call to the control plane, letting it attribute connections to a
 	// specific connector instance.
 	connectorIDHeader = "X-Traversal-Connector-ID"
+	// tunnelMessageOverheadBytes leaves room above the configured HTTP body
+	// limit for the containing protobuf message's request ID, URL, headers,
+	// field tags, and length prefixes.
+	tunnelMessageOverheadBytes = 2 * 1024 * 1024
 )
 
 // NewClient creates a ConnectRPC client for the Traversal control plane.
@@ -56,6 +60,11 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 
 	opts := []connect.ClientOption{
 		connect.WithGRPC(),
+		connect.WithReadMaxBytes(tunnelMessageMaxBytes(cfg.MaxRequestBodySizeMB)),
+		connect.WithSendMaxBytes(tunnelMessageMaxBytes(max(
+			cfg.MaxResponseBodySizeMB,
+			cfg.MaxDecodedResponseBodySizeMB,
+		))),
 		connect.WithInterceptors(
 			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
 		),
@@ -66,6 +75,23 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 		cfg.TraversalControllerURL,
 		opts...,
 	), nil
+}
+
+// tunnelMessageMaxBytes converts a configured HTTP body limit to a limit for
+// the complete protobuf tunnel message. Non-positive body limits retain their
+// existing unlimited behavior; ConnectRPC represents that with the largest
+// platform int rather than zero, which would disable its size check entirely.
+func tunnelMessageMaxBytes(bodySizeMB int64) int {
+	maxInt := int(^uint(0) >> 1)
+	if bodySizeMB <= 0 {
+		return maxInt
+	}
+
+	const bytesPerMB = 1024 * 1024
+	if bodySizeMB > int64((maxInt-tunnelMessageOverheadBytes)/bytesPerMB) {
+		return maxInt
+	}
+	return int(bodySizeMB)*bytesPerMB + tunnelMessageOverheadBytes
 }
 
 // headerInterceptor is a ConnectRPC interceptor that stamps a fixed header
