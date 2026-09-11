@@ -1,0 +1,44 @@
+name: Enforce dependency cooldown
+description: Validate repository policy and changed dependency publication times
+inputs:
+  base-sha:
+    description: Merge-base commit to compare
+    required: true
+  head-sha:
+    description: Commit containing proposed dependency changes
+    required: true
+  require-caller:
+    description: Require the repository-level reusable workflow caller
+    required: false
+    default: "true"
+  output:
+    description: JSON evidence report path
+    required: false
+    default: dependency-cooldown-results.json
+runs:
+  using: composite
+  steps:
+    - name: Validate repository dependency controls
+      shell: bash
+      env:
+        INPUT_REQUIRE_CALLER: ${{ inputs.require-caller }}
+      run: |
+        set -euo pipefail
+        arguments=(--repo "$GITHUB_WORKSPACE")
+        if [[ "$INPUT_REQUIRE_CALLER" == "true" ]]; then
+          arguments+=(--require-caller)
+        fi
+        python3 "$GITHUB_ACTION_PATH/dependency_policy_invariants.py" "${arguments[@]}"
+    - name: Enforce dependency publication age
+      shell: bash
+      env:
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/dependency_cooldown.py" \
+          --repo "$GITHUB_WORKSPACE" \
+          --base "$INPUT_BASE_SHA" \
+          --head "$INPUT_HEAD_SHA" \
+          --output "$INPUT_OUTPUT"
