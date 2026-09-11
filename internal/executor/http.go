@@ -116,7 +116,7 @@ func (e *Executor) Execute(
 ) (*pb.HttpResponse, error) {
 	startTime := time.Now()
 
-	targetHost := hostFromURL(protoReq.Url)
+	targetHost := telemetry.HostFromURL(protoReq.Url)
 	requestStatus := connector.StatusError
 	defer func() {
 		duration := float64(
@@ -148,10 +148,12 @@ func (e *Executor) Execute(
 
 	// Validate the target URL.
 	if err := connector.ValidateTargetURL(protoReq.Url); err != nil {
-		span.RecordError(err)
+		// The returned error keeps the URL; only the exported copy is reduced.
+		safeErr := telemetry.SanitizeError(err)
+		span.RecordError(safeErr)
 		slog.ErrorContext(ctx, "upstream request failed: invalid URL",
-			"error", err,
-			"url", protoReq.Url)
+			"error", safeErr,
+			"target_host", targetHost)
 		return nil, fmt.Errorf("invalid target URL: %w", err)
 	}
 
@@ -167,7 +169,7 @@ func (e *Executor) Execute(
 		slog.WarnContext(ctx, "upstream request failed: body too large",
 			"body_size", len(protoReq.Body),
 			"max_size", e.maxRequestBodySizeBytes,
-			"url", protoReq.Url)
+			"target_host", targetHost)
 		return nil, fmt.Errorf(
 			"request body size %d exceeds limit %d",
 			len(protoReq.Body),
@@ -183,10 +185,11 @@ func (e *Executor) Execute(
 
 	httpReq, err := http.NewRequestWithContext(ctx, protoReq.Method, protoReq.Url, body)
 	if err != nil {
-		span.RecordError(err)
+		safeErr := telemetry.SanitizeError(err)
+		span.RecordError(safeErr)
 		slog.ErrorContext(ctx, "upstream request failed: cannot create request",
-			"error", err,
-			"url", protoReq.Url)
+			"error", safeErr,
+			"target_host", targetHost)
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
@@ -202,10 +205,13 @@ func (e *Executor) Execute(
 	//nolint:gosec // G704: intentional validated upstream request
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		span.RecordError(err)
+		// The transport puts the whole URL it was given into its own error text,
+		// so dropping URL attributes does not by itself keep it out of telemetry.
+		safeErr := telemetry.SanitizeError(err)
+		span.RecordError(safeErr)
 		duration := time.Since(startTime)
 		slog.ErrorContext(ctx, "upstream request failed",
-			"error", err,
+			"error", safeErr,
 			"target_host", targetHost,
 			"duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("upstream request failed: %w", err)

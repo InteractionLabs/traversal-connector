@@ -13,31 +13,31 @@ import (
 )
 
 // ValidateTargetURL validates the target URL for connector requests.
+//
+// Outcomes are reported through the returned error alone. The caller holds the
+// request's span and its destination attribute, so it is the only layer that can
+// record a failure with correlation, and reporting from both places would
+// duplicate every validation outcome in the log stream.
 func ValidateTargetURL(targetURL string) error {
 	if targetURL == "" {
-		slog.Warn("validation failed: missing target URL")
 		return fmt.Errorf("validation error: %s", ErrorCodeMissingTargetURL)
 	}
 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		slog.Warn("validation failed: invalid URL format", "error", err)
 		return fmt.Errorf("validation error: invalid URL format: %w", err)
 	}
 
 	// Validate URL scheme
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		slog.Warn("validation failed: invalid URL scheme")
 		return errors.New("validation error: invalid URL scheme, must be http or https")
 	}
 
 	// Validate host is present
 	if parsedURL.Host == "" {
-		slog.Warn("validation failed: missing host")
 		return errors.New("validation error: missing host in URL")
 	}
 
-	slog.Debug("URL validation successful", "url", targetURL)
 	return nil
 }
 

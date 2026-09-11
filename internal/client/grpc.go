@@ -373,11 +373,12 @@ func (cm *ConnectionManager) handleMessage(
 		})
 
 	case *pb.ControllerMessage_HttpRequest:
+		targetHost := telemetry.HostFromURL(m.HttpRequest.Url)
 		reqCtx, span := cm.tracer.Start(ctx, telemetry.SpanConnectorHandleHTTP,
 			trace.WithAttributes(
 				attribute.String(connector.AttrRequestID, msg.RequestId),
 				attribute.String(connector.AttrMethod, m.HttpRequest.Method),
-				attribute.String(telemetry.AttrURL, m.HttpRequest.Url),
+				attribute.String(connector.AttrTargetHost, targetHost),
 			),
 		)
 		defer span.End()
@@ -385,13 +386,17 @@ func (cm *ConnectionManager) handleMessage(
 		slog.DebugContext(reqCtx, "received http request",
 			"request_id", msg.RequestId,
 			"method", m.HttpRequest.Method,
-			"url", m.HttpRequest.Url)
+			"target_host", targetHost)
 
 		if err := protovalidate.Validate(m.HttpRequest); err != nil {
-			span.RecordError(err)
+			// The reply below keeps the full text; only the exported copy is
+			// reduced.
+			safeErr := telemetry.SanitizeError(err)
+			span.RecordError(safeErr)
 			slog.WarnContext(reqCtx, "received invalid http request",
 				"request_id", msg.RequestId,
-				"error", err)
+				"target_host", targetHost,
+				"error", safeErr)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
@@ -405,7 +410,7 @@ func (cm *ConnectionManager) handleMessage(
 
 		httpResp, err := cm.executor.Execute(reqCtx, m.HttpRequest)
 		if err != nil {
-			span.RecordError(err)
+			span.RecordError(telemetry.SanitizeError(err))
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
