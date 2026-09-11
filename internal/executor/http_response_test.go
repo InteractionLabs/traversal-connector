@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -849,6 +850,60 @@ func TestExecute_UpstreamCannotForgeTheRedactionFlag(t *testing.T) {
 
 			if got := countHeader(resp.Headers, headerRedacted); got != tt.wantFlags {
 				t.Errorf("%s count = %d, want %d", headerRedacted, got, tt.wantFlags)
+			}
+		})
+	}
+}
+
+// TestBuildResponse_HostSpellingCannotSkipDecoding covers the gate in front of the
+// whole pipeline. Every spelling below reaches the same upstream, so each has to be
+// decoded, redacted and re-encoded; one the gate failed to recognize would instead
+// forward the compressed body untouched.
+func TestBuildResponse_HostSpellingCannotSkipDecoding(t *testing.T) {
+	const upstream = `{"message":"contact a@b.com"}`
+
+	for _, targetURL := range []string{
+		"https://example.com/x",
+		"https://EXAMPLE.COM/x",
+		"https://Example.Com/x",
+		"https://example.com./x",
+		"https://EXAMPLE.COM./x",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, redact.Rule{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     emailPattern,
+				Replacement: "[REDACTED]",
+				Hosts:       []string{`example\.com`},
+			}))
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					headerContentType:     []string{"application/json"},
+					headerContentEncoding: []string{"gzip"},
+					headerAcceptRanges:    []string{"bytes"},
+				},
+				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
+			}
+
+			protoResp, err := exec.buildResponse(
+				context.Background(), resp, targetURL, "example.com",
+			)
+			if err != nil {
+				t.Fatalf("buildResponse() error: %v", err)
+			}
+
+			want := `{"message":"contact [REDACTED]"}`
+			if diff := cmp.Diff(want, string(ungzip(t, protoResp.Body))); diff != "" {
+				t.Errorf("decoded body mismatch (-want +got):\n%s", diff)
+			}
+			if _, ok := findHeader(protoResp.Headers, headerRedacted); !ok {
+				t.Error("a redacted body must carry the redaction flag")
+			}
+			if _, ok := findHeader(protoResp.Headers, headerAcceptRanges); ok {
+				t.Error("a host with rules must stop advertising range support")
 			}
 		})
 	}

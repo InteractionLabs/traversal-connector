@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -58,7 +59,9 @@ type Rule struct {
 	// matches at least one pattern. When empty, it defaults to [".*"], which
 	// matches every host. Each pattern is anchored to the whole hostname, so
 	// ".*github.com" matches "api.github.com" and "github.com" but not
-	// "github.com.evil.com".
+	// "github.com.evil.com". Matching follows DNS rather than byte equality:
+	// patterns are case-insensitive and the hostname is compared without a
+	// trailing dot.
 	Hosts []string `toml:"hosts"`
 }
 
@@ -95,8 +98,20 @@ type compiledRule struct {
 	hostMatchers []*regexp.Regexp
 }
 
+// canonicalHost reduces a hostname to the form DNS considers authoritative, so
+// two spellings of one name cannot resolve to the same upstream while matching
+// different rule sets: labels are case-insensitive, and a trailing dot only
+// marks the name as already absolute.
+//
+// Every host comparison in this package goes through here, so the pipeline gate
+// and per-rule matching can never disagree about a spelling.
+func canonicalHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
 // appliesToHost reports whether the rule should fire for the given request
-// hostname. A rule with no host filter (nil hostMatchers) always applies.
+// hostname, which callers pass in canonicalHost form. A rule with no host filter
+// (nil hostMatchers) always applies.
 func (cr *compiledRule) appliesToHost(host string) bool {
 	if cr.hostMatchers == nil {
 		return true
@@ -114,9 +129,10 @@ func (cr *compiledRule) appliesToHost(host string) bool {
 // whole redaction pipeline, including response decoding, on hosts no rule
 // targets.
 func (r *Redactor) HasRulesForHost(host string) bool {
+	canonical := canonicalHost(host)
 	rules := *r.rules.Load()
 	for i := range rules {
-		if rules[i].appliesToHost(host) {
+		if rules[i].appliesToHost(canonical) {
 			return true
 		}
 	}
@@ -242,10 +258,14 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 			// Matches everything; equivalent to no filter at all.
 			return nil, nil
 		}
-		// Anchor to the whole hostname. The non-capturing group keeps any
-		// top-level alternation in p from binding only the first/last branch
-		// to the anchors.
-		m, err := regexp.Compile("^(?:" + p + ")$")
+		// Anchor to the whole hostname. The group keeps any top-level
+		// alternation in p from binding only the first/last branch to the
+		// anchors, and folds case so a pattern spelled with capitals still
+		// matches the canonicalized (lowercased) hostname. Case has to be
+		// folded here rather than by lowercasing p, which would rewrite RE2
+		// escapes into their opposites (\D into \d) and silently invert the
+		// pattern's meaning.
+		m, err := regexp.Compile("^(?i:" + p + ")$")
 		if err != nil {
 			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
 		}
@@ -285,10 +305,11 @@ func (r *Redactor) Apply(ctx context.Context, host string, src []byte) ([]byte, 
 	if len(rules) == 0 {
 		return src, false
 	}
+	canonical := canonicalHost(host)
 	result := src
 	changed := false
 	for i := range rules {
-		if rules[i].structured || !rules[i].appliesToHost(host) {
+		if rules[i].structured || !rules[i].appliesToHost(canonical) {
 			continue
 		}
 		var ruleChanged bool
@@ -325,11 +346,12 @@ func (r *Redactor) ApplyJSON(
 	src []byte,
 ) ([]byte, bool, error) {
 	rules := *r.rules.Load()
+	canonical := canonicalHost(host)
 	// Pre-filter to the structured rules in scope for this host so the host
 	// regexes run once per request rather than once per JSON node.
 	active := make([]compiledRule, 0, len(rules))
 	for i := range rules {
-		if rules[i].structured && rules[i].appliesToHost(host) {
+		if rules[i].structured && rules[i].appliesToHost(canonical) {
 			active = append(active, rules[i])
 		}
 	}

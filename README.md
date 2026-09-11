@@ -230,6 +230,8 @@ Each rule requires:
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
 - `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
 
+Matching follows DNS rather than byte equality, so one upstream cannot be reached under a spelling that carries a different rule set. Patterns are matched **case-insensitively** (`api\.github\.com` and `API\.GITHUB\.COM` both match `API.github.com`), and a single trailing dot on the requested hostname is ignored, since it only marks the name as already absolute (`github.com.` matches `github\.com`). Non-ASCII hostnames are matched as written, with no IDN or punycode conversion.
+
 `regex-structured-data` rules additionally accept:
 - `redact_fields` — allowlist of pipe-delimited paths. When set, the rule only fires inside the matching subtrees.
 - `skip_fields` — blocklist of pipe-delimited paths. When set, the rule never fires inside the matching subtrees.

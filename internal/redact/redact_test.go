@@ -380,6 +380,125 @@ func TestHasRulesForHost(t *testing.T) {
 	}
 }
 
+// TestHostMatchingFollowsDNSSpelling checks every entry point that takes a host
+// against the same cases. The gate and per-rule matching have to reach the same
+// verdict for a given spelling: if the gate said no while a rule said yes, the
+// response would skip decoding and rule evaluation altogether.
+func TestHostMatchingFollowsDNSSpelling(t *testing.T) {
+	tests := []struct {
+		name        string
+		hostPattern string
+		host        string
+		want        bool
+	}{
+		{name: "exact match", hostPattern: `example\.com`, host: "example.com", want: true},
+		{
+			name:        "requested host in upper case",
+			hostPattern: `example\.com`,
+			host:        "EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			name:        "requested host in mixed case",
+			hostPattern: `example\.com`,
+			host:        "Example.Com",
+			want:        true,
+		},
+		{
+			name:        "requested host with a trailing dot",
+			hostPattern: `example\.com`,
+			host:        "example.com.",
+			want:        true,
+		},
+		{
+			name:        "requested host in upper case with a trailing dot",
+			hostPattern: `example\.com`,
+			host:        "EXAMPLE.COM.",
+			want:        true,
+		},
+		{
+			// Rule files predate case folding, so any pattern already written
+			// with capitals has to keep working.
+			name:        "pattern written in upper case",
+			hostPattern: `EXAMPLE\.COM`,
+			host:        "example.com",
+			want:        true,
+		},
+		{
+			name:        "pattern and host both in upper case",
+			hostPattern: `EXAMPLE\.COM`,
+			host:        "EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			name:        "lower-case character class matches an upper-case host",
+			hostPattern: `[a-z]+\.example\.com`,
+			host:        "API.EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			name:        "a different host does not match",
+			hostPattern: `example\.com`,
+			host:        "notexample.com",
+		},
+		{
+			name:        "a longer host does not match through the anchors",
+			hostPattern: `example\.com`,
+			host:        "example.com.other.com",
+		},
+		{
+			// Only one trailing dot marks an absolute name; a second leaves an
+			// empty label, which is not a name this rule was scoped to.
+			name:        "a doubled trailing dot does not match",
+			hostPattern: `example\.com`,
+			host:        "example.com..",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: []Rule{
+				{
+					Name:        "byte-level",
+					Type:        "regex",
+					Pattern:     "secret",
+					Replacement: "[REDACTED]",
+					Hosts:       []string{tt.hostPattern},
+				},
+				{
+					Name:        "per-field",
+					Type:        "regex-structured-data",
+					Pattern:     "secret",
+					Replacement: "[REDACTED]",
+					Hosts:       []string{tt.hostPattern},
+				},
+			}}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			if got := r.HasRulesForHost(tt.host); got != tt.want {
+				t.Errorf("HasRulesForHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+
+			_, byteChanged := r.Apply(context.Background(), tt.host, []byte("secret"))
+			if byteChanged != tt.want {
+				t.Errorf("Apply(%q) changed = %v, want %v", tt.host, byteChanged, tt.want)
+			}
+
+			_, fieldChanged, err := r.ApplyJSON(
+				context.Background(), tt.host, []byte(`{"k":"secret"}`),
+			)
+			if err != nil {
+				t.Fatalf("ApplyJSON() error: %v", err)
+			}
+			if fieldChanged != tt.want {
+				t.Errorf("ApplyJSON(%q) changed = %v, want %v", tt.host, fieldChanged, tt.want)
+			}
+		})
+	}
+}
+
 func TestApply_ReportsWhetherBodyChanged(t *testing.T) {
 	tests := []struct {
 		name        string
