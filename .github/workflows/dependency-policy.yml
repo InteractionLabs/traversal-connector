@@ -12,4 +12,4 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@bf7cf235b1e3750cfed7e7c480679f323f055142 # policy-v1
+    uses: InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@eda5f7fd4bdd1b930d7664d3dadc89e6990d730c # policy-v1
