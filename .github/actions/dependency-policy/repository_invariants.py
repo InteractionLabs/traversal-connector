@@ -11,10 +11,7 @@ from pathlib import Path
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-CALLER = re.compile(
-    r"InteractionLabs/infrastructure/\.github/workflows/"
-    r"reusable-dependency-policy\.yml@([0-9a-f]{40})(?:\s|#|$)"
-)
+GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 def validate_renovate(repository: Path) -> list[str]:
@@ -192,14 +189,24 @@ def validate_exception_boundary(repository: Path) -> list[str]:
     return []
 
 
-def validate_caller(repository: Path) -> list[str]:
+def validate_caller(
+    repository: Path,
+    caller_repository: str = "InteractionLabs/infrastructure",
+) -> list[str]:
+    if not GITHUB_REPOSITORY.fullmatch(caller_repository):
+        return ["the trusted caller repository must use owner/repository form"]
     candidates = [repository / ".github/workflows/dependency-policy.yml"]
     caller = next((path for path in candidates if path.exists()), None)
     if not caller:
         return ["the dependency-policy caller workflow is required"]
     content = caller.read_text()
     failures: list[str] = []
-    if not CALLER.search(content):
+    caller_pattern = re.compile(
+        re.escape(caller_repository)
+        + r"/\.github/workflows/reusable-dependency-policy\.yml@"
+        + r"[0-9a-f]{40}(?:\s|#|$)"
+    )
+    if not caller_pattern.search(content):
         failures.append("the shared dependency workflow must use a full commit SHA")
     if not re.search(r"(?m)^\s*pull_request\s*:", content):
         failures.append("the dependency-policy caller must run for pull requests")
@@ -223,6 +230,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--require-caller", action="store_true")
+    parser.add_argument(
+        "--caller-repository",
+        default="InteractionLabs/infrastructure",
+    )
     arguments = parser.parse_args()
     repository = arguments.repo.resolve()
     failures = [
@@ -233,7 +244,9 @@ def main() -> int:
         *validate_exception_boundary(repository),
     ]
     if arguments.require_caller:
-        failures.extend(validate_caller(repository))
+        failures.extend(
+            validate_caller(repository, arguments.caller_repository)
+        )
     if failures:
         for failure in failures:
             print(f"dependency-policy: {failure}")

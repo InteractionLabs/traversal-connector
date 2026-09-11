@@ -11,6 +11,10 @@ inputs:
     description: Require the repository-level reusable workflow caller
     required: false
     default: "true"
+  caller-repository:
+    description: Repository that owns the trusted reusable workflow
+    required: false
+    default: InteractionLabs/infrastructure
   output:
     description: JSON evidence report path
     required: false
@@ -22,9 +26,13 @@ runs:
       shell: bash
       env:
         INPUT_REQUIRE_CALLER: ${{ inputs.require-caller }}
+        INPUT_CALLER_REPOSITORY: ${{ inputs.caller-repository }}
       run: |
         set -euo pipefail
-        arguments=(--repo "$GITHUB_WORKSPACE")
+        arguments=(
+          --repo "$GITHUB_WORKSPACE"
+          --caller-repository "$INPUT_CALLER_REPOSITORY"
+        )
         if [[ "$INPUT_REQUIRE_CALLER" == "true" ]]; then
           arguments+=(--require-caller)
         fi
