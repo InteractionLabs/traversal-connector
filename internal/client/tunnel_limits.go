@@ -1,7 +1,10 @@
 package client
 
 import (
+	"log/slog"
 	"math"
+
+	"connectrpc.com/connect"
 
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
@@ -12,36 +15,62 @@ const (
 	// unlimitedMessageSize is how the transport spells "no ceiling".
 	unlimitedMessageSize = 0
 
-	// tunnelMessageOverheadBytes is the room a tunnel message needs beyond the
-	// body it carries: the request id, the method, the target URL, the whole
-	// header block, and protobuf framing. The message schema bounds none of those,
-	// so the allowance is assumed rather than computed. 1 MiB is what net/http
-	// grants a request header block by default, so a message needing more than
-	// this on top of its body is not carrying an exchange a mainstream HTTP server
-	// would have accepted, while the allowance stays negligible against body
-	// limits measured in tens of megabytes.
+	// maxHeaderBlockBytes is the largest header block that can reach a tunnel
+	// message. net/http allows a response header block 10 MiB by default and the
+	// executor's transport does not narrow it, so in the direction the connector
+	// does not control this is the bound that actually applies.
+	maxHeaderBlockBytes = 10 << 20
+
+	// tunnelMessageFieldsBytes covers what a message carries besides its body and
+	// its headers: the request id, the method, the target URL, and protobuf
+	// framing. The message schema bounds none of them - the URL least of all - so
+	// this is a deliberately generous round number rather than a computed total.
+	tunnelMessageFieldsBytes = 2 << 20
+
+	// tunnelMessageOverheadBytes is the room a message needs beyond its body. It
+	// has to exceed the header budget above rather than match it, since the header
+	// block is only part of what travels alongside the body.
 	//
 	// This is why a ceiling is never just the body limit: that would reject a
 	// maximum-size body the moment its URL and headers were counted.
-	tunnelMessageOverheadBytes = 1 << 20
+	tunnelMessageOverheadBytes = maxHeaderBlockBytes + tunnelMessageFieldsBytes
 
-	// maxCeilingBodySizeMB is the largest body limit that still yields a ceiling
-	// an int holds on every platform.
-	maxCeilingBodySizeMB = (math.MaxInt32 - tunnelMessageOverheadBytes) / bytesPerMB
+	// maxCeilingBodySizeMB is the largest body limit a ceiling can express, set by
+	// the width of the int the transport takes. On a 64-bit platform no
+	// configurable limit comes close; a narrower platform is reported rather than
+	// quietly held to a different number.
+	maxCeilingBodySizeMB = (math.MaxInt - tunnelMessageOverheadBytes) / bytesPerMB
 )
 
 // tunnelReadMaxBytes is the ceiling for a message arriving from the control
-// plane. Inbound messages carry an upstream request body, so the ceiling tracks
-// the request body limit.
+// plane. Inbound messages carry an upstream request body, which the connector
+// refuses above the request body limit, so the ceiling tracks that limit.
 func tunnelReadMaxBytes(cfg *config.Config) int {
 	return tunnelMessageCeiling(cfg.MaxRequestBodySizeMB)
 }
 
 // tunnelSendMaxBytes is the ceiling for a message leaving for the control plane.
-// Outbound messages carry an upstream response body, so the ceiling tracks the
-// response body limit.
+//
+// The two directions are not symmetric. A response body can leave larger than it
+// arrived: to redact a compressed body the connector decodes it, and what it
+// re-encodes and sends is bounded by the decoded limit rather than by the wire
+// limit that governed arrival. The re-encode is its own compressor at its own
+// level, under no obligation to match however the upstream compressed, so its
+// output can exceed the bytes that came in. Neither limit dominates the other by
+// configuration, so the ceiling follows whichever is larger.
+//
+// A replacement string longer than the text it matches can still grow a body past
+// both limits. That is a property of the configured rules, not something a ceiling
+// derived from sizes can predict.
 func tunnelSendMaxBytes(cfg *config.Config) int {
-	return tunnelMessageCeiling(cfg.MaxResponseBodySizeMB)
+	// Either limit unset leaves the body that can leave unbounded, so the ceiling
+	// is too - the body checks read a non-positive limit the same way.
+	if cfg.MaxResponseBodySizeMB <= 0 || cfg.MaxDecodedResponseBodySizeMB <= 0 {
+		return unlimitedMessageSize
+	}
+	return tunnelMessageCeiling(
+		max(cfg.MaxResponseBodySizeMB, cfg.MaxDecodedResponseBodySizeMB),
+	)
 }
 
 // tunnelMessageCeiling turns a body-size limit in MB into a per-message ceiling
@@ -51,9 +80,47 @@ func tunnelMessageCeiling(bodySizeMB int64) int {
 	if bodySizeMB <= 0 {
 		return unlimitedMessageSize
 	}
-	// Clamped before the multiplication because an overflowing product comes out
-	// negative, which the transport reads as no ceiling at all - the opposite of
-	// what a large limit asks for.
-	clamped := min(bodySizeMB, maxCeilingBodySizeMB)
-	return int(clamped*bytesPerMB) + tunnelMessageOverheadBytes
+	if exceedsExpressibleCeiling(bodySizeMB) {
+		// The largest ceiling this platform can hold. Multiplying instead would
+		// overflow to a negative number, which the transport reads as no ceiling at
+		// all - the opposite of what a large limit asks for.
+		return math.MaxInt
+	}
+	return int(bodySizeMB*bytesPerMB) + tunnelMessageOverheadBytes
+}
+
+// exceedsExpressibleCeiling reports a body limit too large to convert into a
+// ceiling, so the caller can say the configured value is not the one in force.
+func exceedsExpressibleCeiling(bodySizeMB int64) bool {
+	return bodySizeMB > maxCeilingBodySizeMB
+}
+
+// warnOnInexpressibleCeiling reports a configured body limit this platform cannot
+// turn into a ceiling, so an operator is not left believing a number that is not
+// the one being enforced.
+func warnOnInexpressibleCeiling(cfg *config.Config) {
+	for setting, bodySizeMB := range map[string]int64{
+		"MAX_REQUEST_BODY_SIZE_MB":          cfg.MaxRequestBodySizeMB,
+		"MAX_RESPONSE_BODY_SIZE_MB":         cfg.MaxResponseBodySizeMB,
+		"MAX_DECODED_RESPONSE_BODY_SIZE_MB": cfg.MaxDecodedResponseBodySizeMB,
+	} {
+		if exceedsExpressibleCeiling(bodySizeMB) {
+			slog.Warn(
+				"body size limit is too large to express as a tunnel message ceiling; "+
+					"enforcing the largest ceiling this platform holds",
+				"setting", setting,
+				"configured_mb", bodySizeMB,
+				"largest_expressible_mb", int64(maxCeilingBodySizeMB),
+			)
+		}
+	}
+}
+
+// isLocalMessageSizeError reports whether err is this side refusing a message for
+// exceeding a configured ceiling, rather than the controller reporting resource
+// exhaustion of its own. The two share a code, so which side raised it is the only
+// thing that separates them, and confusing the two would blame controller capacity
+// for a message that was merely too large.
+func isLocalMessageSizeError(err error) bool {
+	return connect.CodeOf(err) == connect.CodeResourceExhausted && !connect.IsWireError(err)
 }

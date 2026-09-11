@@ -54,14 +54,15 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 	}
 	httpClient := &http.Client{Transport: transport}
 
+	warnOnInexpressibleCeiling(cfg)
+
 	opts := []connect.ClientOption{
 		connect.WithGRPC(),
 		// Bound both directions so an oversized message is refused by the transport
 		// rather than buffered and deserialized first: the gRPC envelope declares
 		// its payload length in a prefix, and the limit is applied to that prefix
-		// before the payload is read. Each direction derives from the body limit it
-		// carries - inbound an upstream request body, outbound an upstream response
-		// body - so neither ceiling needs configuration of its own.
+		// before the payload is read. Both ceilings come from the configured body
+		// limits, so neither needs configuration of its own.
 		connect.WithReadMaxBytes(tunnelReadMaxBytes(cfg)),
 		connect.WithSendMaxBytes(tunnelSendMaxBytes(cfg)),
 		connect.WithInterceptors(
@@ -318,15 +319,22 @@ func (cm *ConnectionManager) receiveLoop(
 				)
 				return nil
 			}
-			if connect.CodeOf(err) == connect.CodeResourceExhausted {
-				// A message refused for exceeding the ceiling is indistinguishable by
-				// code from the controller refusing the tunnel for capacity, and the
-				// capacity path reports neither a size nor a ceiling. Logged here so an
-				// operator can tell an oversized message from a full controller.
-				slog.WarnContext(ctx, "tunnel receive refused as resource exhausted",
-					"tunnel_id", conn.ID,
-					"inbound_ceiling_bytes", tunnelReadMaxBytes(cm.config),
-					"error", err)
+			if isLocalMessageSizeError(err) {
+				// Reported as a plain error on purpose: carrying the transport's code
+				// would let this be read as the controller refusing the tunnel for
+				// capacity, which is a different problem with a different fix.
+				//
+				// The stream cannot be resumed past this point. The transport consumes
+				// the rest of the body looking for trailers, so the messages behind the
+				// refused one are gone and the tunnel has to be rebuilt.
+				//
+				// Which request was refused is not knowable here: the id travels inside
+				// the payload the transport discarded, so the controller learns of it by
+				// its own timeout rather than from an error response.
+				return fmt.Errorf(
+					"inbound tunnel message exceeded the ceiling from MAX_REQUEST_BODY_SIZE_MB: %s",
+					err,
+				)
 			}
 			return fmt.Errorf("receive error: %w", err)
 		}
