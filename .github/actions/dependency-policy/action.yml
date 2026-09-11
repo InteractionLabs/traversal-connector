@@ -1,4 +1,4 @@
-name: Enforce dependency cooldown
+name: Enforce dependency policy
 description: Validate repository policy and changed dependency publication times
 inputs:
   base-sha:
@@ -37,7 +37,7 @@ runs:
         INPUT_OUTPUT: ${{ inputs.output }}
       run: |
         set -euo pipefail
-        python3 "$GITHUB_ACTION_PATH/dependency_cooldown.py" \
+        python3 "$GITHUB_ACTION_PATH/dependency_policy.py" \
           --repo "$GITHUB_WORKSPACE" \
           --base "$INPUT_BASE_SHA" \
           --head "$INPUT_HEAD_SHA" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode=${1:?usage: cooldown_update.sh deps|tools}
+mode=${1:?usage: update_go_dependencies.sh deps|tools}
 base=$(git rev-parse HEAD)
 mod_backup=$(mktemp)
 sum_backup=$(mktemp)
@@ -34,7 +34,7 @@ case "$mode" in
     ;;
 esac
 
-if ! scripts/dependency_cooldown.py --base "$base"; then
+if ! scripts/go_dependency_cooldown.py --base "$base"; then
   echo "update rejected; go.mod and go.sum restored to their locked state" >&2
   exit 1
 fi

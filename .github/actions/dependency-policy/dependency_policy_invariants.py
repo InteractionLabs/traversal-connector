@@ -12,7 +12,7 @@ from pathlib import Path
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 CALLER = re.compile(
     r"InteractionLabs/infrastructure/\.github/workflows/"
-    r"dependency-cooldown\.yaml@([0-9a-f]{40})(?:\s|#|$)"
+    r"reusable-dependency-policy\.yml@([0-9a-f]{40})(?:\s|#|$)"
 )
 
 
@@ -107,10 +107,7 @@ def validate_exception_boundary(repository: Path) -> list[str]:
 
 
 def validate_caller(repository: Path) -> list[str]:
-    candidates = [
-        repository / ".github/workflows/dependency-cooldown.yml",
-        repository / ".github/workflows/dependency-cooldown.yaml",
-    ]
+    candidates = [repository / ".github/workflows/dependency-policy.yml"]
     caller = next((path for path in candidates if path.exists()), None)
     if not caller:
         return ["the dependency-cooldown caller workflow is required"]

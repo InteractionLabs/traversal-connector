@@ -1,4 +1,4 @@
-# Dependency cooldown action
+# Dependency policy action
 
 This repository vendors the shared policy action because a public repository
 cannot call actions or reusable workflows from the private infrastructure

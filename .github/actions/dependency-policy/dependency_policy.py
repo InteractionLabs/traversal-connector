@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce immutable inputs and a 168-hour dependency cooldown."""
+"""Enforce immutable dependency inputs and a 168-hour cooldown."""
 
 from __future__ import annotations
 

@@ -5,18 +5,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-POLICY = ROOT / ".github/actions/dependency-cooldown"
+POLICY = ROOT / ".github/actions/dependency-policy"
 
 
 class DependencyPolicyVendorTest(unittest.TestCase):
     def test_policy_matches_declared_infrastructure_source(self):
         self.assertEqual(
             (POLICY / "SOURCE").read_text().strip(),
-            "InteractionLabs/infrastructure@7f488debf398a01e91fb55a456fb00778b766c39",
+            "InteractionLabs/infrastructure@2fdbee2264343826b354f92d8e1787f8df65035c",
         )
         expected = {
-            "dependency_cooldown.py": "83196441214a0c552fde057f389b9f052bb5f1b451fee3ae3edee2a2f2e66aa6",
-            "dependency_policy_invariants.py": "5866d5d5de73c5eea156bd4e3ba19b9a0a3c640e9e10ddb6c857e3ff9f33c08e",
+            "dependency_policy.py": "7d4e99e286b69d5d3df3ffbe56a9da2b98f4df9edae66639cd008659f1f2b53d",
+            "dependency_policy_invariants.py": "3ee3714e1df09a2112e22074068b20ce59e9c8a5056aca687ebc356fd2f5b68f",
         }
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((POLICY / name).read_bytes()).hexdigest(), digest)

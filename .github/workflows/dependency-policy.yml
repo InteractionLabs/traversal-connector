@@ -1,0 +1,15 @@
+name: dependency-policy
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-cooldown:
+    permissions:
+      contents: read
+      id-token: write
+    uses: InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@bf7cf235b1e3750cfed7e7c480679f323f055142 # policy-v1

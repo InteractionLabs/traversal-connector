@@ -4,7 +4,6 @@
 import argparse
 import datetime as dt
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -19,6 +18,9 @@ COOLDOWN = dt.timedelta(days=7)
 PROXY = os.getenv("GOPROXY", "https://proxy.golang.org").split(",")[0].rstrip("/")
 INDEX = os.getenv("GOINDEX", "https://index.golang.org/index")
 PRIVATE_PREFIXES = tuple(filter(None, os.getenv("GOPRIVATE", "github.com/InteractionLabs").split(",")))
+DEFAULT_EVIDENCE_BUCKET = "traversal-dependency-evidence-833319601877-us-west-2"
+DEFAULT_EVIDENCE_REGION = "us-west-2"
+EVIDENCE_REPOSITORY = "InteractionLabs/traversal-connector"
 
 
 def parse_time(value):
@@ -78,22 +80,41 @@ def public_first_observed(module, version):
 
 
 def private_first_observed(module, version):
-    endpoint = os.getenv("DEPENDENCY_EVIDENCE_URL")
-    token = os.getenv("DEPENDENCY_EVIDENCE_TOKEN")
-    key = os.getenv("DEPENDENCY_EVIDENCE_HMAC_KEY")
-    if not endpoint or not key:
-        raise RuntimeError("private module %s@%s requires signed first-observed evidence" % (module, version))
-    query = {"ecosystem": "go", "artifact": module, "version": version}
-    url = endpoint + ("&" if "?" in endpoint else "?") + urllib.parse.urlencode(query)
-    evidence = fetch_json(url, token)
-    signed = {**query, "first_observed_at": evidence.get("first_observed_at")}
-    if any(evidence.get(field) != value for field, value in signed.items()):
-        raise RuntimeError("private evidence response did not exactly match %s@%s" % (module, version))
-    payload = json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()
-    expected = hmac.new(key.encode(), payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(str(evidence.get("signature", "")), expected):
-        raise RuntimeError("private evidence response has an invalid signature")
-    return parse_time(evidence["first_observed_at"])
+    bucket = os.getenv("DEPENDENCY_EVIDENCE_BUCKET", DEFAULT_EVIDENCE_BUCKET)
+    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION", DEFAULT_EVIDENCE_REGION)
+    repository = os.getenv("GITHUB_REPOSITORY", EVIDENCE_REPOSITORY)
+    coordinate = {"ecosystem": "go", "artifact": module, "version": version}
+    canonical = json.dumps(coordinate, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(canonical).hexdigest()
+    object_key = "v1/repositories/%s/go/%s.json" % (repository, digest)
+    result = subprocess.run(
+        [
+            "aws",
+            "s3api",
+            "head-object",
+            "--bucket",
+            bucket,
+            "--key",
+            object_key,
+            "--region",
+            region,
+            "--no-cli-pager",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "private module %s@%s S3 evidence lookup failed: %s"
+            % (module, version, result.stderr.strip() or "unknown AWS CLI error")
+        )
+    metadata = json.loads(result.stdout)
+    last_modified = metadata.get("LastModified") if isinstance(metadata, dict) else None
+    if not isinstance(last_modified, str):
+        raise RuntimeError("private module %s@%s S3 evidence has no LastModified timestamp" % (module, version))
+    return parse_time(last_modified)
 
 
 def exact_exception(module, version, now, eligible=None):

@@ -44,13 +44,13 @@ build:
     go build ./...
 
 deps-update:
-    scripts/cooldown_update.sh deps
+    scripts/update_go_dependencies.sh deps
 
 tools-update:
-    scripts/cooldown_update.sh tools
+    scripts/update_go_dependencies.sh tools
 
 dependency-policy-check:
-    python3 scripts/verify_immutable_dependencies.py
+    python3 scripts/verify_immutable_build_inputs.py
 
 # Run all tests
 test:
