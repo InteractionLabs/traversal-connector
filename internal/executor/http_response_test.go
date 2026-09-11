@@ -946,6 +946,67 @@ func TestExecute_JSONBodyMustBeOneDocument(t *testing.T) {
 	}
 }
 
+// TestExecute_EmptyJSONBodyForwardedInEveryCoding covers a body with no bytes to
+// scan. An empty body cannot carry anything a rule would remove, so both codings
+// have to forward it: the two responses differ only in transport, and refusing one
+// of them would turn a coding choice into a hard error for the requester.
+func TestExecute_EmptyJSONBodyForwardedInEveryCoding(t *testing.T) {
+	tests := []struct {
+		name            string
+		contentEncoding string
+	}{
+		{name: "identity"},
+		{name: "gzip", contentEncoding: "gzip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			// A gzip member wrapping no bytes is still a couple of dozen bytes on
+			// the wire, so emptiness only becomes visible after the decode.
+			var wire []byte
+			if tt.contentEncoding == "gzip" {
+				wire = gzipped(t, nil)
+			}
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, "application/json")
+					if tt.contentEncoding != "" {
+						w.Header().Set(headerContentEncoding, tt.contentEncoding)
+					}
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(wire)
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, structuredEmailRule()))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, tt.contentEncoding),
+			)
+			if err != nil {
+				t.Fatalf("an empty body must be forwarded, got error: %v", err)
+			}
+			if !bytes.Equal(wire, resp.Body) {
+				t.Errorf("body should be forwarded as it arrived, got %d bytes, want %d",
+					len(resp.Body), len(wire))
+			}
+			if _, ok := findHeader(resp.Headers, headerRedacted); ok {
+				t.Error("an untouched response should not be flagged as redacted")
+			}
+
+			refusals := counterValue(t, collect(), telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+			if diff := cmp.Diff(int64(0), refusals); diff != "" {
+				t.Errorf("nothing should have been refused (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestExecute_UnparseableJSONForwardedWhenNoPerFieldRuleApplies(t *testing.T) {
 	// The same mislabeled body, on hosts where no per-field rule needs it parsed.
 	// Dropping it there would refuse traffic no rule was going to inspect.

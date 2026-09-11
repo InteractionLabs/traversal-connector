@@ -326,6 +326,15 @@ func (e *Executor) buildResponse(
 			metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
 	}
 
+	// The same reasoning as the bodyless check above, applied to what the decode
+	// produced: a coding that wraps no content still puts bytes on the wire, so
+	// emptiness is only visible here. Without this, an empty body would be
+	// forwarded uncompressed and refused compressed, and no rule can find
+	// anything to remove in either.
+	if len(plaintext) == 0 {
+		return finalizeResponse(resp, body, responseDisposition{}), nil
+	}
+
 	redacted, changed, err := e.redactBody(
 		ctx, redactHost, resp.Header.Get(headerContentType), plaintext,
 	)
