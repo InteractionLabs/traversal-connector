@@ -367,14 +367,26 @@ func (r *Redactor) ApplyJSON(
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		return nil, false, fmt.Errorf("redact: parse json: %w", err)
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, false, errors.New("redact: json body ends mid-document")
+		}
+		return nil, false, jsonFaultAt("json body does not parse", err)
 	}
+	// Read before the check below moves the decoder, so it marks where the one
+	// document a caller may send actually ended.
+	firstDocEnd := dec.InputOffset()
 	// A decode stops at the end of the first value, so without this check a body
 	// holding several documents (or one document plus junk) would be scanned only
 	// as far as the first and re-encoded to just that, quietly discarding the rest.
 	// Reading to EOF turns that into an error the caller can act on.
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, false, errors.New("redact: json body is more than one document")
+		if err == nil {
+			return nil, false, fmt.Errorf(
+				"redact: json body has more than one document, the first ends at byte %d",
+				firstDocEnd,
+			)
+		}
+		return nil, false, jsonFaultAt("json body has trailing bytes that do not parse", err)
 	}
 
 	matched := false
@@ -389,6 +401,21 @@ func (r *Redactor) ApplyJSON(
 	// json.Encoder.Encode appends a trailing newline; strip it to keep the
 	// output byte-for-byte comparable to a normal Marshal.
 	return bytes.TrimRight(buf.Bytes(), "\n"), matched, nil
+}
+
+// jsonFaultAt reports why a body is not one JSON document, with the byte the
+// decoder stopped on where it knows one.
+//
+// The decoder's own message quotes the input it stopped on, which is a byte of a
+// body the caller is about to refuse to forward. That message would travel to
+// wherever refusals are recorded, so the text here is rebuilt from the offset
+// alone and the underlying error is never interpolated or wrapped.
+func jsonFaultAt(what string, err error) error {
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		return fmt.Errorf("redact: %s at byte %d", what, syntax.Offset)
+	}
+	return fmt.Errorf("redact: %s", what)
 }
 
 // redactValue runs every structured rule over v independently. Each rule's
