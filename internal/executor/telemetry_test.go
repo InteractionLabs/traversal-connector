@@ -15,6 +15,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
 // queryCanary appears only inside a request's query string, so finding it
@@ -258,6 +259,9 @@ func TestExecute_RefusedResponseKeepsRequestPathOutOfTelemetry(t *testing.T) {
 // The per-field redaction path reports a body it could not parse. Whether such a
 // response is forwarded or dropped is decided elsewhere, so only the exported
 // records are asserted here.
+//
+// The rule has to be a structured one: the per-field pass filters to those, and
+// with none in scope it returns before ever parsing the body.
 func TestExecute_UnparseableJSONBodyKeepsRequestPathOutOfTelemetry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -266,7 +270,13 @@ func TestExecute_UnparseableJSONBodyKeepsRequestPathOutOfTelemetry(t *testing.T)
 	}))
 	defer server.Close()
 
-	exec := newExecutor(t, responseTestConfig(), newRedactor(t, emailRule()))
+	exec := newExecutor(t, responseTestConfig(), newRedactor(t, redact.Rule{
+		Name:         "email",
+		Type:         "regex-structured-data",
+		Pattern:      emailPattern,
+		Replacement:  "[REDACTED]",
+		RedactFields: []string{"email"},
+	}))
 	spans := captureSpans(t, exec)
 	logs := captureLogs(t)
 
@@ -274,6 +284,13 @@ func TestExecute_UnparseableJSONBodyKeepsRequestPathOutOfTelemetry(t *testing.T)
 		Method: "GET",
 		Url:    canaryURL(server.URL),
 	})
+
+	// Absence proves nothing about a branch that never ran, so confirm the parse
+	// failure was reported before reading anything into the assertions below.
+	if !strings.Contains(logs.text(), "structured rules skipped") {
+		t.Fatalf("per-field parse failure went unreported, so this test is vacuous:\n%s",
+			logs.text())
+	}
 
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
