@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/net/http2"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
@@ -267,6 +269,125 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 	// http URL → h2c regardless of proxy validity.
 	if _, ok := transport.(*http2.Transport); !ok {
 		t.Errorf("expected *http2.Transport for http URL, got %T", transport)
+	}
+}
+
+type fixedBodyController struct {
+	bodySize int
+}
+
+func (s fixedBodyController) Tunnel(
+	_ context.Context,
+	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
+) error {
+	if _, err := stream.Receive(); err != nil {
+		return err
+	}
+	return stream.Send(&pb.ControllerMessage{
+		RequestId: "oversized-request",
+		Message: &pb.ControllerMessage_HttpRequest{
+			HttpRequest: &pb.HttpRequest{
+				Method: http.MethodPost,
+				Url:    "http://example.test/",
+				Body:   make([]byte, s.bodySize),
+			},
+		},
+	})
+}
+
+func newTunnelTestClient(
+	t *testing.T,
+	bodySize int,
+	cfg config.Config,
+) connectorconnect.ConnectorServiceClient {
+	t.Helper()
+	path, handler := connectorconnect.NewConnectorServiceHandler(
+		fixedBodyController{bodySize: bodySize},
+	)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+
+	server := httptest.NewUnstartedServer(mux)
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	server.Config.Protocols = protocols
+	server.Start()
+	t.Cleanup(server.Close)
+
+	cfg.TraversalControllerURL = server.URL
+	cfg.ConnectorID = "test-connector"
+	rpcClient, err := NewClient(&cfg)
+	if err != nil {
+		t.Fatalf("NewClient() error: %v", err)
+	}
+	return rpcClient
+}
+
+func TestNewClient_RejectsOversizedTunnelMessage(t *testing.T) {
+	const bodySize = 40 * 1024 * 1024
+
+	rpcClient := newTunnelTestClient(t, bodySize, config.Config{
+		MaxRequestBodySizeMB: 32,
+	})
+	stream := rpcClient.Tunnel(context.Background())
+	if err := stream.Send(&pb.ConnectorMessage{RequestId: "hello"}); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+
+	msg, err := stream.Receive()
+	if err == nil {
+		t.Fatalf(
+			"Receive() returned a %d-byte body, want a size-limit error",
+			len(msg.GetHttpRequest().GetBody()),
+		)
+	}
+	if code := connect.CodeOf(err); code != connect.CodeResourceExhausted {
+		t.Fatalf("Receive() error code = %v, want %v: %v",
+			code, connect.CodeResourceExhausted, err)
+	}
+}
+
+func TestNewClient_AllowsTunnelMessageAtConfiguredBodyLimit(t *testing.T) {
+	const bodySize = 32 * 1024 * 1024
+
+	rpcClient := newTunnelTestClient(t, bodySize, config.Config{
+		MaxRequestBodySizeMB: 32,
+	})
+	stream := rpcClient.Tunnel(context.Background())
+	if err := stream.Send(&pb.ConnectorMessage{RequestId: "hello"}); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+
+	msg, err := stream.Receive()
+	if err != nil {
+		t.Fatalf("Receive() error: %v", err)
+	}
+	if got := len(msg.GetHttpRequest().GetBody()); got != bodySize {
+		t.Fatalf("received body size = %d, want %d", got, bodySize)
+	}
+}
+
+func TestNewClient_RejectsOversizedOutboundTunnelMessage(t *testing.T) {
+	const bodySize = 40 * 1024 * 1024
+
+	rpcClient := newTunnelTestClient(t, 0, config.Config{
+		MaxRequestBodySizeMB:         32,
+		MaxResponseBodySizeMB:        32,
+		MaxDecodedResponseBodySizeMB: 32,
+	})
+	stream := rpcClient.Tunnel(context.Background())
+	err := stream.Send(&pb.ConnectorMessage{
+		RequestId: "oversized-response",
+		Message: &pb.ConnectorMessage_HttpResponse{
+			HttpResponse: &pb.HttpResponse{Body: make([]byte, bodySize)},
+		},
+	})
+	if err == nil {
+		t.Fatalf("Send() accepted a %d-byte body, want a size-limit error", bodySize)
+	}
+	if code := connect.CodeOf(err); code != connect.CodeResourceExhausted {
+		t.Fatalf("Send() error code = %v, want %v: %v",
+			code, connect.CodeResourceExhausted, err)
 	}
 }
 

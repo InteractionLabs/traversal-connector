@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -31,6 +32,17 @@ func emailRule() redact.Rule {
 	return redact.Rule{
 		Name:        "email",
 		Type:        "regex",
+		Pattern:     emailPattern,
+		Replacement: "[REDACTED]",
+	}
+}
+
+// structuredEmailRule redacts email addresses per-field, so it only reaches a
+// body the connector could parse as JSON.
+func structuredEmailRule() redact.Rule {
+	return redact.Rule{
+		Name:        "email",
+		Type:        "regex-structured-data",
 		Pattern:     emailPattern,
 		Replacement: "[REDACTED]",
 	}
@@ -849,6 +861,394 @@ func TestExecute_UpstreamCannotForgeTheRedactionFlag(t *testing.T) {
 
 			if got := countHeader(resp.Headers, headerRedacted); got != tt.wantFlags {
 				t.Errorf("%s count = %d, want %d", headerRedacted, got, tt.wantFlags)
+			}
+		})
+	}
+}
+
+func TestExecute_JSONBodyMustBeOneDocument(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		// want is the body expected to reach the requester. Empty means the
+		// response is dropped instead.
+		want string
+	}{
+		{
+			name: "one document is redacted and forwarded",
+			body: `{"email":"user@example.com"}`,
+			want: `{"email":"[REDACTED]"}`,
+		},
+		{
+			name: "malformed body is dropped",
+			body: `{"email":"user@example.com"`,
+		},
+		{
+			// Decoding stops at the end of the first document, so forwarding this
+			// would ship a body silently shortened to that first value.
+			name: "trailing content after the first document is dropped",
+			body: `{"email":"user@example.com"} {"email":"other@example.com"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(tt.body))
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, structuredEmailRule()))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, ""),
+			)
+
+			collected := collect()
+			refusals := counterValue(t, collected, telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+
+			if tt.want != "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if diff := cmp.Diff(tt.want, string(resp.Body)); diff != "" {
+					t.Errorf("body mismatch (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(int64(0), refusals); diff != "" {
+					t.Errorf("a parseable body is not a refusal (-want +got):\n%s", diff)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected a refusal, got a response of %d bytes", len(resp.Body))
+			}
+			if diff := cmp.Diff(int64(1), refusals); diff != "" {
+				t.Errorf("refusal count mismatch (-want +got):\n%s", diff)
+			}
+			// The reason has to stand apart from the coding reasons, so an operator
+			// can tell a mislabeled document from an undecodable stream.
+			for _, coding := range []string{refusalDecodeFailed, refusalUnsupportedEncoding} {
+				counted := counterValue(t, collected, telemetry.MetricResponseRefusalsTotal,
+					attribute.String(attrRefusalReason, coding))
+				if diff := cmp.Diff(int64(0), counted); diff != "" {
+					t.Errorf("reason %q should not fire here (-want +got):\n%s", coding, diff)
+				}
+			}
+		})
+	}
+}
+
+// TestExecute_EmptyJSONBodyForwardedInEveryCoding covers a body with no bytes to
+// scan. An empty body cannot carry anything a rule would remove, so both codings
+// have to forward it: the two responses differ only in transport, and refusing one
+// of them would turn a coding choice into a hard error for the requester.
+func TestExecute_EmptyJSONBodyForwardedInEveryCoding(t *testing.T) {
+	tests := []struct {
+		name            string
+		contentEncoding string
+	}{
+		{name: "identity"},
+		{name: "gzip", contentEncoding: "gzip"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			// A gzip member wrapping no bytes is still a couple of dozen bytes on
+			// the wire, so emptiness only becomes visible after the decode.
+			var wire []byte
+			if tt.contentEncoding == "gzip" {
+				wire = gzipped(t, nil)
+			}
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, "application/json")
+					if tt.contentEncoding != "" {
+						w.Header().Set(headerContentEncoding, tt.contentEncoding)
+					}
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(wire)
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, structuredEmailRule()))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, tt.contentEncoding),
+			)
+			if err != nil {
+				t.Fatalf("an empty body must be forwarded, got error: %v", err)
+			}
+			if !bytes.Equal(wire, resp.Body) {
+				t.Errorf("body should be forwarded as it arrived, got %d bytes, want %d",
+					len(resp.Body), len(wire))
+			}
+			if _, ok := findHeader(resp.Headers, headerRedacted); ok {
+				t.Error("an untouched response should not be flagged as redacted")
+			}
+
+			refusals := counterValue(t, collect(), telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+			if diff := cmp.Diff(int64(0), refusals); diff != "" {
+				t.Errorf("nothing should have been refused (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestExecute_UnparseableJSONForwardedWhenNoPerFieldRuleApplies(t *testing.T) {
+	// The same mislabeled body, on hosts where no per-field rule needs it parsed.
+	// Dropping it there would refuse traffic no rule was going to inspect.
+	const upstream = `{"email":"user@example.com"} trailing junk`
+
+	tests := []struct {
+		name  string
+		rules []redact.Rule
+		want  string
+	}{
+		{name: "no rules configured", want: upstream},
+		{
+			name:  "only a byte-level rule",
+			rules: []redact.Rule{emailRule()},
+			want:  `{"email":"[REDACTED]"} trailing junk`,
+		},
+		{
+			name: "per-field rule scoped to another host",
+			rules: []redact.Rule{{
+				Name:        "email",
+				Type:        "regex-structured-data",
+				Pattern:     emailPattern,
+				Replacement: "[REDACTED]",
+				Hosts:       []string{`other\.test`},
+			}},
+			want: upstream,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(upstream))
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, tt.rules...))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, ""),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, string(resp.Body)); diff != "" {
+				t.Errorf("body mismatch (-want +got):\n%s", diff)
+			}
+
+			refusals := counterValue(t, collect(), telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+			if diff := cmp.Diff(int64(0), refusals); diff != "" {
+				t.Errorf("nothing should have been refused (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestBuildResponse_HostSpellingCannotSkipDecoding covers the gate in front of the
+// whole pipeline. Every spelling below reaches the same upstream, so each has to be
+// decoded, redacted and re-encoded; one the gate failed to recognize would instead
+// forward the compressed body untouched.
+func TestBuildResponse_HostSpellingCannotSkipDecoding(t *testing.T) {
+	const upstream = `{"message":"contact a@b.com"}`
+
+	for _, targetURL := range []string{
+		"https://example.com/x",
+		"https://EXAMPLE.COM/x",
+		"https://Example.Com/x",
+		"https://example.com./x",
+		"https://EXAMPLE.COM./x",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, redact.Rule{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     emailPattern,
+				Replacement: "[REDACTED]",
+				Hosts:       []string{`example\.com`},
+			}))
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					headerContentType:     []string{"application/json"},
+					headerContentEncoding: []string{"gzip"},
+					headerAcceptRanges:    []string{"bytes"},
+				},
+				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
+			}
+
+			protoResp, err := exec.buildResponse(
+				context.Background(), resp, targetURL, "example.com",
+			)
+			if err != nil {
+				t.Fatalf("buildResponse() error: %v", err)
+			}
+
+			want := `{"message":"contact [REDACTED]"}`
+			if diff := cmp.Diff(want, string(ungzip(t, protoResp.Body))); diff != "" {
+				t.Errorf("decoded body mismatch (-want +got):\n%s", diff)
+			}
+			if _, ok := findHeader(protoResp.Headers, headerRedacted); !ok {
+				t.Error("a redacted body must carry the redaction flag")
+			}
+			if _, ok := findHeader(protoResp.Headers, headerAcceptRanges); ok {
+				t.Error("a host with rules must stop advertising range support")
+			}
+		})
+	}
+}
+
+// TestBuildResponse_NonASCIIHostScannedByEncodedRule covers the pipeline gate
+// rather than per-rule matching. The gate decides whether a response is decoded
+// at all, so a hostname it fails to recognise skips decoding and every rule with
+// it, whatever the rules themselves would have matched.
+func TestBuildResponse_NonASCIIHostScannedByEncodedRule(t *testing.T) {
+	const upstream = `{"message":"contact a@b.com"}`
+
+	for _, targetURL := range []string{
+		"https://bücher.example/x",
+		"https://BÜCHER.EXAMPLE/x",
+		"https://bücher.example./x",
+		"https://xn--bcher-kva.example/x",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, redact.Rule{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     emailPattern,
+				Replacement: "[REDACTED]",
+				Hosts:       []string{`xn--bcher-kva\.example`},
+			}))
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					headerContentType:     []string{"application/json"},
+					headerContentEncoding: []string{"gzip"},
+					headerAcceptRanges:    []string{"bytes"},
+				},
+				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
+			}
+
+			protoResp, err := exec.buildResponse(
+				context.Background(), resp, targetURL, "xn--bcher-kva.example",
+			)
+			if err != nil {
+				t.Fatalf("buildResponse() error: %v", err)
+			}
+
+			want := `{"message":"contact [REDACTED]"}`
+			if diff := cmp.Diff(want, string(ungzip(t, protoResp.Body))); diff != "" {
+				t.Errorf("decoded body mismatch (-want +got):\n%s", diff)
+			}
+			if _, ok := findHeader(protoResp.Headers, headerRedacted); !ok {
+				t.Error("a redacted body must carry the redaction flag")
+			}
+			if _, ok := findHeader(protoResp.Headers, headerAcceptRanges); ok {
+				t.Error("a host with rules must stop advertising range support")
+			}
+		})
+	}
+}
+
+// TestExecute_InvalidMediaParameterStillReachesPerFieldRedaction covers the
+// content-type classification that decides whether per-field rules run at all. A
+// JSON media type still names a JSON body when an optional parameter appended to
+// it is malformed, so such a response has to reach the per-field path; reading it
+// as some other type would forward the body with those rules skipped.
+func TestExecute_InvalidMediaParameterStillReachesPerFieldRedaction(t *testing.T) {
+	// Valid base media type, one malformed parameter after it.
+	const contentType = "application/json; charset"
+
+	tests := []struct {
+		name string
+		body string
+		want string // empty means the response has to be dropped
+	}{
+		{
+			name: "a parseable body is redacted per-field",
+			body: `{"email":"user@example.com"}`,
+			want: `{"email":"[REDACTED]"}`,
+		},
+		{
+			// The intended consequence of reaching that path: a body which is not
+			// one complete JSON document cannot be scanned field by field, so it is
+			// dropped instead of forwarded unscanned.
+			name: "an unparseable body is dropped",
+			body: `{"email":"user@example.com"} trailing junk`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, contentType)
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(tt.body))
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, structuredEmailRule()))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, ""),
+			)
+
+			refusals := counterValue(t, collect(), telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+
+			if tt.want != "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if diff := cmp.Diff(tt.want, string(resp.Body)); diff != "" {
+					t.Errorf("per-field rules did not reach the body (-want +got):\n%s", diff)
+				}
+				if _, ok := findHeader(resp.Headers, headerRedacted); !ok {
+					t.Error("a redacted body must carry the redaction flag")
+				}
+				if diff := cmp.Diff(int64(0), refusals); diff != "" {
+					t.Errorf("a parseable body is not a refusal (-want +got):\n%s", diff)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected a refusal, got a forwarded body of %d bytes: %s",
+					len(resp.Body), resp.Body)
+			}
+			if diff := cmp.Diff(int64(1), refusals); diff != "" {
+				t.Errorf("refusal count mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

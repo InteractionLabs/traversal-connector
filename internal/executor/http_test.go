@@ -506,60 +506,6 @@ func TestExecute_NonJSONContentType_StructuredRuleSkipped_LegacyFires(t *testing
 	}
 }
 
-func TestExecute_JSONContentTypeButInvalidBody_StructuredSkipped_LegacyFires(t *testing.T) {
-	// Invalid JSON: per-field redaction can't run, structured rules are
-	// skipped. Legacy regex rules still fire byte-level.
-	const upstream = "not json a@b.com 123-45-6789"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(upstream))
-	}))
-	defer server.Close()
-
-	redactor := redact.NewRedactor()
-	if err := redactor.Update(&redact.RulesFile{
-		Rules: []redact.Rule{
-			{
-				Name:        "email",
-				Type:        "regex-structured-data",
-				Pattern:     `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`,
-				Replacement: "[EMAIL]",
-			},
-			{
-				Name:        "ssn",
-				Type:        "regex",
-				Pattern:     `\b\d{3}-\d{2}-\d{4}\b`,
-				Replacement: "[SSN]",
-			},
-		},
-	}); err != nil {
-		t.Fatalf("redactor.Update() error: %v", err)
-	}
-
-	cfg := &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 32}
-	exec, err := NewExecutor(cfg, redactor)
-	if err != nil {
-		t.Fatalf("NewExecutor() failed: %v", err)
-	}
-
-	resp, err := exec.Execute(context.Background(), &pb.HttpRequest{
-		Method: "GET",
-		Url:    server.URL,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if string(resp.Body) != "not json a@b.com [SSN]" {
-		t.Errorf(
-			"structured rule should be skipped, legacy ssn should fire; got %q",
-			string(resp.Body),
-		)
-	}
-}
-
 func TestExecute_JSONResponse_LegacyRulesAlsoFire(t *testing.T) {
 	// On JSON bodies, structured rules fire per-field AND legacy regex rules
 	// fire byte-level over the result.
