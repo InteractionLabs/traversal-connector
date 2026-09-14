@@ -6,11 +6,6 @@ const (
 	SpanExecutorUpstreamHTTP = "executor.upstream_http"
 )
 
-// OpenTelemetry attribute keys emitted by the traversal connector.
-const (
-	AttrURL = "url"
-)
-
 // Metric names emitted by the traversal connector.
 const (
 	MetricStreamsActive                    = "connector.streams_active"
