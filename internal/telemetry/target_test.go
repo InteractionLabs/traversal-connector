@@ -10,6 +10,7 @@ import (
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
 func TestHostFromURL(t *testing.T) {
@@ -217,6 +218,44 @@ func TestRecordError_ReducesOnTheSpanAndInTheReturnedCopy(t *testing.T) {
 	// export the same type and stop being groupable.
 	if got := recorded[attrExceptionType]; got != "*url.Error" {
 		t.Errorf("exception type = %q, want the original error's class", got)
+	}
+}
+
+// A collector recognises an exception only by the conventional event name and
+// attribute keys, so the three spellings this package assembles the event from
+// have to be compared against the convention itself. Comparing them against
+// themselves, as an assertion phrased in the same constants does, holds whatever
+// they say: a typo would ship green while every error quietly stopped being an
+// exception to every collector.
+//
+// The version pinned here is the one the trace SDK's own RecordError uses, so a
+// hand-assembled event stays indistinguishable from the helper's. Raising it is
+// how a convention change becomes visible.
+func TestExceptionEventSpellingsMatchTheConvention(t *testing.T) {
+	tests := []struct {
+		subject string
+		got     string
+		want    string
+	}{
+		{subject: "event name", got: eventException, want: semconv.ExceptionEventName},
+		{
+			subject: "type attribute key",
+			got:     attrExceptionType,
+			want:    string(semconv.ExceptionTypeKey),
+		},
+		{
+			subject: "message attribute key",
+			got:     attrExceptionMessage,
+			want:    string(semconv.ExceptionMessageKey),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.subject, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("%s = %q, want %q", tt.subject, tt.got, tt.want)
+			}
+		})
 	}
 }
 

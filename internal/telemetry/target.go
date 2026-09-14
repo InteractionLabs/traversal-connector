@@ -73,7 +73,9 @@ func SanitizeError(err error) error {
 
 // Name and attribute keys of the event a span carries an error under. The event
 // is assembled here rather than delegated, so the conventional spellings are
-// named locally.
+// named locally rather than read from a semantic-convention package: what this
+// package puts on the wire stays its own decision, and a convention that moves
+// underneath it surfaces as a failing test instead of as changed output.
 const (
 	eventException       = "exception"
 	attrExceptionType    = "exception.type"
