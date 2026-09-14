@@ -3,6 +3,7 @@ package client
 import (
 	"log/slog"
 	"math"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -116,11 +117,42 @@ func warnOnInexpressibleCeiling(cfg *config.Config) {
 	}
 }
 
+// messageSizeRefusalMarkers are how the transport phrases a refusal for exceeding
+// a configured ceiling, in either direction and whether or not the message was
+// compressed. The library offers no sentinel or distinct code for these, so the
+// phrasing is all there is to identify one.
+//
+// Matching on text is sound only because the caller has already established the
+// error was raised on this side: a peer cannot supply wording that lands here. A
+// transport upgrade that rewords them makes this stop recognising a refusal, which
+// is why the tests drive real refusals through the transport rather than
+// constructing the error.
+var messageSizeRefusalMarkers = []string{
+	"larger than configured max",
+	"exceeds sendMaxBytes",
+}
+
 // isLocalMessageSizeError reports whether err is this side refusing a message for
-// exceeding a configured ceiling, rather than the controller reporting resource
-// exhaustion of its own. The two share a code, so which side raised it is the only
-// thing that separates them, and confusing the two would blame controller capacity
-// for a message that was merely too large.
+// exceeding a configured ceiling.
+//
+// Two other errors share the resource-exhausted code and each has to be ruled out,
+// because a caller acting on this predicate names a body-size setting and would
+// otherwise send an operator to the wrong one:
+//
+//   - The controller reporting exhaustion of its own, which is a capacity problem
+//     with a different fix. That error arrives from the wire.
+//   - A peer ending the stream to ask for less traffic, which the transport turns
+//     into local exhaustion even though nothing was oversized. That one is local,
+//     so only its subject separates it from a ceiling refusal.
 func isLocalMessageSizeError(err error) bool {
-	return connect.CodeOf(err) == connect.CodeResourceExhausted && !connect.IsWireError(err)
+	if connect.CodeOf(err) != connect.CodeResourceExhausted || connect.IsWireError(err) {
+		return false
+	}
+	message := err.Error()
+	for _, marker := range messageSizeRefusalMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }

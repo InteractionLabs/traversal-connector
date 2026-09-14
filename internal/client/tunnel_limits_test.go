@@ -209,6 +209,35 @@ func TestTunnelReceive_ServerExhaustionIsNotALocalSizeError(t *testing.T) {
 	}
 }
 
+// The transport raises the same code on this side for a peer asking the connector to
+// send less, which is flow control rather than anything oversized. Locality cannot
+// tell that apart from a ceiling refusal, so only the subject can, and mistaking one
+// for the other points an operator at a body-size setting that had no part in it.
+//
+// Built here rather than driven through the transport, which would need an HTTP/2
+// peer resetting the stream with ENHANCE_YOUR_CALM. This is the shape the transport
+// wraps such a reset in: local, exhausted, and silent about size.
+func TestIsLocalMessageSizeError_RejectsNonSizeLocalExhaustion(t *testing.T) {
+	reset := errors.New("stream error: stream ID 1; ENHANCE_YOUR_CALM")
+	err := connect.NewError(
+		connect.CodeResourceExhausted,
+		fmt.Errorf("bandwidth exhausted: %w", reset),
+	)
+
+	// Both other terms of the predicate hold, so the subject is the only thing that
+	// can rule this out.
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Fatalf("code = %v, want %v", got, connect.CodeResourceExhausted)
+	}
+	if connect.IsWireError(err) {
+		t.Fatal("error is reported as coming from the server, want locally raised")
+	}
+
+	if isLocalMessageSizeError(err) {
+		t.Error("isLocalMessageSizeError() = true for local exhaustion unrelated to size")
+	}
+}
+
 // The payload is fully delivered here, so the only thing keeping it out of memory
 // is the transport discarding it as it arrives. Measuring what the client allocated
 // while draining it is what separates discarding from buffering.
