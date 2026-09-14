@@ -479,6 +479,63 @@ func TestHostMatchingFollowsDNSSpelling(t *testing.T) {
 			hostPattern: `example\.com`,
 			host:        "example.com..",
 		},
+		{
+			// A non-ASCII name is encoded to ASCII before the connection is made,
+			// so that encoding is the spelling a rule has to be written for.
+			name:        "a non-ASCII host matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "bücher.example",
+			want:        true,
+		},
+		{
+			// The other half of the same requirement: both spellings of one name
+			// reach one upstream, so both have to select the same rules.
+			name:        "the ASCII encoding matches the same rule",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "xn--bcher-kva.example",
+			want:        true,
+		},
+		{
+			name:        "a non-ASCII host in upper case matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "BÜCHER.EXAMPLE",
+			want:        true,
+		},
+		{
+			// The encoding carries a trailing dot through untouched, so the dot is
+			// still stripped afterwards and both normalizations compose.
+			name:        "a non-ASCII host with a trailing dot matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "bücher.example.",
+			want:        true,
+		},
+		{
+			// The same contract as the absolute form above: only the hostname is
+			// converted. A pattern is a regex and is left exactly as written, so one
+			// in the non-ASCII form is compared against an encoded name and matches
+			// nothing.
+			name:        "a pattern in the non-ASCII form matches nothing",
+			hostPattern: `bücher\.example`,
+			host:        "bücher.example",
+		},
+		{
+			// An ASCII hostname is never validated, matching what the transport
+			// does before it dials. An underscore is not a legal IDNA label, but the
+			// name is still reached, so a rule written for it still has to fire.
+			name:        "an ASCII host the encoding would reject is matched as it arrived",
+			hostPattern: `foo_bar\.example`,
+			host:        "foo_bar.example",
+			want:        true,
+		},
+		{
+			// Case folding cannot run before the encoding. Go folds U+0130 to a
+			// plain "i", where the encoding keeps its dot above, so folding first
+			// would select rules for a different name than the one dialed.
+			name:        "encoding runs before case folding",
+			hostPattern: `xn--i-9bb\.example`,
+			host:        "İ.example.",
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {

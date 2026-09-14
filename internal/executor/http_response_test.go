@@ -1123,3 +1123,56 @@ func TestBuildResponse_HostSpellingCannotSkipDecoding(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildResponse_NonASCIIHostScannedByEncodedRule covers the pipeline gate
+// rather than per-rule matching. The gate decides whether a response is decoded
+// at all, so a hostname it fails to recognise skips decoding and every rule with
+// it, whatever the rules themselves would have matched.
+func TestBuildResponse_NonASCIIHostScannedByEncodedRule(t *testing.T) {
+	const upstream = `{"message":"contact a@b.com"}`
+
+	for _, targetURL := range []string{
+		"https://bücher.example/x",
+		"https://BÜCHER.EXAMPLE/x",
+		"https://bücher.example./x",
+		"https://xn--bcher-kva.example/x",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, redact.Rule{
+				Name:        "email",
+				Type:        "regex",
+				Pattern:     emailPattern,
+				Replacement: "[REDACTED]",
+				Hosts:       []string{`xn--bcher-kva\.example`},
+			}))
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					headerContentType:     []string{"application/json"},
+					headerContentEncoding: []string{"gzip"},
+					headerAcceptRanges:    []string{"bytes"},
+				},
+				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
+			}
+
+			protoResp, err := exec.buildResponse(
+				context.Background(), resp, targetURL, "xn--bcher-kva.example",
+			)
+			if err != nil {
+				t.Fatalf("buildResponse() error: %v", err)
+			}
+
+			want := `{"message":"contact [REDACTED]"}`
+			if diff := cmp.Diff(want, string(ungzip(t, protoResp.Body))); diff != "" {
+				t.Errorf("decoded body mismatch (-want +got):\n%s", diff)
+			}
+			if _, ok := findHeader(protoResp.Headers, headerRedacted); !ok {
+				t.Error("a redacted body must carry the redaction flag")
+			}
+			if _, ok := findHeader(protoResp.Headers, headerAcceptRanges); ok {
+				t.Error("a host with rules must stop advertising range support")
+			}
+		})
+	}
+}

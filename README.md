@@ -234,7 +234,9 @@ Matching follows DNS rather than byte equality, so one upstream cannot be reache
 
 Because that dot is removed before matching, the hostname a pattern is compared against never ends in one. **Write the pattern without a trailing dot** — `github\.com`, not `github\.com\.` — since a pattern in the absolute form matches nothing. The pattern text is used exactly as written and is never rewritten, because RE2 can spell a trailing dot several ways and trimming one out would corrupt some patterns rather than fix them.
 
-Case-insensitivity uses Unicode case folding, so it applies to non-ASCII hostnames too. What the connector never does is IDN or punycode conversion: a non-ASCII hostname is matched in whatever form the request URL carries, so write the rule in that same form.
+Case-insensitivity uses Unicode case folding, so it applies to non-ASCII hostnames too.
+
+A non-ASCII hostname is converted to its IDNA ASCII (punycode) form before matching, because that is the form the connection itself uses. **Write the pattern in that ASCII form**, `xn--bcher-kva\.example` rather than `bücher\.example`, since a pattern in the Unicode form matches nothing. Both spellings of one name then select the same rules: a request to `bücher.example` and a request to `xn--bcher-kva.example` are the same host. As with the trailing dot, the pattern text is never converted in turn, because it is a regex and rewriting it could change what it matches. A hostname that is already ASCII is matched as it arrived and is not validated, so a name the conversion would reject, such as one carrying an underscore, still matches a pattern written for it.
 
 `regex-structured-data` rules additionally accept:
 - `redact_fields` — allowlist of pipe-delimited paths. When set, the rule only fires inside the matching subtrees.

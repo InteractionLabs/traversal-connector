@@ -14,10 +14,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/net/idna"
 )
 
 // ruleType enumerates the supported redaction rule kinds.
@@ -65,6 +67,11 @@ type Rule struct {
 	// patterns are case-insensitive and the hostname is compared without a
 	// trailing dot. A pattern must therefore not carry a trailing dot of its
 	// own, since the name it is matched against never ends in one.
+	//
+	// A non-ASCII hostname is matched in the IDNA ASCII form the connection uses,
+	// so a pattern covering one must be written in that form
+	// (xn--bcher-kva\.example, not bücher\.example). Patterns are regexes and
+	// are never converted in turn.
 	Hosts []string `toml:"hosts"`
 }
 
@@ -103,13 +110,53 @@ type compiledRule struct {
 
 // canonicalHost reduces a hostname to the form DNS considers authoritative, so
 // two spellings of one name cannot resolve to the same upstream while matching
-// different rule sets: labels are case-insensitive, and a trailing dot only
-// marks the name as already absolute.
+// different rule sets: a non-ASCII name has exactly one ASCII encoding, labels
+// are case-insensitive, and a trailing dot only marks the name as already
+// absolute.
+//
+// The IDNA conversion runs first, on the hostname exactly as it arrived. Go's
+// case folding and IDNA's own mapping disagree on some runes (U+0130 folds to a
+// plain "i", where IDNA keeps its dot above and encodes it), so folding first
+// would yield a different name than the one the connection uses.
 //
 // Every host comparison in this package goes through here, so the pipeline gate
 // and per-rule matching can never disagree about a spelling.
 func canonicalHost(host string) string {
-	return strings.TrimSuffix(strings.ToLower(host), ".")
+	return strings.TrimSuffix(strings.ToLower(idnaASCIIHost(host)), ".")
+}
+
+// idnaASCIIHost returns the IDNA ASCII encoding of a non-ASCII hostname,
+// mirroring the conversion net/http applies before it dials. Rules have to be
+// selected for the name the connection actually reaches, or one upstream could
+// be served under two spellings carrying different rule sets.
+//
+// Two details are copied from that conversion deliberately. An ASCII hostname is
+// returned untouched rather than validated, because the transport skips
+// validation too and rejecting a name it dials happily (an underscore, say) would
+// reintroduce the same disagreement from the other side. A conversion failure
+// keeps the original hostname for the same reason: that is the name the transport
+// falls back to dialing.
+//
+// A trailing dot needs no special handling here, as the conversion carries it
+// through untouched and never fails on it. canonicalHost strips it afterwards.
+func idnaASCIIHost(host string) string {
+	if isASCII(host) {
+		return host
+	}
+	converted, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return host
+	}
+	return converted
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
 }
 
 // appliesToHost reports whether the rule should fire for the given request
