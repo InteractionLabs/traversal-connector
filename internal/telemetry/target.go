@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -60,7 +61,15 @@ func SanitizeError(err error) error {
 		return nil
 	}
 	message := err.Error()
-	for _, requestURL := range requestURLsIn(err) {
+	targets := requestURLsIn(err)
+	// Longest first, because one target can appear inside another: a redirect
+	// nests the URL it came from, and the same origin serves both. Substituting
+	// the shorter one first rewrites it where it sits inside the longer one,
+	// after which neither spelling of the longer one is left to match and its
+	// path and query survive. Consuming the longer target whole first leaves
+	// nothing for the shorter pass to reach into, whichever position it held.
+	slices.SortStableFunc(targets, func(a, b string) int { return len(b) - len(a) })
+	for _, requestURL := range targets {
 		origin := originOf(requestURL)
 		// url.Error renders its URL with %q, so a target holding a control
 		// character reaches the message escaped and never matches its own raw

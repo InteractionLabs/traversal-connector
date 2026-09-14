@@ -128,6 +128,24 @@ func TestSanitizeError(t *testing.T) {
 				`Get "https://second.internal": boom`,
 		},
 		{
+			// Two hosts, as above, cannot occur inside one another, so that case
+			// says nothing about the order the targets are substituted in. One
+			// origin serving both puts the outer target inside the inner one,
+			// where substituting the shorter first would rewrite the longer and
+			// leave its own passes with nothing to match.
+			name: "nested targets on one origin are each reduced",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://api.internal/orders/42",
+				Err: &url.Error{
+					Op:  "Get",
+					URL: "https://api.internal/orders/42/items/9?token=" + canary,
+					Err: errors.New("boom"),
+				},
+			},
+			want: `Get "https://api.internal": Get "https://api.internal": boom`,
+		},
+		{
 			name: "joined errors are each reduced",
 			err: errors.Join(
 				&url.Error{
