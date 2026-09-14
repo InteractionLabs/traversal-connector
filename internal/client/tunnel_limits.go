@@ -60,9 +60,12 @@ func tunnelReadMaxBytes(cfg *config.Config) int {
 // output can exceed the bytes that came in. Neither limit dominates the other by
 // configuration, so the ceiling follows whichever is larger.
 //
-// A replacement string longer than the text it matches can still grow a body past
-// both limits. That is a property of the configured rules, not something a ceiling
-// derived from sizes can predict.
+// Redaction can still grow a body past both limits, and it does not take an unusual
+// configuration to do it: the default replacement is ten bytes, so under the shipped
+// defaults any rule matching a shorter run expands what it rewrites, and a
+// single-character match expands it tenfold. How far it grows follows from the rules
+// in force rather than from any size, so no ceiling derived from the limits above can
+// predict it.
 func tunnelSendMaxBytes(cfg *config.Config) int {
 	// Either limit unset leaves the body that can leave unbounded, so the ceiling
 	// is too - the body checks read a non-positive limit the same way.
