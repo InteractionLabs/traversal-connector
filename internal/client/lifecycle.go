@@ -12,11 +12,15 @@ import (
 
 const (
 	backoffInitial = 1 * time.Second
-	backoffMax     = 30 * time.Second
 	// A tunnel that ran longer than this is considered healthy; its failure
 	// resets the backoff rather than advancing it.
-	backoffResetThreshold = backoffMax
+	backoffResetThreshold = 30 * time.Second
 )
+
+type tunnelBackoff struct {
+	current time.Duration
+	max     time.Duration
+}
 
 // Run manages the full lifecycle of tunnel connections to the Traversal control plane.
 // It launches exactly MaxTunnelsAllowed tunnel slots, each of which owns one
@@ -44,28 +48,30 @@ func (cm *ConnectionManager) Run(ctx context.Context) error {
 // connection attempts can never exceed MaxTunnelsAllowed — including while a
 // slot is still dialing or waiting out a backoff delay.
 func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
+	backoff := tunnelBackoff{max: cm.config.MaxBackoffDelay}
+
 	for ctx.Err() == nil {
 		start := time.Now()
 		err := cm.tunnelFunc(ctx)
 
 		if ctx.Err() != nil {
-			// Process shutdown.
-			if time.Since(start) >= backoffResetThreshold {
-				cm.resetBackoff()
-			}
 			return
 		}
 
 		switch {
 		case err == nil:
-			// The controller can cleanly close a stream to request reconnect.
-			cm.resetBackoff()
+			// The control plane can cleanly close a stream to request reconnect.
+			backoff.reset()
 
 		case isCapacityError(err):
-			// The controller is full. Hold the slot and retry on the reconnect
+			// Reaching the control plane proves connectivity has recovered, so
+			// capacity retries should not inherit earlier connection failures.
+			backoff.reset()
+
+			// The control plane is full. Hold the slot and retry on the reconnect
 			// interval rather than advancing the backoff, since this is a
 			// transient property of the fleet and not a fault of this tunnel.
-			slog.WarnContext(ctx, "controller at capacity, tunnel not opened",
+			slog.WarnContext(ctx, "control plane at capacity, tunnel not opened",
 				"active_tunnels", cm.ActiveCount(),
 				"max_tunnels", cm.config.MaxTunnelsAllowed)
 			if !sleepOrDone(ctx, cm.config.ReconnectInterval) {
@@ -78,10 +84,10 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 
 			if time.Since(start) >= backoffResetThreshold {
 				// Tunnel was healthy before it dropped — reset backoff and reconnect immediately.
-				cm.resetBackoff()
+				backoff.reset()
 			} else {
 				// Short-lived failure — back off before reconnecting.
-				delay := cm.nextBackoff()
+				delay := backoff.next()
 				slog.InfoContext(ctx, "backing off before reconnect", "delay", delay)
 				if !sleepOrDone(ctx, delay) {
 					return
@@ -93,18 +99,6 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 	}
 }
 
-// sleepOrDone waits for d, returning false if ctx was canceled first.
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 // ActiveCount returns the current number of active tunnel connections.
 func (cm *ConnectionManager) ActiveCount() int {
 	cm.mu.RLock()
@@ -113,28 +107,24 @@ func (cm *ConnectionManager) ActiveCount() int {
 }
 
 // isCapacityError returns true if the error is a ResourceExhausted gRPC error
-// from the controller, indicating the server has reached its tunnel limit.
+// from the control plane, indicating the server has reached its tunnel limit.
 func isCapacityError(err error) bool {
 	return connect.CodeOf(err) == connect.CodeResourceExhausted
 }
 
 // nextBackoff returns the current backoff duration with up to 50% added jitter,
-// then advances the base for the next failure (doubling, capped at backoffMax).
-func (cm *ConnectionManager) nextBackoff() time.Duration {
-	cm.backoffMu.Lock()
-	defer cm.backoffMu.Unlock()
-	if cm.backoff == 0 {
-		cm.backoff = backoffInitial
+// then advances the base for the next failure (doubling, capped at max).
+func (b *tunnelBackoff) next() time.Duration {
+	if b.current == 0 {
+		b.current = backoffInitial
 	}
-	jitter := rand.N(cm.backoff / 2) //nolint:gosec
-	d := min(cm.backoff+jitter, backoffMax)
-	cm.backoff = min(cm.backoff*2, backoffMax)
+	jitter := rand.N(b.current / 2) //nolint:gosec
+	d := min(b.current+jitter, b.max)
+	b.current = min(b.current*2, b.max)
 	return d
 }
 
-// resetBackoff resets the backoff to its initial state.
-func (cm *ConnectionManager) resetBackoff() {
-	cm.backoffMu.Lock()
-	defer cm.backoffMu.Unlock()
-	cm.backoff = 0
+// reset resets the backoff to its initial state.
+func (b *tunnelBackoff) reset() {
+	b.current = 0
 }

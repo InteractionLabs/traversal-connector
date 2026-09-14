@@ -55,8 +55,8 @@ type Config struct {
 	// MaxTunnelsAllowed is the maximum number of concurrent gRPC
 	// tunnels this traversal connector creates.
 	MaxTunnelsAllowed int
-	// ReconnectInterval is the interval for periodic connection rebalancing,
-	// distributing tunnels across available Traversal control plane pods.
+	// ReconnectInterval is the delay before a tunnel slot retries after the
+	// Traversal control plane rejects it because tunnel capacity is exhausted.
 	ReconnectInterval time.Duration
 	// MaxBackoffDelay is the maximum delay cap for exponential backoff on
 	// reconnection attempts.

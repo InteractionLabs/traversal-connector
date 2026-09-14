@@ -77,6 +77,7 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 			// Long interval so the slot's own retry — not a capacity wait —
 			// is what drives the reconnect.
 			ReconnectInterval: time.Hour,
+			MaxBackoffDelay:   30 * time.Second,
 		},
 		connections: make([]*StreamConnection, 0),
 		metrics:     metrics,
@@ -110,7 +111,7 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 	}
 }
 
-func TestRun_ReconnectsOnCleanControllerClose(t *testing.T) {
+func TestRun_ReconnectsOnCleanControlPlaneClose(t *testing.T) {
 	metrics, err := initConnectionMetrics()
 	if err != nil {
 		t.Fatalf("initConnectionMetrics: %v", err)
@@ -143,7 +144,7 @@ func TestRun_ReconnectsOnCleanControllerClose(t *testing.T) {
 	select {
 	case <-reconnected:
 	case <-ctx.Done():
-		t.Fatal("timed out waiting for reconnect after clean controller close")
+		t.Fatal("timed out waiting for reconnect after clean control plane close")
 	}
 }
 
@@ -237,15 +238,16 @@ func TestRun_RetriesOnReconnectIntervalAfterCapacityError(t *testing.T) {
 	}
 }
 
-func TestRun_BackoffIncreasesOnRepeatedFailures(t *testing.T) {
-	cm := &ConnectionManager{}
+func TestTunnelBackoff_IncreasesOnRepeatedFailures(t *testing.T) {
+	const maxDelay = 30 * time.Second
+	backoff := tunnelBackoff{max: maxDelay}
 
-	// Drive nextBackoff directly. Each call advances the base by 2×.
+	// Each call advances the base by 2×.
 	// Returned values include jitter so we check ranges:
-	//   call N returns: base_N + rand[0, base_N/2) — capped at backoffMax.
-	d1 := cm.nextBackoff() // base=1s → delay in [1s, 1.5s)
-	d2 := cm.nextBackoff() // base=2s → delay in [2s, 3s)
-	d3 := cm.nextBackoff() // base=4s → delay in [4s, 6s)
+	//   call N returns: base_N + rand[0, base_N/2) — capped at maxDelay.
+	d1 := backoff.next() // base=1s → delay in [1s, 1.5s)
+	d2 := backoff.next() // base=2s → delay in [2s, 3s)
+	d3 := backoff.next() // base=4s → delay in [4s, 6s)
 
 	if d1 < backoffInitial || d1 >= backoffInitial*3/2 {
 		t.Errorf("d1 out of range [%v, %v): %v", backoffInitial, backoffInitial*3/2, d1)
@@ -257,21 +259,52 @@ func TestRun_BackoffIncreasesOnRepeatedFailures(t *testing.T) {
 		t.Errorf("d3 out of range [%v, %v): %v", backoffInitial*4, backoffInitial*6, d3)
 	}
 
-	// Drive the base to the cap; all delays must be ≤ backoffMax.
+	// Drive the base to the cap; all delays must be ≤ maxDelay.
 	for range 10 {
-		d := cm.nextBackoff()
-		if d > backoffMax {
-			t.Errorf("delay %v exceeds backoffMax %v", d, backoffMax)
+		d := backoff.next()
+		if d > maxDelay {
+			t.Errorf("delay %v exceeds maxDelay %v", d, maxDelay)
 		}
 	}
 
 	// Reset and verify it starts in the initial range again.
-	cm.resetBackoff()
-	dAfterReset := cm.nextBackoff()
+	backoff.reset()
+	dAfterReset := backoff.next()
 	if dAfterReset < backoffInitial || dAfterReset >= backoffInitial*3/2 {
 		t.Errorf(
 			"after reset: delay %v not in initial range [%v, %v)",
 			dAfterReset,
+			backoffInitial,
+			backoffInitial*3/2,
+		)
+	}
+}
+
+func TestTunnelBackoff_RespectsConfiguredMax(t *testing.T) {
+	const maxDelay = 1500 * time.Millisecond
+	backoff := tunnelBackoff{max: maxDelay}
+
+	for range 10 {
+		if delay := backoff.next(); delay > maxDelay {
+			t.Fatalf("delay %v exceeds configured maximum %v", delay, maxDelay)
+		}
+	}
+}
+
+func TestTunnelBackoff_IsIndependentPerSlot(t *testing.T) {
+	const maxDelay = 30 * time.Second
+	first := tunnelBackoff{max: maxDelay}
+	second := tunnelBackoff{max: maxDelay}
+
+	for range 5 {
+		first.next()
+	}
+
+	delay := second.next()
+	if delay < backoffInitial || delay >= backoffInitial*3/2 {
+		t.Fatalf(
+			"second slot's first delay %v not in initial range [%v, %v)",
+			delay,
 			backoffInitial,
 			backoffInitial*3/2,
 		)
