@@ -1176,3 +1176,80 @@ func TestBuildResponse_NonASCIIHostScannedByEncodedRule(t *testing.T) {
 		})
 	}
 }
+
+// TestExecute_InvalidMediaParameterStillReachesPerFieldRedaction covers the
+// content-type classification that decides whether per-field rules run at all. A
+// JSON media type still names a JSON body when an optional parameter appended to
+// it is malformed, so such a response has to reach the per-field path; reading it
+// as some other type would forward the body with those rules skipped.
+func TestExecute_InvalidMediaParameterStillReachesPerFieldRedaction(t *testing.T) {
+	// Valid base media type, one malformed parameter after it.
+	const contentType = "application/json; charset"
+
+	tests := []struct {
+		name string
+		body string
+		want string // empty means the response has to be dropped
+	}{
+		{
+			name: "a parseable body is redacted per-field",
+			body: `{"email":"user@example.com"}`,
+			want: `{"email":"[REDACTED]"}`,
+		},
+		{
+			// The intended consequence of reaching that path: a body which is not
+			// one complete JSON document cannot be scanned field by field, so it is
+			// dropped instead of forwarded unscanned.
+			name: "an unparseable body is dropped",
+			body: `{"email":"user@example.com"} trailing junk`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			collect := captureMetrics(t)
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set(headerContentType, contentType)
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(tt.body))
+				}),
+			)
+			defer server.Close()
+
+			exec := newExecutor(t, responseTestConfig(), newRedactor(t, structuredEmailRule()))
+
+			resp, err := exec.Execute(
+				context.Background(), getWithAcceptEncoding(server.URL, ""),
+			)
+
+			refusals := counterValue(t, collect(), telemetry.MetricResponseRefusalsTotal,
+				attribute.String(attrRefusalReason, refusalMalformedJSON))
+
+			if tt.want != "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if diff := cmp.Diff(tt.want, string(resp.Body)); diff != "" {
+					t.Errorf("per-field rules did not reach the body (-want +got):\n%s", diff)
+				}
+				if _, ok := findHeader(resp.Headers, headerRedacted); !ok {
+					t.Error("a redacted body must carry the redaction flag")
+				}
+				if diff := cmp.Diff(int64(0), refusals); diff != "" {
+					t.Errorf("a parseable body is not a refusal (-want +got):\n%s", diff)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected a refusal, got a forwarded body of %d bytes: %s",
+					len(resp.Body), resp.Body)
+			}
+			if diff := cmp.Diff(int64(1), refusals); diff != "" {
+				t.Errorf("refusal count mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

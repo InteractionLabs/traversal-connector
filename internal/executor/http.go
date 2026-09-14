@@ -482,12 +482,20 @@ func (e *Executor) refuse(
 // isJSONContentType reports whether the given Content-Type header indicates a
 // JSON payload. Handles charset parameters (e.g. "application/json; charset=utf-8")
 // and the "+json" structured-syntax suffix (RFC 6839, e.g. "application/ld+json").
+//
+// A malformed optional parameter does not change the classification:
+// ErrInvalidMediaParameter still yields a valid base media type, and the base type
+// is what puts a body in scope for per-field rules. Reading it as unclassified
+// would let an upstream carry a JSON body out of that scope by appending one
+// broken parameter to an otherwise valid type. No other parse error is accepted,
+// because this is the only one documented to leave the media type usable; the
+// rest leave it empty.
 func isJSONContentType(header string) bool {
 	if header == "" {
 		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(header)
-	if err != nil {
+	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
 		return false
 	}
 	if mediaType == "application/json" || mediaType == "text/json" {
