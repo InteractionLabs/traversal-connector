@@ -44,10 +44,13 @@ func HostFromURL(rawURL string) string {
 // URL-bearing error into it.
 //
 // Applying the rule everywhere is not the same as a guarantee, and the limit is
-// worth knowing. Reduction reaches a URL only where the tree still holds it in a
-// *url.Error. A URL that an error type formats into a message of its own, or one
-// flattened into plain text by a %v wrap that leaves no *url.Error behind,
-// survives. Those are the two shapes to check when adding an error to this path.
+// worth knowing. Reduction reaches a URL only where a *url.Error carrying it is
+// reachable from err by unwrapping; holding one somewhere in the tree is not
+// enough. Three shapes survive: an error type that formats a URL into a message
+// of its own, a %v wrap that flattens the text and leaves no *url.Error behind,
+// and a wrapper that copies the inner message but exposes no Unwrap, which
+// leaves the *url.Error in place and out of reach. Those are the shapes to check
+// when adding an error to this path.
 //
 // Errors travelling back to the control plane are deliberately left untouched:
 // it issued the URL, so shortening its copy costs diagnosis and withholds
