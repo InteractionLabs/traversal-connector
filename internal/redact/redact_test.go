@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -380,6 +381,207 @@ func TestHasRulesForHost(t *testing.T) {
 	}
 }
 
+// TestHostMatchingFollowsDNSSpelling checks every entry point that takes a host
+// against the same cases. The gate and per-rule matching have to reach the same
+// verdict for a given spelling: if the gate said no while a rule said yes, the
+// response would skip decoding and rule evaluation altogether.
+func TestHostMatchingFollowsDNSSpelling(t *testing.T) {
+	tests := []struct {
+		name        string
+		hostPattern string
+		host        string
+		want        bool
+	}{
+		{name: "exact match", hostPattern: `example\.com`, host: "example.com", want: true},
+		{
+			name:        "requested host in upper case",
+			hostPattern: `example\.com`,
+			host:        "EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			name:        "requested host in mixed case",
+			hostPattern: `example\.com`,
+			host:        "Example.Com",
+			want:        true,
+		},
+		{
+			name:        "requested host with a trailing dot",
+			hostPattern: `example\.com`,
+			host:        "example.com.",
+			want:        true,
+		},
+		{
+			name:        "requested host in upper case with a trailing dot",
+			hostPattern: `example\.com`,
+			host:        "EXAMPLE.COM.",
+			want:        true,
+		},
+		{
+			// Rule files predate case folding, so any pattern already written
+			// with capitals has to keep working.
+			name:        "pattern written in upper case",
+			hostPattern: `EXAMPLE\.COM`,
+			host:        "example.com",
+			want:        true,
+		},
+		{
+			name:        "pattern and host both in upper case",
+			hostPattern: `EXAMPLE\.COM`,
+			host:        "EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			name:        "lower-case character class matches an upper-case host",
+			hostPattern: `[a-z]+\.example\.com`,
+			host:        "API.EXAMPLE.COM",
+			want:        true,
+		},
+		{
+			// An upper-case RE2 escape means the opposite of its lower-case form,
+			// so this case fails if case is ever folded by lowercasing the pattern
+			// text instead of by wrapping it. \D+ matches the letters of "api";
+			// \d+ would not.
+			name:        "an upper-case escape keeps its meaning",
+			hostPattern: `\D+\.example\.com`,
+			host:        "api.example.com",
+			want:        true,
+		},
+		{
+			// The hostname has any trailing dot removed before matching, so the
+			// name a pattern is compared against never ends in one. The rules
+			// reference states this, because a pattern written in absolute form
+			// matches nothing and RE2 spells a trailing dot too many ways for the
+			// pattern text to be trimmed safely.
+			name:        "a pattern in absolute form matches nothing",
+			hostPattern: `example\.com\.`,
+			host:        "example.com",
+		},
+		{
+			name:        "a pattern in absolute form matches no absolute host either",
+			hostPattern: `example\.com\.`,
+			host:        "example.com.",
+		},
+		{
+			name:        "a different host does not match",
+			hostPattern: `example\.com`,
+			host:        "notexample.com",
+		},
+		{
+			name:        "a longer host does not match through the anchors",
+			hostPattern: `example\.com`,
+			host:        "example.com.other.com",
+		},
+		{
+			// Only one trailing dot marks an absolute name; a second leaves an
+			// empty label, which is not a name this rule was scoped to.
+			name:        "a doubled trailing dot does not match",
+			hostPattern: `example\.com`,
+			host:        "example.com..",
+		},
+		{
+			// A non-ASCII name is encoded to ASCII before the connection is made,
+			// so that encoding is the spelling a rule has to be written for.
+			name:        "a non-ASCII host matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "bücher.example",
+			want:        true,
+		},
+		{
+			// The other half of the same requirement: both spellings of one name
+			// reach one upstream, so both have to select the same rules.
+			name:        "the ASCII encoding matches the same rule",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "xn--bcher-kva.example",
+			want:        true,
+		},
+		{
+			name:        "a non-ASCII host in upper case matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "BÜCHER.EXAMPLE",
+			want:        true,
+		},
+		{
+			// The encoding carries a trailing dot through untouched, so the dot is
+			// still stripped afterwards and both normalizations compose.
+			name:        "a non-ASCII host with a trailing dot matches its ASCII encoding",
+			hostPattern: `xn--bcher-kva\.example`,
+			host:        "bücher.example.",
+			want:        true,
+		},
+		{
+			// The same contract as the absolute form above: only the hostname is
+			// converted. A pattern is a regex and is left exactly as written, so one
+			// in the non-ASCII form is compared against an encoded name and matches
+			// nothing.
+			name:        "a pattern in the non-ASCII form matches nothing",
+			hostPattern: `bücher\.example`,
+			host:        "bücher.example",
+		},
+		{
+			// An ASCII hostname is never validated, matching what the transport
+			// does before it dials. An underscore is not a legal IDNA label, but the
+			// name is still reached, so a rule written for it still has to fire.
+			name:        "an ASCII host the encoding would reject is matched as it arrived",
+			hostPattern: `foo_bar\.example`,
+			host:        "foo_bar.example",
+			want:        true,
+		},
+		{
+			// Case folding cannot run before the encoding. Go folds U+0130 to a
+			// plain "i", where the encoding keeps its dot above, so folding first
+			// would select rules for a different name than the one dialed.
+			name:        "encoding runs before case folding",
+			hostPattern: `xn--i-9bb\.example`,
+			host:        "İ.example.",
+			want:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: []Rule{
+				{
+					Name:        "byte-level",
+					Type:        "regex",
+					Pattern:     "secret",
+					Replacement: "[REDACTED]",
+					Hosts:       []string{tt.hostPattern},
+				},
+				{
+					Name:        "per-field",
+					Type:        "regex-structured-data",
+					Pattern:     "secret",
+					Replacement: "[REDACTED]",
+					Hosts:       []string{tt.hostPattern},
+				},
+			}}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			if got := r.HasRulesForHost(tt.host); got != tt.want {
+				t.Errorf("HasRulesForHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+
+			_, byteChanged := r.Apply(context.Background(), tt.host, []byte("secret"))
+			if byteChanged != tt.want {
+				t.Errorf("Apply(%q) changed = %v, want %v", tt.host, byteChanged, tt.want)
+			}
+
+			_, fieldChanged, err := r.ApplyJSON(
+				context.Background(), tt.host, []byte(`{"k":"secret"}`),
+			)
+			if err != nil {
+				t.Fatalf("ApplyJSON() error: %v", err)
+			}
+			if fieldChanged != tt.want {
+				t.Errorf("ApplyJSON(%q) changed = %v, want %v", tt.host, fieldChanged, tt.want)
+			}
+		})
+	}
+}
+
 func TestApply_ReportsWhetherBodyChanged(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -481,5 +683,198 @@ func TestApplyJSON_ReSerializationIsNotAMatch(t *testing.T) {
 	}
 	if want := `{"status":"ok"}`; string(got) != want {
 		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestApplyJSON_RequiresExactlyOneDocument(t *testing.T) {
+	rules := []Rule{{
+		Name:        "email",
+		Type:        "regex-structured-data",
+		Pattern:     `\S+@\S+`,
+		Replacement: "[REDACTED]",
+	}}
+
+	tests := []struct {
+		name    string
+		src     string
+		wantErr bool
+	}{
+		{name: "one object", src: `{"msg":"user@example.com"}`},
+		{name: "one array", src: `[{"msg":"user@example.com"}]`},
+		{name: "one bare string", src: `"user@example.com"`},
+		{name: "trailing whitespace is still one document", src: "{\"msg\":\"a@b.com\"}\n\t "},
+		{name: "truncated object", src: `{"msg":`, wantErr: true},
+		{name: "not json at all", src: `nope`, wantErr: true},
+		{name: "empty body", src: ``, wantErr: true},
+		{name: "two concatenated documents", src: `{"a":1}{"b":2}`, wantErr: true},
+		{name: "two documents separated by space", src: `{"a":1} {"b":2}`, wantErr: true},
+		{name: "junk after a complete value", src: `{"a":1}garbage`, wantErr: true},
+		{
+			// A closing bracket reads as the end of an enclosing array rather
+			// than as a further value, so it is the shape most likely to slip
+			// past a looser check for whether more input follows.
+			name:    "stray closing bracket after a complete value",
+			src:     `{"a":1}]`,
+			wantErr: true,
+		},
+		{name: "stray comma after a complete value", src: `{"a":1},`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			_, _, err := r.ApplyJSON(context.Background(), "api.example.com", []byte(tt.src))
+			if tt.wantErr && err == nil {
+				t.Errorf("ApplyJSON(%q) returned no error, want one", tt.src)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("ApplyJSON(%q) error = %v, want none", tt.src, err)
+			}
+		})
+	}
+}
+
+func TestApplyJSON_FaultDescribesWhatWentWrong(t *testing.T) {
+	rules := []Rule{{Name: "email", Type: "regex-structured-data", Pattern: `\S+@\S+`}}
+
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "a genuine second document says so",
+			src:  `{"a":1} {"b":2}`,
+			want: "more than one document, the first ends at byte 7",
+		},
+		{
+			// Reporting these as a second document would send an operator looking
+			// for one that is not there.
+			name: "unparseable trailing bytes are not called a document",
+			src:  `{"a":1}XY`,
+			want: "trailing bytes that do not parse at byte 8",
+		},
+		{
+			name: "a stray bracket is also trailing bytes",
+			src:  `{"a":1}]`,
+			want: "trailing bytes that do not parse at byte 7",
+		},
+		{
+			name: "a body that is not json at all",
+			src:  `XYnope`,
+			want: "json body does not parse at byte 1",
+		},
+		{
+			name: "a truncated document is reported as truncated",
+			src:  `{"a":`,
+			want: "ends mid-document",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			_, _, err := r.ApplyJSON(context.Background(), "api.example.com", []byte(tt.src))
+			if err == nil {
+				t.Fatalf("ApplyJSON(%q) returned no error, want one", tt.src)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyJSON_FaultCarriesNoBodyContent guards the boundary the drop exists to
+// hold. A refused body is not forwarded, so no part of it may ride out on the
+// error describing the refusal either, however far that error is later carried.
+// The decoder's own messages quote the byte they stopped on, so the marker below
+// is upper case where every word the redactor emits is lower case.
+func TestApplyJSON_FaultCarriesNoBodyContent(t *testing.T) {
+	const marker = "ZZQQ"
+
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{name: "junk after a complete document", src: `{"a":1}` + marker},
+		{name: "a body that is not json at all", src: marker + `nope`},
+		{name: "junk inside a document", src: `{"a":` + marker + `}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: []Rule{
+				{Name: "email", Type: "regex-structured-data", Pattern: `\S+@\S+`},
+			}}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			_, _, err := r.ApplyJSON(context.Background(), "api.example.com", []byte(tt.src))
+			if err == nil {
+				t.Fatalf("ApplyJSON(%q) returned no error, want one", tt.src)
+			}
+			for _, char := range []string{"Z", "Q"} {
+				if strings.Contains(err.Error(), char) {
+					t.Errorf("error %q carries %q from the body", err, char)
+				}
+			}
+		})
+	}
+}
+
+// TestApplyJSON_UnparseableBodyIsNotAnErrorWithoutStructuredRules pins the
+// narrowness of the parse requirement: it exists to serve per-field rules, so a
+// host none of them cover must not start failing on bodies nothing would have
+// inspected.
+func TestApplyJSON_UnparseableBodyIsNotAnErrorWithoutStructuredRules(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []Rule
+	}{
+		{name: "no rules configured"},
+		{
+			name:  "only a byte-level rule",
+			rules: []Rule{{Name: "email", Type: "regex", Pattern: `\S+@\S+`}},
+		},
+		{
+			name: "structured rule scoped to another host",
+			rules: []Rule{{
+				Name:    "email",
+				Type:    "regex-structured-data",
+				Pattern: `\S+@\S+`,
+				Hosts:   []string{"other.test"},
+			}},
+		},
+	}
+
+	src := []byte(`{"msg":"user@example.com" trailing junk`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: tt.rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+
+			got, changed, err := r.ApplyJSON(context.Background(), "api.example.com", src)
+			if err != nil {
+				t.Fatalf("ApplyJSON() error = %v, want none", err)
+			}
+			if changed {
+				t.Error("no structured rule was in scope, so nothing can have matched")
+			}
+			if string(got) != string(src) {
+				t.Errorf("body = %q, want it returned unchanged", got)
+			}
+		})
 	}
 }

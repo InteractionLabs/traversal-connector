@@ -200,8 +200,8 @@ pattern     = '(?i)(api[_-]?key\s*[:=]\s*)\S+'
 replacement = '$1[REDACTED]'
 
 # Per-field rule for JSON response bodies. Email is only redacted when it
-# appears in `body.message` and the response body parses as JSON. On non-JSON
-# bodies (or JSON that fails to parse) the rule is skipped entirely.
+# appears in `body.message`. On non-JSON bodies the rule is skipped; a body
+# that claims to be JSON but is not one complete document is dropped.
 [[rules]]
 name   = "email"
 type   = "regex-structured-data"
@@ -230,6 +230,14 @@ Each rule requires:
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
 - `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
 
+Matching follows DNS rather than byte equality, so one upstream cannot be reached under a spelling that carries a different rule set. Patterns are matched **case-insensitively** (`api\.github\.com` and `API\.GITHUB\.COM` both match `API.github.com`), and a single trailing dot on the requested hostname is ignored, since it only marks the name as already absolute (`github.com.` matches `github\.com`).
+
+Because that dot is removed before matching, the hostname a pattern is compared against never ends in one. **Write the pattern without a trailing dot** — `github\.com`, not `github\.com\.` — since a pattern in the absolute form matches nothing. The pattern text is used exactly as written and is never rewritten, because RE2 can spell a trailing dot several ways and trimming one out would corrupt some patterns rather than fix them.
+
+Case-insensitivity uses Unicode case folding, so it applies to non-ASCII hostnames too.
+
+A non-ASCII hostname is converted to its IDNA ASCII (punycode) form before matching, because that is the form the connection itself uses. **Write the pattern in that ASCII form**, `xn--bcher-kva\.example` rather than `bücher\.example`, since a pattern in the Unicode form matches nothing. Both spellings of one name then select the same rules: a request to `bücher.example` and a request to `xn--bcher-kva.example` are the same host. As with the trailing dot, the pattern text is never converted in turn, because it is a regex and rewriting it could change what it matches. A hostname that is already ASCII is matched as it arrived and is not validated, so a name the conversion would reject, such as one carrying an underscore, still matches a pattern written for it.
+
 `regex-structured-data` rules additionally accept:
 - `redact_fields` — allowlist of pipe-delimited paths. When set, the rule only fires inside the matching subtrees.
 - `skip_fields` — blocklist of pipe-delimited paths. When set, the rule never fires inside the matching subtrees.
@@ -241,9 +249,13 @@ Field names use pipe-delimited notation for nested objects: `body|message` match
 How the two rule types are applied:
 
 - **`regex` rules** always run byte-level over the full response body, regardless of `Content-Type` or whether the body parses as JSON. They have no concept of fields, so `redact_fields` / `skip_fields` don't apply.
-- **`regex-structured-data` rules** only run when the response has a JSON `Content-Type` *and* the body parses successfully — they fire per-field, honoring `redact_fields` / `skip_fields`. If the body isn't JSON or fails to parse, these rules are **skipped entirely** (their field filters can't be honored on raw bytes, so applying them globally would cross the boundaries the filters were configured to enforce).
+- **`regex-structured-data` rules** fire per-field, honoring `redact_fields` / `skip_fields`, and require a JSON `Content-Type`. On any other content type they are **skipped entirely** (their field filters can't be honored on raw bytes, so applying them globally would cross the boundaries the filters were configured to enforce).
 
-If you need a pattern to redact everywhere unconditionally, use `regex`. If you need per-field control, use `regex-structured-data` and ensure the upstream returns valid JSON with the right `Content-Type`.
+When a per-field rule is in scope *and* the response declares a JSON `Content-Type`, the body has to be exactly one complete JSON document, since that is the only way the configured fields can be located. A body that does not parse, or that carries anything beyond its first complete value, is **dropped**: the requester receives an error and `connector.response_refusals_total` records the reason `malformed_json`. Trailing content counts because parsing stops at the end of the first document, so forwarding such a body would silently shorten it to that first value.
+
+A host no per-field rule covers is unaffected. With only `regex` rules in scope nothing needs parsing, so an unparseable body is still forwarded with byte-level redaction applied.
+
+If you need a pattern to redact everywhere unconditionally, use `regex`. If you need per-field control, use `regex-structured-data` and ensure the upstream answers with one complete JSON document under a JSON `Content-Type`.
 
 Rules are applied in order; each rule operates on the output of the previous one.
 

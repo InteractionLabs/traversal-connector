@@ -5,16 +5,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/net/idna"
 )
 
 // ruleType enumerates the supported redaction rule kinds.
@@ -58,7 +63,15 @@ type Rule struct {
 	// matches at least one pattern. When empty, it defaults to [".*"], which
 	// matches every host. Each pattern is anchored to the whole hostname, so
 	// ".*github.com" matches "api.github.com" and "github.com" but not
-	// "github.com.evil.com".
+	// "github.com.evil.com". Matching follows DNS rather than byte equality:
+	// patterns are case-insensitive and the hostname is compared without a
+	// trailing dot. A pattern must therefore not carry a trailing dot of its
+	// own, since the name it is matched against never ends in one.
+	//
+	// A non-ASCII hostname is matched in the IDNA ASCII form the connection uses,
+	// so a pattern covering one must be written in that form
+	// (xn--bcher-kva\.example, not bücher\.example). Patterns are regexes and
+	// are never converted in turn.
 	Hosts []string `toml:"hosts"`
 }
 
@@ -95,8 +108,60 @@ type compiledRule struct {
 	hostMatchers []*regexp.Regexp
 }
 
+// canonicalHost reduces a hostname to the form DNS considers authoritative, so
+// two spellings of one name cannot resolve to the same upstream while matching
+// different rule sets: a non-ASCII name has exactly one ASCII encoding, labels
+// are case-insensitive, and a trailing dot only marks the name as already
+// absolute.
+//
+// The IDNA conversion runs first, on the hostname exactly as it arrived. Go's
+// case folding and IDNA's own mapping disagree on some runes (U+0130 folds to a
+// plain "i", where IDNA keeps its dot above and encodes it), so folding first
+// would yield a different name than the one the connection uses.
+//
+// Every host comparison in this package goes through here, so the pipeline gate
+// and per-rule matching can never disagree about a spelling.
+func canonicalHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(idnaASCIIHost(host)), ".")
+}
+
+// idnaASCIIHost returns the IDNA ASCII encoding of a non-ASCII hostname,
+// mirroring the conversion net/http applies before it dials. Rules have to be
+// selected for the name the connection actually reaches, or one upstream could
+// be served under two spellings carrying different rule sets.
+//
+// Two details are copied from that conversion deliberately. An ASCII hostname is
+// returned untouched rather than validated, because the transport skips
+// validation too and rejecting a name it dials happily (an underscore, say) would
+// reintroduce the same disagreement from the other side. A conversion failure
+// keeps the original hostname for the same reason: that is the name the transport
+// falls back to dialing.
+//
+// A trailing dot needs no special handling here, as the conversion carries it
+// through untouched and never fails on it. canonicalHost strips it afterwards.
+func idnaASCIIHost(host string) string {
+	if isASCII(host) {
+		return host
+	}
+	converted, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return host
+	}
+	return converted
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
+}
+
 // appliesToHost reports whether the rule should fire for the given request
-// hostname. A rule with no host filter (nil hostMatchers) always applies.
+// hostname, which callers pass in canonicalHost form. A rule with no host filter
+// (nil hostMatchers) always applies.
 func (cr *compiledRule) appliesToHost(host string) bool {
 	if cr.hostMatchers == nil {
 		return true
@@ -114,9 +179,10 @@ func (cr *compiledRule) appliesToHost(host string) bool {
 // whole redaction pipeline, including response decoding, on hosts no rule
 // targets.
 func (r *Redactor) HasRulesForHost(host string) bool {
+	canonical := canonicalHost(host)
 	rules := *r.rules.Load()
 	for i := range rules {
-		if rules[i].appliesToHost(host) {
+		if rules[i].appliesToHost(canonical) {
 			return true
 		}
 	}
@@ -242,10 +308,20 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 			// Matches everything; equivalent to no filter at all.
 			return nil, nil
 		}
-		// Anchor to the whole hostname. The non-capturing group keeps any
-		// top-level alternation in p from binding only the first/last branch
-		// to the anchors.
-		m, err := regexp.Compile("^(?:" + p + ")$")
+		// Anchor to the whole hostname. The group keeps any top-level
+		// alternation in p from binding only the first/last branch to the
+		// anchors, and folds case so a pattern spelled with capitals still
+		// matches the canonicalized (lowercased) hostname. Case has to be
+		// folded here rather than by lowercasing p, which would rewrite RE2
+		// escapes into their opposites (\D into \d) and silently invert the
+		// pattern's meaning.
+		//
+		// p is otherwise used exactly as written. The hostname side has already
+		// lost any trailing dot, but the matching dot cannot be trimmed from p in
+		// turn: RE2 spells a trailing dot several ways (\., [.], or inside a
+		// group), and trimming the text turns some of them into invalid patterns.
+		// The documented contract is that a pattern carries no trailing dot.
+		m, err := regexp.Compile("^(?i:" + p + ")$")
 		if err != nil {
 			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
 		}
@@ -285,10 +361,11 @@ func (r *Redactor) Apply(ctx context.Context, host string, src []byte) ([]byte, 
 	if len(rules) == 0 {
 		return src, false
 	}
+	canonical := canonicalHost(host)
 	result := src
 	changed := false
 	for i := range rules {
-		if rules[i].structured || !rules[i].appliesToHost(host) {
+		if rules[i].structured || !rules[i].appliesToHost(canonical) {
 			continue
 		}
 		var ruleChanged bool
@@ -316,20 +393,23 @@ func (r *Redactor) Apply(ctx context.Context, host string, src []byte) ([]byte, 
 // and nothing redacted. Callers needing to know that the representation moved
 // have to compare the bytes themselves.
 //
-// If there are no structured rules in scope for host, src is returned
-// unchanged. If src is not valid JSON, an error is returned and the caller
-// should fall back to Apply.
+// If there are no structured rules in scope for host, src is returned unchanged
+// and is never parsed. Otherwise src must be exactly one complete JSON document;
+// anything else returns an error. Callers drop such a response rather than
+// falling back to Apply, since a byte-level pass cannot honor the field filters
+// that made the rule structured in the first place.
 func (r *Redactor) ApplyJSON(
 	ctx context.Context,
 	host string,
 	src []byte,
 ) ([]byte, bool, error) {
 	rules := *r.rules.Load()
+	canonical := canonicalHost(host)
 	// Pre-filter to the structured rules in scope for this host so the host
 	// regexes run once per request rather than once per JSON node.
 	active := make([]compiledRule, 0, len(rules))
 	for i := range rules {
-		if rules[i].structured && rules[i].appliesToHost(host) {
+		if rules[i].structured && rules[i].appliesToHost(canonical) {
 			active = append(active, rules[i])
 		}
 	}
@@ -341,7 +421,26 @@ func (r *Redactor) ApplyJSON(
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		return nil, false, fmt.Errorf("redact: parse json: %w", err)
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, false, errors.New("redact: json body ends mid-document")
+		}
+		return nil, false, jsonFaultAt("json body does not parse", err)
+	}
+	// Read before the check below moves the decoder, so it marks where the one
+	// document a caller may send actually ended.
+	firstDocEnd := dec.InputOffset()
+	// A decode stops at the end of the first value, so without this check a body
+	// holding several documents (or one document plus junk) would be scanned only
+	// as far as the first and re-encoded to just that, quietly discarding the rest.
+	// Reading to EOF turns that into an error the caller can act on.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, false, fmt.Errorf(
+				"redact: json body has more than one document, the first ends at byte %d",
+				firstDocEnd,
+			)
+		}
+		return nil, false, jsonFaultAt("json body has trailing bytes that do not parse", err)
 	}
 
 	matched := false
@@ -356,6 +455,21 @@ func (r *Redactor) ApplyJSON(
 	// json.Encoder.Encode appends a trailing newline; strip it to keep the
 	// output byte-for-byte comparable to a normal Marshal.
 	return bytes.TrimRight(buf.Bytes(), "\n"), matched, nil
+}
+
+// jsonFaultAt reports why a body is not one JSON document, with the byte the
+// decoder stopped on where it knows one.
+//
+// The decoder's own message quotes the input it stopped on, which is a byte of a
+// body the caller is about to refuse to forward. That message would travel to
+// wherever refusals are recorded, so the text here is rebuilt from the offset
+// alone and the underlying error is never interpolated or wrapped.
+func jsonFaultAt(what string, err error) error {
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		return fmt.Errorf("redact: %s at byte %d", what, syntax.Offset)
+	}
+	return fmt.Errorf("redact: %s", what)
 }
 
 // redactValue runs every structured rule over v independently. Each rule's
