@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -287,9 +288,23 @@ func TestExecute_UnparseableJSONBodyKeepsRequestPathOutOfTelemetry(t *testing.T)
 
 	// Absence proves nothing about a branch that never ran, so confirm the parse
 	// failure was reported before reading anything into the assertions below.
-	if !strings.Contains(logs.text(), "structured rules skipped") {
-		t.Fatalf("per-field parse failure went unreported, so this test is vacuous:\n%s",
-			logs.text())
+	//
+	// Either report will do. Warning and applying the byte-level rules alone, and
+	// dropping the response outright, are both honest answers to a body that
+	// cannot be parsed, and which one the connector gives is decided elsewhere.
+	// Accepting only one would pin this test to the mechanism in place when it was
+	// written rather than to the invariant it exists for.
+	reports := []string{
+		"structured rules skipped", // warned, remaining rules applied
+		"reason=malformed_json",    // refused, response dropped
+	}
+	logText := logs.text()
+	reported := slices.ContainsFunc(reports, func(report string) bool {
+		return strings.Contains(logText, report)
+	})
+	if !reported {
+		t.Fatalf("per-field parse failure went unreported as any of %q, "+
+			"so this test is vacuous:\n%s", reports, logText)
 	}
 
 	assertNoCanary(t, "span", spanText(spans.Ended()))
