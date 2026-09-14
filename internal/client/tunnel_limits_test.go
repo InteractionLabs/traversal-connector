@@ -349,9 +349,13 @@ func TestTunnelSend_RejectsOversizedMessage(t *testing.T) {
 // compressed body is decoded to be scanned and re-encoded from that plaintext. With
 // the header block on top, a ceiling derived from the wire limit would drop it.
 func TestTunnelSend_AcceptsMaximumDecodedBodyWithMaximumHeaderBlock(t *testing.T) {
-	// The gap between the two limits has to exceed the overhead allowance, or the
-	// allowance alone would carry this message and the test would pass even with the
-	// ceiling derived from the wrong limit.
+	// The gap between the two limits has to exceed tunnelMessageFieldsBytes, not the
+	// whole overhead allowance: the message below carries a full maxHeaderBlockBytes
+	// of headers, which spends that much of the allowance and leaves only the
+	// remainder to absorb the gap. Under a smaller gap the ceiling derived from the
+	// wire limit would carry this message too, and the test would stop telling the two
+	// derivations apart. The guard below asserts that outcome directly rather than
+	// resting on this arithmetic.
 	const decodedMB = 8
 	cfg := &config.Config{MaxResponseBodySizeMB: 1, MaxDecodedResponseBodySizeMB: decodedMB}
 	decodedLimit := decodedMB * bytesPerMB
@@ -366,7 +370,7 @@ func TestTunnelSend_AcceptsMaximumDecodedBodyWithMaximumHeaderBlock(t *testing.T
 			},
 		},
 	}
-	requireExceedsBodyLimit(t, proto.Size(msg), int(cfg.MaxResponseBodySizeMB)*bytesPerMB)
+	requireExceedsWireLimitCeiling(t, proto.Size(msg), cfg)
 
 	handler := &recordingTunnel{received: make(chan *pb.ConnectorMessage, 4)}
 	server := connectTunnelServer(t, handler)
@@ -408,6 +412,20 @@ func requireExceedsBodyLimit(t *testing.T, messageSize, bodyLimit int) {
 	if messageSize <= bodyLimit {
 		t.Fatalf("message is %d bytes, not larger than the %d byte body limit: "+
 			"the test no longer exercises the boundary", messageSize, bodyLimit)
+	}
+}
+
+// requireExceedsWireLimitCeiling fails when messageSize would fit under the ceiling
+// the response wire limit alone would produce. A message that fits there is delivered
+// whichever limit the ceiling is derived from, so it cannot show which derivation is
+// in force - the only thing an outbound boundary test is there to establish.
+func requireExceedsWireLimitCeiling(t *testing.T, messageSize int, cfg *config.Config) {
+	t.Helper()
+	wireLimitCeiling := tunnelMessageCeiling(cfg.MaxResponseBodySizeMB)
+	if messageSize <= wireLimitCeiling {
+		t.Fatalf("message is %d bytes, inside the %d byte ceiling the wire limit alone "+
+			"would give: the test no longer tells the two derivations apart",
+			messageSize, wireLimitCeiling)
 	}
 }
 
