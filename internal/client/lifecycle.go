@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +23,17 @@ type tunnelBackoff struct {
 	current time.Duration
 	max     time.Duration
 }
+
+type tunnelExitReason string
+
+const (
+	tunnelExitCleanClose        tunnelExitReason = "clean_close"
+	tunnelExitCapacityExhausted tunnelExitReason = "capacity_exhausted"
+	tunnelExitResourceExhausted tunnelExitReason = "resource_exhausted"
+	tunnelExitConnectionError   tunnelExitReason = "connection_error"
+
+	tunnelCapacityErrorPrefix = "tunnel capacity exceeded"
+)
 
 // Run manages the full lifecycle of tunnel connections to the Traversal control plane.
 // It launches exactly MaxTunnelsAllowed tunnel slots, each of which owns one
@@ -58,12 +71,25 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 			return
 		}
 
-		switch {
-		case err == nil:
-			// The control plane can cleanly close a stream to request reconnect.
-			backoff.reset()
+		reason := classifyTunnelExit(err)
+		switch reason {
+		case tunnelExitCleanClose:
+			if time.Since(start) >= backoffResetThreshold {
+				// A long-lived tunnel was healthy before the control plane
+				// requested a reconnect, so reconnect immediately.
+				backoff.reset()
+			} else {
+				// Repeated short-lived clean closes must not create a hot loop.
+				delay := backoff.next()
+				slog.InfoContext(ctx, "short-lived tunnel closed cleanly; backing off",
+					"reason", reason,
+					"delay", delay)
+				if !sleepOrDone(ctx, delay) {
+					return
+				}
+			}
 
-		case isCapacityError(err):
+		case tunnelExitCapacityExhausted:
 			// Reaching the control plane proves connectivity has recovered, so
 			// capacity retries should not inherit earlier connection failures.
 			backoff.reset()
@@ -72,6 +98,8 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 			// interval rather than advancing the backoff, since this is a
 			// transient property of the fleet and not a fault of this tunnel.
 			slog.WarnContext(ctx, "control plane at capacity, tunnel not opened",
+				"reason", reason,
+				"connect_code", connect.CodeOf(err),
 				"active_tunnels", cm.ActiveCount(),
 				"max_tunnels", cm.config.MaxTunnelsAllowed)
 			if !sleepOrDone(ctx, cm.config.ReconnectInterval) {
@@ -79,8 +107,10 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 			}
 
 		default:
-			// Unexpected drop.
-			slog.ErrorContext(ctx, "tunnel exited with error", "error", err)
+			slog.ErrorContext(ctx, "tunnel exited with error",
+				"reason", reason,
+				"connect_code", connect.CodeOf(err),
+				"error", err)
 
 			if time.Since(start) >= backoffResetThreshold {
 				// Tunnel was healthy before it dropped — reset backoff and reconnect immediately.
@@ -95,7 +125,7 @@ func (cm *ConnectionManager) runTunnelSlot(ctx context.Context) {
 			}
 		}
 
-		cm.metrics.reconnectsTotal.Add(ctx, 1)
+		cm.metrics.recordReconnect(ctx, reason, err)
 	}
 }
 
@@ -106,21 +136,43 @@ func (cm *ConnectionManager) ActiveCount() int {
 	return len(cm.connections)
 }
 
-// isCapacityError returns true if the error is a ResourceExhausted gRPC error
-// from the control plane, indicating the server has reached its tunnel limit.
-func isCapacityError(err error) bool {
-	return connect.CodeOf(err) == connect.CodeResourceExhausted
+// classifyTunnelExit separates control-plane capacity rejections from other
+// ResourceExhausted errors, including ConnectRPC's local message-size limits.
+func classifyTunnelExit(err error) tunnelExitReason {
+	if err == nil {
+		return tunnelExitCleanClose
+	}
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		return tunnelExitConnectionError
+	}
+
+	var connectErr *connect.Error
+	if errors.As(err, &connectErr) &&
+		strings.HasPrefix(connectErr.Message(), tunnelCapacityErrorPrefix) {
+		return tunnelExitCapacityExhausted
+	}
+	return tunnelExitResourceExhausted
 }
 
 // nextBackoff returns the current backoff duration with up to 50% added jitter,
 // then advances the base for the next failure (doubling, capped at max).
 func (b *tunnelBackoff) next() time.Duration {
-	if b.current == 0 {
-		b.current = backoffInitial
+	maxDelay := b.max
+	if maxDelay < backoffInitial {
+		// Config.Load rejects this, but keep the lifecycle safe for tests and
+		// package-local callers that construct Config directly.
+		maxDelay = backoffInitial
 	}
-	jitter := rand.N(b.current / 2) //nolint:gosec
-	d := min(b.current+jitter, b.max)
-	b.current = min(b.current*2, b.max)
+	if b.current <= 0 {
+		b.current = min(backoffInitial, maxDelay)
+	}
+
+	var jitter time.Duration
+	if jitterLimit := b.current / 2; jitterLimit > 0 {
+		jitter = rand.N(jitterLimit) //nolint:gosec
+	}
+	d := min(b.current+jitter, maxDelay)
+	b.current = min(b.current*2, maxDelay)
 	return d
 }
 

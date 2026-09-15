@@ -345,6 +345,10 @@ func TestNewClient_RejectsOversizedTunnelMessage(t *testing.T) {
 		t.Fatalf("Receive() error code = %v, want %v: %v",
 			code, connect.CodeResourceExhausted, err)
 	}
+	if reason := classifyTunnelExit(err); reason != tunnelExitResourceExhausted {
+		t.Fatalf("Receive() exit reason = %q, want %q: %v",
+			reason, tunnelExitResourceExhausted, err)
+	}
 }
 
 func TestNewClient_AllowsTunnelMessageAtConfiguredBodyLimit(t *testing.T) {
@@ -388,6 +392,10 @@ func TestNewClient_RejectsOversizedOutboundTunnelMessage(t *testing.T) {
 	if code := connect.CodeOf(err); code != connect.CodeResourceExhausted {
 		t.Fatalf("Send() error code = %v, want %v: %v",
 			code, connect.CodeResourceExhausted, err)
+	}
+	if reason := classifyTunnelExit(err); reason != tunnelExitResourceExhausted {
+		t.Fatalf("Send() exit reason = %q, want %q: %v",
+			reason, tunnelExitResourceExhausted, err)
 	}
 }
 

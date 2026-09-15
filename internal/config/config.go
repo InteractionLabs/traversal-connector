@@ -35,6 +35,7 @@ const (
 	// Default timeout and interval durations.
 	defaultReconnectInterval       = 5 * time.Second
 	defaultMaxBackoffDelay         = 60 * time.Second
+	minimumMaxBackoffDelay         = 1 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
 )
@@ -248,6 +249,19 @@ func Load() (Config, error) {
 
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.ReconnectInterval <= 0 {
+		return Config{}, fmt.Errorf(
+			"RECONNECT_INTERVAL must be greater than zero, got %s",
+			cfg.ReconnectInterval,
+		)
+	}
+	if cfg.MaxBackoffDelay < minimumMaxBackoffDelay {
+		return Config{}, fmt.Errorf(
+			"MAX_BACKOFF_DELAY must be at least %s, got %s",
+			minimumMaxBackoffDelay,
+			cfg.MaxBackoffDelay,
+		)
 	}
 	if err := applyTelemetryPolicy(&cfg); err != nil {
 		return Config{}, err

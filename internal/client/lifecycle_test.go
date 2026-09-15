@@ -9,34 +9,50 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
-func TestIsCapacityError_ResourceExhausted(t *testing.T) {
+func TestClassifyTunnelExit_CapacityExhausted(t *testing.T) {
 	err := connect.NewError(
 		connect.CodeResourceExhausted,
 		errors.New("tunnel capacity exceeded: 10/10"),
 	)
 
-	if !isCapacityError(err) {
-		t.Error("expected isCapacityError to return true for ResourceExhausted")
+	if got := classifyTunnelExit(err); got != tunnelExitCapacityExhausted {
+		t.Errorf("classifyTunnelExit() = %q, want %q", got, tunnelExitCapacityExhausted)
 	}
 }
 
-func TestIsCapacityError_WrappedResourceExhausted(t *testing.T) {
+func TestClassifyTunnelExit_WrappedCapacityExhausted(t *testing.T) {
 	inner := connect.NewError(
 		connect.CodeResourceExhausted,
 		errors.New("tunnel capacity exceeded"),
 	)
 	wrapped := fmt.Errorf("failed to establish tunnel connection: %w", inner)
 
-	if !isCapacityError(wrapped) {
-		t.Error("expected isCapacityError to return true for wrapped ResourceExhausted")
+	if got := classifyTunnelExit(wrapped); got != tunnelExitCapacityExhausted {
+		t.Errorf("classifyTunnelExit() = %q, want %q", got, tunnelExitCapacityExhausted)
 	}
 }
 
-func TestIsCapacityError_OtherConnectCode(t *testing.T) {
+func TestClassifyTunnelExit_MessageSizeResourceExhausted(t *testing.T) {
+	err := connect.NewError(
+		connect.CodeResourceExhausted,
+		errors.New("message size exceeds configured read maximum"),
+	)
+
+	if got := classifyTunnelExit(err); got != tunnelExitResourceExhausted {
+		t.Errorf("classifyTunnelExit() = %q, want %q", got, tunnelExitResourceExhausted)
+	}
+}
+
+func TestClassifyTunnelExit_OtherConnectCode(t *testing.T) {
 	codes := []connect.Code{
 		connect.CodeInternal,
 		connect.CodeUnavailable,
@@ -46,22 +62,23 @@ func TestIsCapacityError_OtherConnectCode(t *testing.T) {
 
 	for _, code := range codes {
 		err := connect.NewError(code, errors.New("some error"))
-		if isCapacityError(err) {
-			t.Errorf("expected isCapacityError to return false for code %v", code)
+		if got := classifyTunnelExit(err); got != tunnelExitConnectionError {
+			t.Errorf("classifyTunnelExit(%v) = %q, want %q",
+				code, got, tunnelExitConnectionError)
 		}
 	}
 }
 
-func TestIsCapacityError_NonConnectError(t *testing.T) {
+func TestClassifyTunnelExit_NonConnectError(t *testing.T) {
 	err := errors.New("plain network error")
-	if isCapacityError(err) {
-		t.Error("expected isCapacityError to return false for plain error")
+	if got := classifyTunnelExit(err); got != tunnelExitConnectionError {
+		t.Errorf("classifyTunnelExit() = %q, want %q", got, tunnelExitConnectionError)
 	}
 }
 
-func TestIsCapacityError_NilError(t *testing.T) {
-	if isCapacityError(nil) {
-		t.Error("expected isCapacityError to return false for nil error")
+func TestClassifyTunnelExit_CleanClose(t *testing.T) {
+	if got := classifyTunnelExit(nil); got != tunnelExitCleanClose {
+		t.Errorf("classifyTunnelExit(nil) = %q, want %q", got, tunnelExitCleanClose)
 	}
 }
 
@@ -111,7 +128,7 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 	}
 }
 
-func TestRun_ReconnectsOnCleanControlPlaneClose(t *testing.T) {
+func TestRun_BacksOffAfterShortCleanCloseThenReconnects(t *testing.T) {
 	metrics, err := initConnectionMetrics()
 	if err != nil {
 		t.Fatalf("initConnectionMetrics: %v", err)
@@ -121,15 +138,18 @@ func TestRun_ReconnectsOnCleanControlPlaneClose(t *testing.T) {
 		config: &config.Config{
 			MaxTunnelsAllowed: 1,
 			ReconnectInterval: time.Hour,
+			MaxBackoffDelay:   50 * time.Millisecond,
 		},
 		connections: make([]*StreamConnection, 0),
 		metrics:     metrics,
 	}
 
+	firstClose := make(chan struct{})
 	reconnected := make(chan struct{})
 	var callCount atomic.Int32
 	cm.tunnelFunc = func(ctx context.Context) error {
 		if callCount.Add(1) == 1 {
+			close(firstClose)
 			return nil
 		}
 		close(reconnected)
@@ -142,10 +162,73 @@ func TestRun_ReconnectsOnCleanControlPlaneClose(t *testing.T) {
 	go func() { _ = cm.Run(ctx) }()
 
 	select {
+	case <-firstClose:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for initial clean close")
+	}
+
+	select {
+	case <-reconnected:
+		t.Fatal("reconnected immediately after a short-lived clean close")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	select {
 	case <-reconnected:
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for reconnect after clean control plane close")
 	}
+}
+
+func TestRecordReconnect_IncludesReasonAndConnectCode(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatalf("initConnectionMetrics: %v", err)
+	}
+	metrics.recordReconnect(
+		context.Background(),
+		tunnelExitResourceExhausted,
+		connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("message size exceeds configured read maximum"),
+		),
+	)
+
+	var collected metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &collected); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+
+	for _, scope := range collected.ScopeMetrics {
+		for _, recorded := range scope.Metrics {
+			if recorded.Name != telemetry.MetricReconnectsTotal {
+				continue
+			}
+			sum, ok := recorded.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data = %T, want Sum[int64]", recorded.Data)
+			}
+			for _, point := range sum.DataPoints {
+				reason, hasReason := point.Attributes.Value(attribute.Key(attrReconnectReason))
+				code, hasCode := point.Attributes.Value(attribute.Key(attrConnectCode))
+				if hasReason && reason.AsString() == string(tunnelExitResourceExhausted) &&
+					hasCode && code.AsString() == connect.CodeResourceExhausted.String() &&
+					point.Value == 1 {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("reconnect metric missing expected reason and Connect code")
 }
 
 func TestRun_DoesNotExceedDesiredWorkersWhileConnecting(t *testing.T) {
@@ -287,6 +370,17 @@ func TestTunnelBackoff_RespectsConfiguredMax(t *testing.T) {
 	for range 10 {
 		if delay := backoff.next(); delay > maxDelay {
 			t.Fatalf("delay %v exceeds configured maximum %v", delay, maxDelay)
+		}
+	}
+}
+
+func TestTunnelBackoff_MaxBelowInitialFallsBackSafely(t *testing.T) {
+	for _, maxDelay := range []time.Duration{0, -time.Second, time.Nanosecond} {
+		backoff := tunnelBackoff{max: maxDelay}
+		for range 3 {
+			if delay := backoff.next(); delay < backoffInitial {
+				t.Fatalf("max %v produced unsafe delay %v", maxDelay, delay)
+			}
 		}
 	}
 }
