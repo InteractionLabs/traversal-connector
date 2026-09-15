@@ -35,6 +35,7 @@ const (
 	// Default timeout and interval durations.
 	defaultReconnectInterval       = 5 * time.Second
 	defaultMaxBackoffDelay         = 60 * time.Second
+	minimumMaxBackoffDelay         = 1 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
 )
@@ -55,8 +56,8 @@ type Config struct {
 	// MaxTunnelsAllowed is the maximum number of concurrent gRPC
 	// tunnels this traversal connector creates.
 	MaxTunnelsAllowed int
-	// ReconnectInterval is the interval for periodic connection rebalancing,
-	// distributing tunnels across available Traversal control plane pods.
+	// ReconnectInterval is the delay before a tunnel slot retries after the
+	// Traversal control plane rejects it because tunnel capacity is exhausted.
 	ReconnectInterval time.Duration
 	// MaxBackoffDelay is the maximum delay cap for exponential backoff on
 	// reconnection attempts.
@@ -248,6 +249,19 @@ func Load() (Config, error) {
 
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.ReconnectInterval <= 0 {
+		return Config{}, fmt.Errorf(
+			"RECONNECT_INTERVAL must be greater than zero, got %s",
+			cfg.ReconnectInterval,
+		)
+	}
+	if cfg.MaxBackoffDelay < minimumMaxBackoffDelay {
+		return Config{}, fmt.Errorf(
+			"MAX_BACKOFF_DELAY must be at least %s, got %s",
+			minimumMaxBackoffDelay,
+			cfg.MaxBackoffDelay,
+		)
 	}
 	if err := applyTelemetryPolicy(&cfg); err != nil {
 		return Config{}, err

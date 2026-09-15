@@ -1,13 +1,21 @@
 package client
 
 import (
+	"context"
 	"fmt"
 
+	"connectrpc.com/connect"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
+)
+
+const (
+	attrReconnectReason = "reconnect_reason"
+	attrConnectCode     = "connect_code"
 )
 
 // connectionMetrics holds all OTel metrics for the connection manager.
@@ -25,7 +33,7 @@ func initConnectionMetrics() (*connectionMetrics, error) {
 	streamsActive, err := meter.Int64UpDownCounter(
 		telemetry.MetricStreamsActive,
 		metric.WithDescription(
-			"Current number of active gRPC streams to the controller",
+			"Current number of active gRPC streams to the control plane",
 		),
 	)
 	if err != nil {
@@ -77,4 +85,18 @@ func initConnectionMetrics() (*connectionMetrics, error) {
 		concurrentRequests:      concurrentRequests,
 		responseSendWaitLatency: responseSendWaitLatency,
 	}, nil
+}
+
+func (m *connectionMetrics) recordReconnect(
+	ctx context.Context,
+	reason tunnelExitReason,
+	err error,
+) {
+	attrs := []attribute.KeyValue{
+		attribute.String(attrReconnectReason, string(reason)),
+	}
+	if err != nil {
+		attrs = append(attrs, attribute.String(attrConnectCode, connect.CodeOf(err).String()))
+	}
+	m.reconnectsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
