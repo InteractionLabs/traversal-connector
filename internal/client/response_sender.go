@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // sendItem wraps a ConnectorMessage with the time it was enqueued so we can
@@ -67,7 +68,7 @@ func (ss *responseSender) run(ctx context.Context) {
 			if err := ss.sender.Send(item.msg); err != nil {
 				slog.ErrorContext(ctx, "response sender: stream send failed",
 					"request_id", item.msg.RequestId,
-					"error", err)
+					"error", telemetry.SanitizeError(err))
 			}
 		case <-ctx.Done():
 			return

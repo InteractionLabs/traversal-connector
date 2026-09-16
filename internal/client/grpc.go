@@ -38,6 +38,11 @@ const (
 	// every call to the control plane, letting it attribute connections to a
 	// specific connector instance.
 	connectorIDHeader = "X-Traversal-Connector-ID"
+	// tunnelMessageOverheadBytes leaves room above the configured HTTP body
+	// limit for the containing protobuf message's request ID, URL, headers,
+	// field tags, and length prefixes.
+	tunnelMessageOverheadBytes = 2 * 1024 * 1024
+	bytesPerMB                 = 1024 * 1024
 )
 
 // NewClient creates a ConnectRPC client for the Traversal control plane.
@@ -56,6 +61,11 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 
 	opts := []connect.ClientOption{
 		connect.WithGRPC(),
+		connect.WithReadMaxBytes(tunnelMessageMaxBytes(cfg.MaxRequestBodySizeMB)),
+		connect.WithSendMaxBytes(tunnelMessageMaxBytes(max(
+			cfg.MaxResponseBodySizeMB,
+			cfg.MaxDecodedResponseBodySizeMB,
+		))),
 		connect.WithInterceptors(
 			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
 		),
@@ -66,6 +76,20 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 		cfg.TraversalControllerURL,
 		opts...,
 	), nil
+}
+
+// tunnelMessageMaxBytes converts a configured HTTP body limit to a limit for
+// the complete protobuf tunnel message. Non-positive body limits retain their
+// existing unlimited behavior; ConnectRPC represents that with zero.
+func tunnelMessageMaxBytes(bodySizeMB int64) int {
+	if bodySizeMB <= 0 {
+		return 0
+	}
+
+	if bodySizeMB > int64((math.MaxInt-tunnelMessageOverheadBytes)/bytesPerMB) {
+		return math.MaxInt
+	}
+	return int(bodySizeMB)*bytesPerMB + tunnelMessageOverheadBytes
 }
 
 // headerInterceptor is a ConnectRPC interceptor that stamps a fixed header
@@ -332,7 +356,7 @@ func (cm *ConnectionManager) receiveLoop(
 					slog.ErrorContext(ctx, "concurrent http request failed",
 						"tunnel_id", conn.ID,
 						"request_id", m.RequestId,
-						"error", err)
+						"error", telemetry.SanitizeError(err))
 				}
 			}(msg)
 			continue
@@ -373,11 +397,12 @@ func (cm *ConnectionManager) handleMessage(
 		})
 
 	case *pb.ControllerMessage_HttpRequest:
+		targetHost := telemetry.HostFromURL(m.HttpRequest.Url)
 		reqCtx, span := cm.tracer.Start(ctx, telemetry.SpanConnectorHandleHTTP,
 			trace.WithAttributes(
 				attribute.String(connector.AttrRequestID, msg.RequestId),
 				attribute.String(connector.AttrMethod, m.HttpRequest.Method),
-				attribute.String(telemetry.AttrURL, m.HttpRequest.Url),
+				attribute.String(connector.AttrTargetHost, targetHost),
 			),
 		)
 		defer span.End()
@@ -385,13 +410,14 @@ func (cm *ConnectionManager) handleMessage(
 		slog.DebugContext(reqCtx, "received http request",
 			"request_id", msg.RequestId,
 			"method", m.HttpRequest.Method,
-			"url", m.HttpRequest.Url)
+			"target_host", targetHost)
 
 		if err := protovalidate.Validate(m.HttpRequest); err != nil {
-			span.RecordError(err)
+			safeErr := telemetry.RecordError(span, err)
 			slog.WarnContext(reqCtx, "received invalid http request",
 				"request_id", msg.RequestId,
-				"error", err)
+				"target_host", targetHost,
+				"error", safeErr)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
@@ -405,7 +431,7 @@ func (cm *ConnectionManager) handleMessage(
 
 		httpResp, err := cm.executor.Execute(reqCtx, m.HttpRequest)
 		if err != nil {
-			span.RecordError(err)
+			_ = telemetry.RecordError(span, err)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{

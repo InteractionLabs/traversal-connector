@@ -50,6 +50,10 @@ const (
 	refusalBodyTooLarge        = "body_too_large"
 	refusalDecodedTooLarge     = "decoded_too_large"
 	refusalDecodeFailed        = "decode_failed"
+	// refusalMalformedJSON is about the document, not its coding: the body
+	// decoded fine and then turned out not to be the single JSON document its
+	// content type promised.
+	refusalMalformedJSON = "malformed_json"
 )
 
 // Executor handles executing HTTP requests against upstream services
@@ -116,7 +120,7 @@ func (e *Executor) Execute(
 ) (*pb.HttpResponse, error) {
 	startTime := time.Now()
 
-	targetHost := hostFromURL(protoReq.Url)
+	targetHost := telemetry.HostFromURL(protoReq.Url)
 	requestStatus := connector.StatusError
 	defer func() {
 		duration := float64(
@@ -148,10 +152,10 @@ func (e *Executor) Execute(
 
 	// Validate the target URL.
 	if err := connector.ValidateTargetURL(protoReq.Url); err != nil {
-		span.RecordError(err)
+		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: invalid URL",
-			"error", err,
-			"url", protoReq.Url)
+			"error", safeErr,
+			"target_host", targetHost)
 		return nil, fmt.Errorf("invalid target URL: %w", err)
 	}
 
@@ -162,12 +166,12 @@ func (e *Executor) Execute(
 			len(protoReq.Body),
 			e.maxRequestBodySizeBytes,
 		)
-		span.RecordError(bodySizeErr)
+		_ = telemetry.RecordError(span, bodySizeErr)
 		e.metrics.requestBodySizeLimitHit.Add(ctx, 1)
 		slog.WarnContext(ctx, "upstream request failed: body too large",
 			"body_size", len(protoReq.Body),
 			"max_size", e.maxRequestBodySizeBytes,
-			"url", protoReq.Url)
+			"target_host", targetHost)
 		return nil, fmt.Errorf(
 			"request body size %d exceeds limit %d",
 			len(protoReq.Body),
@@ -183,10 +187,10 @@ func (e *Executor) Execute(
 
 	httpReq, err := http.NewRequestWithContext(ctx, protoReq.Method, protoReq.Url, body)
 	if err != nil {
-		span.RecordError(err)
+		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: cannot create request",
-			"error", err,
-			"url", protoReq.Url)
+			"error", safeErr,
+			"target_host", targetHost)
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
@@ -202,10 +206,12 @@ func (e *Executor) Execute(
 	//nolint:gosec // G704: intentional validated upstream request
 	resp, err := e.client.Do(httpReq)
 	if err != nil {
-		span.RecordError(err)
+		// The transport puts the whole URL it was given into its own error text,
+		// so dropping URL attributes does not by itself keep it out of telemetry.
+		safeErr := telemetry.RecordError(span, err)
 		duration := time.Since(startTime)
 		slog.ErrorContext(ctx, "upstream request failed",
-			"error", err,
+			"error", safeErr,
 			"target_host", targetHost,
 			"duration_ms", duration.Milliseconds())
 		return nil, fmt.Errorf("upstream request failed: %w", err)
@@ -214,7 +220,7 @@ func (e *Executor) Execute(
 
 	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
 	if err != nil {
-		span.RecordError(err)
+		_ = telemetry.RecordError(span, err)
 		return nil, err
 	}
 
@@ -262,7 +268,7 @@ func (e *Executor) buildResponse(
 					e.maxResponseBodySizeBytes))
 		}
 		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
-			"error", err,
+			"error", telemetry.SanitizeError(err),
 			"target_host", targetHost)
 		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
@@ -322,9 +328,22 @@ func (e *Executor) buildResponse(
 			metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
 	}
 
-	redacted, changed := e.redactBody(
-		ctx, redactHost, resp.Header.Get(headerContentType), plaintext, targetHost,
+	// The same reasoning as the bodyless check above, applied to what the decode
+	// produced: a coding that wraps no content still puts bytes on the wire, so
+	// emptiness is only visible here. Without this, an empty body would be
+	// forwarded uncompressed and refused compressed, and no rule can find
+	// anything to remove in either.
+	if len(plaintext) == 0 {
+		return finalizeResponse(resp, body, responseDisposition{}), nil
+	}
+
+	redacted, changed, err := e.redactBody(
+		ctx, redactHost, resp.Header.Get(headerContentType), plaintext,
 	)
+	if err != nil {
+		return nil, e.refuse(ctx, targetHost, refusalMalformedJSON,
+			connector.ErrorCodeUpstreamError, err)
+	}
 
 	finalBody := redacted
 	if coding == codingGzip {
@@ -405,32 +424,37 @@ func finalizeResponse(
 // redactBody applies the redaction rules to a decoded body and reports whether
 // any of them changed it.
 //
-// Structured (regex-structured-data) rules fire per-field via ApplyJSON — only
-// when the Content-Type is JSON and the body parses. If either fails, structured
-// rules are skipped, because their field filters cannot be honored on raw bytes.
-// Legacy byte-level "regex" rules always fire via Apply, regardless of content
-// type.
+// Structured (regex-structured-data) rules fire per-field via ApplyJSON, only
+// when the Content-Type is JSON. Legacy byte-level "regex" rules always fire via
+// Apply, regardless of content type.
+//
+// A non-nil error means a structured rule was in scope, the response called
+// itself JSON, and the body was not one complete JSON document, so the fields
+// the rule was scoped to could not be located. There is no byte-level fallback
+// for that case: running a field-scoped pattern across the whole body would
+// redact outside the boundaries the filters exist to draw, and skipping the rule
+// would forward exactly the content it was configured to remove. ApplyJSON does
+// not parse at all when no structured rule is in scope, which is what keeps a
+// merely unparseable body from failing a host that never asked for per-field
+// redaction.
 func (e *Executor) redactBody(
 	ctx context.Context,
 	redactHost string,
 	contentType string,
 	body []byte,
-	targetHost string,
-) ([]byte, bool) {
+) ([]byte, bool, error) {
 	changed := false
 	if isJSONContentType(contentType) {
 		redacted, jsonChanged, err := e.redactor.ApplyJSON(ctx, redactHost, body)
-		if err == nil {
-			body = redacted
-			changed = jsonChanged
-		} else {
-			slog.WarnContext(ctx, "JSON response body could not be parsed for per-field redaction; structured rules skipped, byte-level rules still applied",
-				"error", err, "target_host", targetHost)
+		if err != nil {
+			return nil, false, err
 		}
+		body = redacted
+		changed = jsonChanged
 	}
 
 	redacted, byteChanged := e.redactor.Apply(ctx, redactHost, body)
-	return redacted, changed || byteChanged
+	return redacted, changed || byteChanged, nil
 }
 
 // refuse drops a response the connector cannot scan, rather than forwarding a
@@ -453,19 +477,27 @@ func (e *Executor) refuse(
 	slog.ErrorContext(ctx, "upstream response dropped: body could not be redacted",
 		"target_host", targetHost,
 		"reason", reason,
-		"error", err)
+		"error", telemetry.SanitizeError(err))
 	return connector.NewCodedError(code, err)
 }
 
 // isJSONContentType reports whether the given Content-Type header indicates a
 // JSON payload. Handles charset parameters (e.g. "application/json; charset=utf-8")
 // and the "+json" structured-syntax suffix (RFC 6839, e.g. "application/ld+json").
+//
+// A malformed optional parameter does not change the classification:
+// ErrInvalidMediaParameter still yields a valid base media type, and the base type
+// is what puts a body in scope for per-field rules. Reading it as unclassified
+// would let an upstream carry a JSON body out of that scope by appending one
+// broken parameter to an otherwise valid type. No other parse error is accepted,
+// because this is the only one documented to leave the media type usable; the
+// rest leave it empty.
 func isJSONContentType(header string) bool {
 	if header == "" {
 		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(header)
-	if err != nil {
+	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
 		return false
 	}
 	if mediaType == "application/json" || mediaType == "text/json" {
