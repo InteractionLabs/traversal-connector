@@ -477,6 +477,18 @@ def github_repository(artifact: str) -> str:
     return "/".join(parts[:2])
 
 
+def is_internal_github_dependency(dependency: Dependency) -> bool:
+    if dependency.ecosystem != "github-commit":
+        return False
+    repository = github_repository(dependency.artifact)
+    current_repository = os.getenv("GITHUB_REPOSITORY", "")
+    current_owner = os.getenv("GITHUB_REPOSITORY_OWNER", "")
+    return repository.casefold() == current_repository.casefold() or (
+        bool(current_owner)
+        and repository.split("/", 1)[0].casefold() == current_owner.casefold()
+    )
+
+
 def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
     quote = urllib.parse.quote
     if dependency.ecosystem == "pypi":
@@ -631,16 +643,12 @@ def check(
         evidence_source: Optional[str] = None
         detail: Optional[str] = None
         try:
-            published, evidence_source = evidence(dependency)
-            eligible = published + COOLDOWN
-            internal_repository = (
-                dependency.ecosystem == "github-commit"
-                and github_repository(dependency.artifact)
-                == os.getenv("GITHUB_REPOSITORY")
-            )
-            if internal_repository:
+            if is_internal_github_dependency(dependency):
+                validate_exact_version(dependency.ecosystem, dependency.version)
                 status = "internal"
             else:
+                published, evidence_source = evidence(dependency)
+                eligible = published + COOLDOWN
                 status = "eligible" if now >= eligible else "blocked"
         except UnverifiableEvidence as error:
             status = "unverifiable"
