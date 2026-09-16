@@ -1,0 +1,19 @@
+envName: ci
+controllerURL: https://controller.example.invalid
+connectorID: ci
+
+otel:
+  sidecar:
+    enabled: false
+  metricsEndpoint: https://telemetry.example.invalid/v1/metrics
+  tracesEndpoint: https://telemetry.example.invalid/v1/traces
+  logsEndpoint: https://telemetry.example.invalid/v1/logs
+
+redaction:
+  enabled: true
+  rulesContent: |
+    version = "1"
+    [[rules]]
+    name = "synthetic-token"
+    type = "regex"
+    pattern = 'token-[0-9]+'

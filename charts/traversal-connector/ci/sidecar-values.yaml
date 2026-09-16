@@ -1,0 +1,13 @@
+envName: ci
+controllerURL: https://controller.example.invalid
+connectorID: ci
+
+controllerTLS:
+  existingSecret: ci-controller-tls
+
+otel:
+  sidecar:
+    enabled: true
+  metricsEndpoint: https://telemetry.example.invalid:4317
+  tracesEndpoint: https://telemetry.example.invalid:4317
+  logsEndpoint: https://telemetry.example.invalid:4317

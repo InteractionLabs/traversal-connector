@@ -50,6 +50,48 @@ dependency-policy-test:
     python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_*.py'
     just dependency-policy-check
 
+# Lint the canonical Helm chart with a valid direct-export configuration.
+chart-lint:
+    helm lint charts/traversal-connector -f charts/traversal-connector/ci/direct-export-values.yaml
+
+# Exercise supported chart configurations and validation failures.
+chart-test:
+    bash charts/traversal-connector/ci/test-chart.sh
+
+# Package a release chart and portable checksum. Usage: just chart-package v0.8.5
+chart-package version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version='{{version}}'
+    if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Version must match vX.Y.Z, got: $version" >&2
+        exit 1
+    fi
+    just chart-lint
+    just chart-test
+    chart_version=${version#v}
+    archive="traversal-connector-charts-${chart_version}.tgz"
+    mkdir -p dist
+    rm -f "dist/$archive" "dist/$archive.sha256"
+    helm package charts/traversal-connector \
+        --version "$chart_version" \
+        --app-version "$version" \
+        --destination dist
+    test -f "dist/$archive"
+    if tar -tzf "dist/$archive" | grep -Eq '(^|/)ci(/|$)'; then
+        echo "Packaged chart must not contain source-only ci/ files" >&2
+        exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd dist && sha256sum "$archive" > "$archive.sha256")
+    elif command -v shasum >/dev/null 2>&1; then
+        (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+    else
+        echo "sha256sum or shasum is required" >&2
+        exit 1
+    fi
+    echo "Packaged dist/$archive and dist/$archive.sha256"
+
 # Run all tests
 test:
     go test ./...
