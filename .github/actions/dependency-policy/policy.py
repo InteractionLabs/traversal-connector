@@ -478,7 +478,11 @@ def github_repository(artifact: str) -> str:
 
 
 def is_internal_github_dependency(dependency: Dependency) -> bool:
-    if dependency.ecosystem != "github-commit":
+    if dependency.ecosystem not in {
+        "github-commit",
+        "github-release",
+        "github-tag",
+    }:
         return False
     repository = github_repository(dependency.artifact)
     current_repository = os.getenv("GITHUB_REPOSITORY", "")
