@@ -32,14 +32,12 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
 REPOSITORY = Path(".")
-LATEST_POLICY_REFERENCES = frozenset(
-    {
-        "InteractionLabs/infrastructure/.github/actions/dependency-policy@main",
-        "InteractionLabs/infrastructure/.github/workflows/reusable-dependency-policy.yml@main",
-        "InteractionLabs/traversal-connector/.github/actions/dependency-policy@main",
-        "InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@main",
-    }
-)
+LATEST_POLICY_REFERENCES = {
+    "InteractionLabs/infrastructure/.github/actions/dependency-policy@main": ".github/workflows/reusable-dependency-policy.yml",
+    "InteractionLabs/infrastructure/.github/workflows/reusable-dependency-policy.yml@main": ".github/workflows/dependency-policy.yml",
+    "InteractionLabs/traversal-connector/.github/actions/dependency-policy@main": ".github/workflows/reusable-dependency-policy.yml",
+    "InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@main": ".github/workflows/dependency-policy.yml",
+}
 
 
 class UnverifiableEvidence(ValueError):
@@ -118,7 +116,7 @@ def discover_github_actions(path: str, text: str) -> set[Dependency]:
         target = match.group(1).strip("\"'")
         if target.startswith("./"):
             continue
-        if target in LATEST_POLICY_REFERENCES:
+        if LATEST_POLICY_REFERENCES.get(target) == path:
             continue
         if target.startswith("docker://"):
             image = target.removeprefix("docker://")
