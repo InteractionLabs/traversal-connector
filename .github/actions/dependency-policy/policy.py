@@ -32,6 +32,15 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
 REPOSITORY = Path(".")
+LATEST_POLICY_REFERENCE = re.compile(
+    r"^(?i:InteractionLabs)/[A-Za-z0-9_.-]+/\.github/"
+    r"(?P<kind>actions/dependency-policy|"
+    r"workflows/reusable-dependency-policy\.yml)@main$"
+)
+LATEST_POLICY_PATHS = {
+    "actions/dependency-policy": ".github/workflows/reusable-dependency-policy.yml",
+    "workflows/reusable-dependency-policy.yml": ".github/workflows/dependency-policy.yml",
+}
 
 
 class UnverifiableEvidence(ValueError):
@@ -109,6 +118,14 @@ def discover_github_actions(path: str, text: str) -> set[Dependency]:
     for match in re.finditer(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", text):
         target = match.group(1).strip("\"'")
         if target.startswith("./"):
+            continue
+        policy_reference = LATEST_POLICY_REFERENCE.fullmatch(target)
+        if (
+            policy_reference
+            and LATEST_POLICY_PATHS[policy_reference["kind"]] == path
+        ):
+            artifact, version = target.rsplit("@", 1)
+            found.add(Dependency("policy-exception", artifact, version, path))
             continue
         if target.startswith("docker://"):
             image = target.removeprefix("docker://")
@@ -647,7 +664,10 @@ def check(
         evidence_source: Optional[str] = None
         detail: Optional[str] = None
         try:
-            if is_internal_github_dependency(dependency):
+            if dependency.ecosystem == "policy-exception":
+                status = "excepted"
+                detail = "approved latest dependency-policy reference"
+            elif is_internal_github_dependency(dependency):
                 validate_exact_version(dependency.ecosystem, dependency.version)
                 status = "internal"
             else:

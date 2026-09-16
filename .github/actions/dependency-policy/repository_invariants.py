@@ -30,13 +30,25 @@ def validate_caller(
         return ["the dependency-policy caller workflow is required"]
     content = caller.read_text()
     failures: list[str] = []
+    caller_owner = caller_repository.split("/", 1)[0]
+    allowed_version = (
+        r"(?:main|[0-9a-f]{40})"
+        if caller_owner.casefold() == "interactionlabs"
+        else r"[0-9a-f]{40}"
+    )
     caller_pattern = re.compile(
         re.escape(caller_repository)
         + r"/\.github/workflows/reusable-dependency-policy\.yml@"
-        + r"[0-9a-f]{40}(?:\s|#|$)"
+        + allowed_version
+        + r"(?:\s|#|$)"
     )
     if not caller_pattern.search(content):
-        failures.append("the shared dependency workflow must use a full commit SHA")
+        requirement = (
+            "main or a full commit SHA"
+            if caller_owner.casefold() == "interactionlabs"
+            else "a full commit SHA"
+        )
+        failures.append(f"the shared dependency workflow must use {requirement}")
     if not re.search(r"(?m)^\s*pull_request\s*:", content):
         failures.append("the dependency-policy caller must run for pull requests")
     if not re.search(r"(?m)^\s*contents:\s*read\s*$", content):
