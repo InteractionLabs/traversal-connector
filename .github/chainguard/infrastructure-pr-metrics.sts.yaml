@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+subject: repo:InteractionLabs/infrastructure:ref:refs/heads/main
+
+claim_pattern:
+  job_workflow_ref: ^InteractionLabs/infrastructure/\\.github/workflows/publish-github-pr-metrics\\.yaml@refs/heads/main$
+
+permissions:
+  pull_requests: read
