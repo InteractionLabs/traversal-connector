@@ -22,7 +22,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate repository dependency controls
+    - name: Validate dependency policy wiring
       shell: bash
       env:
         INPUT_REQUIRE_CALLER: ${{ inputs.require-caller }}
