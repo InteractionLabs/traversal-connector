@@ -45,7 +45,7 @@ jobs:
           echo "head=$head" >> "$GITHUB_OUTPUT"
 
       - name: Enforce dependency policy
-        uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@97f218574d3510d77abbe6ce855154f6edd6453e # policy-v1
+        uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@ac6c96c5ad54fa1f6077b51dd91eb4763494df51 # policy-v1
         with:
           base-sha: ${{ steps.comparison.outputs.base }}
           head-sha: ${{ steps.comparison.outputs.head }}
