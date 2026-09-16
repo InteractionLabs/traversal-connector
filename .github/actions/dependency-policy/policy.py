@@ -117,6 +117,8 @@ def discover_github_actions(path: str, text: str) -> set[Dependency]:
         if target.startswith("./"):
             continue
         if LATEST_POLICY_REFERENCES.get(target) == path:
+            artifact, version = target.rsplit("@", 1)
+            found.add(Dependency("policy-exception", artifact, version, path))
             continue
         if target.startswith("docker://"):
             image = target.removeprefix("docker://")
@@ -655,7 +657,10 @@ def check(
         evidence_source: Optional[str] = None
         detail: Optional[str] = None
         try:
-            if is_internal_github_dependency(dependency):
+            if dependency.ecosystem == "policy-exception":
+                status = "excepted"
+                detail = "approved latest dependency-policy reference"
+            elif is_internal_github_dependency(dependency):
                 validate_exact_version(dependency.ecosystem, dependency.version)
                 status = "internal"
             else:
