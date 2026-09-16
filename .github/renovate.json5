@@ -1,21 +1,30 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  extends: ["config:recommended"],
+  extends: [
+    "config:best-practices",
+    ":separateMultipleMajorReleases",
+  ],
   enabledManagers: ["gomod", "dockerfile", "github-actions"],
+  minimumReleaseAge: "7 days",
+  minimumReleaseAgeBehaviour: "timestamp-required",
+  internalChecksFilter: "strict",
   dependencyDashboard: true,
   automerge: false,
-  prConcurrentLimit: 3,
-  prHourlyLimit: 2,
+  prConcurrentLimit: 1,
+  prHourlyLimit: 1,
   postUpdateOptions: ["gomodTidy"],
   constraintsFiltering: "strict",
   vulnerabilityAlerts: {
-    enabled: true,
+    enabled: false,
   },
-  osvVulnerabilityAlerts: true,
+  osvVulnerabilityAlerts: false,
+  lockFileMaintenance: {
+    enabled: false,
+  },
   packageRules: [
     {
-      matchManagers: ["github-actions"],
-      pinDigests: true,
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
     },
     {
       matchManagers: ["gomod"],
@@ -31,10 +40,6 @@
     {
       matchPackageNames: ["github.com/google/cel-go"],
       allowedVersions: ">=0.30.0",
-    },
-    {
-      matchUpdateTypes: ["major"],
-      dependencyDashboardApproval: true,
     },
     {
       groupName: "OpenTelemetry v1 core",
