@@ -17,6 +17,8 @@ tmp
 *.coverprofile
 *.prof
 coverage.*
+__pycache__/
+*.py[cod]
 
 # Air hot-reload
 build-errors.log
