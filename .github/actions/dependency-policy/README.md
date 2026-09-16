@@ -5,5 +5,6 @@ cannot call actions or reusable workflows from the private infrastructure
 repository. `SOURCE` records the exact infrastructure commit, and the vendor
 test locks the copied policy files to that revision.
 
-The caller, reusable workflow, and action use full commit SHAs so pull requests
-cannot replace the policy code before it reports dependency evidence.
+Only the exact dependency-policy caller and action may follow `main`; every
+other GitHub Action must use a full commit SHA. The vendor test keeps the public
+copy byte-for-byte aligned with its declared infrastructure source.

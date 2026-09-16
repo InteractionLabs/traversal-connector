@@ -33,10 +33,12 @@ def validate_caller(
     caller_pattern = re.compile(
         re.escape(caller_repository)
         + r"/\.github/workflows/reusable-dependency-policy\.yml@"
-        + r"[0-9a-f]{40}(?:\s|#|$)"
+        + r"(?:main|[0-9a-f]{40})(?:\s|#|$)"
     )
     if not caller_pattern.search(content):
-        failures.append("the shared dependency workflow must use a full commit SHA")
+        failures.append(
+            "the shared dependency workflow must use main or a full commit SHA"
+        )
     if not re.search(r"(?m)^\s*pull_request\s*:", content):
         failures.append("the dependency-policy caller must run for pull requests")
     if not re.search(r"(?m)^\s*contents:\s*read\s*$", content):
