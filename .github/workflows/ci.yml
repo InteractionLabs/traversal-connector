@@ -31,3 +31,41 @@ jobs:
         run: ./setup.sh
 
       - run: just ${{ matrix.recipe }}
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    env:
+      HELM_VERSION: v3.18.6
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: '1.58.0'
+
+      - name: Install Helm
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar --extract --gzip --strip-components=1 --directory=/usr/local/bin linux-amd64/helm
+          helm version --short
+
+      - name: Validate and package chart
+        run: just chart-package v0.0.0
+
+      - name: Verify packaged metadata and rendering
+        run: |
+          set -euo pipefail
+          archive=dist/traversal-connector-charts-0.0.0.tgz
+          metadata=$(helm show chart "$archive")
+          printf '%s\n' "$metadata"
+          test "$(printf '%s\n' "$metadata" | awk '$1 == "version:" { print $2 }')" = "0.0.0"
+          test "$(printf '%s\n' "$metadata" | awk '$1 == "appVersion:" { print $2 }')" = "v0.0.0"
+          if tar -tzf "$archive" | grep -Eq '(^|/)ci(/|$)'; then
+            echo "Packaged chart contains source-only ci/ files" >&2
+            exit 1
+          fi
+          helm template ci "$archive" \
+            -f charts/traversal-connector/ci/sidecar-values.yaml \
+            | grep -F 'image: "traversalext/traversal-connector:v0.0.0"'
