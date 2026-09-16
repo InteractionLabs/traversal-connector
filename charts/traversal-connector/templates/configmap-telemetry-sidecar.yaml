@@ -1,0 +1,242 @@
+{{- if include "traversal-connector.sidecarEnabled" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "traversal-connector.fullname" . }}-telemetry-sidecar
+  labels:
+    {{- include "traversal-connector.labels" . | nindent 4 }}
+data:
+  config.alloy: |
+    logging {
+      level    = "info"
+      format   = "logfmt"
+      write_to = [otelcol.receiver.loki.self.receiver]
+    }
+
+    otelcol.receiver.otlp "connector" {
+      http {
+        // Connector and sidecar share the pod network namespace, so bind
+        // loopback only — never expose an unauthenticated OTLP receiver on the
+        // pod IP, where other pods could reach it.
+        endpoint = "127.0.0.1:{{ .Values.otel.sidecar.port }}"
+      }
+      output {
+        metrics = [otelcol.processor.memory_limiter.telemetry.input]
+        traces  = [otelcol.processor.memory_limiter.telemetry.input]
+        logs    = [otelcol.processor.memory_limiter.telemetry.input]
+      }
+    }
+
+    otelcol.processor.memory_limiter "telemetry" {
+      check_interval         = "1s"
+      limit_percentage       = 90
+      spike_limit_percentage = 10
+      output {
+        metrics = [otelcol.processor.transform.telemetry.input]
+        traces  = [otelcol.processor.transform.telemetry.input]
+        logs    = [otelcol.processor.transform.telemetry.input]
+      }
+    }
+
+    // Stamp source identity onto every signal's resource so connector-emitted
+    // telemetry carries the same resource shape as in-cluster collectors, then
+    // promote k8s.pod.name to a datapoint "pod" label on metrics. Resource
+    // attributes land in target_info rather than series labels, so without the
+    // promotion counters from distinct replicas collide into one series and
+    // rate()/increase() break across counter resets.
+    otelcol.processor.transform "telemetry" {
+      error_mode = "ignore"
+      trace_statements {
+        context    = "resource"
+        statements = [
+          "set(resource.attributes[\"service.name\"], \"" + sys.env("OTEL_SERVICE_NAME") + "\")",
+          "set(resource.attributes[\"service.version\"], \"" + sys.env("SERVICE_VERSION") + "\")",
+          "set(resource.attributes[\"traversal.customer.env.name\"], \"" + sys.env("ENV_NAME") + "\")",
+          "set(resource.attributes[\"traversal.connector.id\"], \"" + sys.env("CONNECTOR_ID") + "\")",
+          "set(resource.attributes[\"k8s.namespace.name\"], \"" + sys.env("K8S_NAMESPACE") + "\")",
+          "set(resource.attributes[\"k8s.pod.name\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"k8s.pod.uid\"], \"" + sys.env("K8S_POD_UID") + "\")",
+          "set(resource.attributes[\"k8s.node.name\"], \"" + sys.env("K8S_NODE_NAME") + "\")",
+          "set(resource.attributes[\"k8s.deployment.name\"], \"" + sys.env("K8S_DEPLOYMENT_NAME") + "\")",
+          "set(resource.attributes[\"k8s.container.name\"], \"connector\")",
+        ]
+      }
+      metric_statements {
+        context    = "resource"
+        statements = [
+          "set(resource.attributes[\"service.name\"], \"" + sys.env("OTEL_SERVICE_NAME") + "\")",
+          "set(resource.attributes[\"service.version\"], \"" + sys.env("SERVICE_VERSION") + "\")",
+          "set(resource.attributes[\"traversal.customer.env.name\"], \"" + sys.env("ENV_NAME") + "\")",
+          "set(resource.attributes[\"traversal.connector.id\"], \"" + sys.env("CONNECTOR_ID") + "\")",
+          "set(resource.attributes[\"k8s.namespace.name\"], \"" + sys.env("K8S_NAMESPACE") + "\")",
+          "set(resource.attributes[\"k8s.pod.name\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"k8s.pod.uid\"], \"" + sys.env("K8S_POD_UID") + "\")",
+          "set(resource.attributes[\"k8s.node.name\"], \"" + sys.env("K8S_NODE_NAME") + "\")",
+          "set(resource.attributes[\"k8s.deployment.name\"], \"" + sys.env("K8S_DEPLOYMENT_NAME") + "\")",
+          "set(resource.attributes[\"k8s.container.name\"], \"connector\")",
+        ]
+      }
+      metric_statements {
+        context    = "datapoint"
+        statements = ["set(attributes[\"pod\"], resource.attributes[\"k8s.pod.name\"])"]
+      }
+      log_statements {
+        context    = "resource"
+        statements = [
+          "set(resource.attributes[\"service.name\"], \"" + sys.env("OTEL_SERVICE_NAME") + "\")",
+          "set(resource.attributes[\"service.version\"], \"" + sys.env("SERVICE_VERSION") + "\")",
+          "set(resource.attributes[\"traversal.customer.env.name\"], \"" + sys.env("ENV_NAME") + "\")",
+          "set(resource.attributes[\"traversal.connector.id\"], \"" + sys.env("CONNECTOR_ID") + "\")",
+          "set(resource.attributes[\"k8s.namespace.name\"], \"" + sys.env("K8S_NAMESPACE") + "\")",
+          "set(resource.attributes[\"k8s.pod.name\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"k8s.pod.uid\"], \"" + sys.env("K8S_POD_UID") + "\")",
+          "set(resource.attributes[\"k8s.node.name\"], \"" + sys.env("K8S_NODE_NAME") + "\")",
+          "set(resource.attributes[\"k8s.deployment.name\"], \"" + sys.env("K8S_DEPLOYMENT_NAME") + "\")",
+          "set(resource.attributes[\"k8s.container.name\"], \"connector\")",
+        ]
+      }
+      output {
+        metrics = [otelcol.processor.batch.telemetry.input]
+        traces  = [otelcol.processor.batch.telemetry.input]
+        logs    = [otelcol.processor.batch.telemetry.input]
+      }
+    }
+
+    // ── Self-telemetry ───────────────────────────────────────────────────────
+    // Nothing outside the pod can observe the forwarder: an in-cluster scraper
+    // cannot reach a customer pod, and nothing collects this container's stdout.
+    // So it scrapes its own /metrics over loopback and routes its own log stream
+    // through the same egress it forwards connector signals over — the queue
+    // that buffers connector telemetry also buffers the evidence of why it
+    // stopped draining.
+    //
+    // Both paths bypass the memory_limiter deliberately: the volume is small and
+    // fixed, so it cannot be the cause of the pressure the limiter sheds, and
+    // shedding the signal that reports shedding defeats the purpose.
+    prometheus.scrape "self" {
+      targets    = [{ __address__ = "127.0.0.1:12345" }]   // alloy's own http server, pinned to loopback in the container args
+      forward_to = [otelcol.receiver.prometheus.self.receiver]
+      job_name   = "traversal-connector-telemetry-sidecar"
+    }
+
+    otelcol.receiver.prometheus "self" {
+      output {
+        metrics = [otelcol.processor.transform.self.input]
+      }
+    }
+
+    otelcol.receiver.loki "self" {
+      output {
+        logs = [otelcol.processor.transform.self.input]
+      }
+    }
+
+    // The connector's resource shape with the forwarder's own identity: its own
+    // service name and image version, and a container name that keeps its series
+    // distinct from the connector's. Its log records arrive as a logfmt line in
+    // the body, so the fields are lifted into attributes and the level into OTLP
+    // severity — the shape the connector's logs already arrive in, which is what
+    // alloy-central derives the Loki level from.
+    otelcol.processor.transform "self" {
+      error_mode = "ignore"
+      metric_statements {
+        context    = "resource"
+        statements = [
+          "set(resource.attributes[\"service.name\"], \"traversal-connector-telemetry-sidecar\")",
+          "set(resource.attributes[\"service.version\"], \"" + sys.env("SIDECAR_VERSION") + "\")",
+          "set(resource.attributes[\"service.instance.id\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"traversal.customer.env.name\"], \"" + sys.env("ENV_NAME") + "\")",
+          "set(resource.attributes[\"traversal.connector.id\"], \"" + sys.env("CONNECTOR_ID") + "\")",
+          "set(resource.attributes[\"k8s.namespace.name\"], \"" + sys.env("K8S_NAMESPACE") + "\")",
+          "set(resource.attributes[\"k8s.pod.name\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"k8s.pod.uid\"], \"" + sys.env("K8S_POD_UID") + "\")",
+          "set(resource.attributes[\"k8s.node.name\"], \"" + sys.env("K8S_NODE_NAME") + "\")",
+          "set(resource.attributes[\"k8s.deployment.name\"], \"" + sys.env("K8S_DEPLOYMENT_NAME") + "\")",
+          "set(resource.attributes[\"k8s.container.name\"], \"telemetry-sidecar\")",
+        ]
+      }
+      metric_statements {
+        context    = "datapoint"
+        statements = ["set(attributes[\"pod\"], resource.attributes[\"k8s.pod.name\"])"]
+      }
+      log_statements {
+        context    = "resource"
+        statements = [
+          "set(resource.attributes[\"service.name\"], \"traversal-connector-telemetry-sidecar\")",
+          "set(resource.attributes[\"service.version\"], \"" + sys.env("SIDECAR_VERSION") + "\")",
+          "set(resource.attributes[\"service.instance.id\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"traversal.customer.env.name\"], \"" + sys.env("ENV_NAME") + "\")",
+          "set(resource.attributes[\"traversal.connector.id\"], \"" + sys.env("CONNECTOR_ID") + "\")",
+          "set(resource.attributes[\"k8s.namespace.name\"], \"" + sys.env("K8S_NAMESPACE") + "\")",
+          "set(resource.attributes[\"k8s.pod.name\"], \"" + sys.env("K8S_POD_NAME") + "\")",
+          "set(resource.attributes[\"k8s.pod.uid\"], \"" + sys.env("K8S_POD_UID") + "\")",
+          "set(resource.attributes[\"k8s.node.name\"], \"" + sys.env("K8S_NODE_NAME") + "\")",
+          "set(resource.attributes[\"k8s.deployment.name\"], \"" + sys.env("K8S_DEPLOYMENT_NAME") + "\")",
+          "set(resource.attributes[\"k8s.container.name\"], \"telemetry-sidecar\")",
+        ]
+      }
+      log_statements {
+        context    = "log"
+        statements = [
+          "set(cache[\"line\"], ParseKeyValue(body))",
+          "merge_maps(attributes, cache[\"line\"], \"upsert\")",
+          "set(severity_text, attributes[\"level\"])",
+          "set(severity_number, SEVERITY_NUMBER_DEBUG) where severity_text == \"debug\"",
+          "set(severity_number, SEVERITY_NUMBER_INFO)  where severity_text == \"info\"",
+          "set(severity_number, SEVERITY_NUMBER_WARN)  where severity_text == \"warn\"",
+          "set(severity_number, SEVERITY_NUMBER_ERROR) where severity_text == \"error\"",
+          "set(body, attributes[\"msg\"])",
+          // ts and level are the record's own timestamp and severity; job and
+          // instance are the loki bridge's passthrough labels, meaningless on a
+          // record that already carries the resource above. The bridge also asks
+          // alloy-central to promote a constant component="alloy" to a Loki
+          // stream label — every remaining field is more useful as structured
+          // metadata than as an index.
+          "delete_key(attributes, \"msg\")",
+          "delete_key(attributes, \"ts\")",
+          "delete_key(attributes, \"level\")",
+          "delete_key(attributes, \"job\")",
+          "delete_key(attributes, \"instance\")",
+          "delete_key(attributes, \"loki.attribute.labels\")",
+        ]
+      }
+      output {
+        metrics = [otelcol.processor.batch.telemetry.input]
+        logs    = [otelcol.processor.batch.telemetry.input]
+      }
+    }
+
+    // Light coalescing before egress, mirroring the in-cluster collector; the
+    // central tier does the heavy batching.
+    otelcol.processor.batch "telemetry" {
+      timeout         = "5s"
+      send_batch_size = 1000
+      output {
+        metrics = [otelcol.exporter.otlp.telemetry.input]
+        traces  = [otelcol.exporter.otlp.telemetry.input]
+        logs    = [otelcol.exporter.otlp.telemetry.input]
+      }
+    }
+
+    // Persistent, disk-backed queue so buffered telemetry survives an
+    // unreachable egress instead of being lost in memory.
+    otelcol.storage.file "queue" {
+      directory = "/var/lib/telemetry-sidecar/queue"
+    }
+
+    otelcol.exporter.otlp "telemetry" {
+      client {
+        endpoint = sys.env("OTLP_EGRESS_ENDPOINT")
+        tls {
+          cert_pem = sys.env("OTLP_TLS_CERT_PEM")
+          key_pem  = sys.env("OTLP_TLS_KEY_PEM")
+          ca_pem   = sys.env("OTLP_TLS_CA_PEM")
+        }
+      }
+      sending_queue {
+        enabled           = true
+        storage           = otelcol.storage.file.queue.handler
+        block_on_overflow = false
+      }
+    }
+{{- end }}
