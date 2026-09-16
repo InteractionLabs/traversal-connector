@@ -43,9 +43,17 @@ format:
 build:
     go build ./...
 
+dependency-policy-check:
+    python3 .github/actions/dependency-policy/repository_invariants.py --repo .
+
+dependency-policy-test:
+    python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_*.py'
+    just dependency-policy-check
+
 # Run all tests
 test:
     go test ./...
+    just dependency-policy-test
 
 # Tag and push a release. Usage: just release v0.4.0
 release version:

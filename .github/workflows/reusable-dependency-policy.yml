@@ -1,0 +1,78 @@
+name: reusable-dependency-policy
+
+on:
+  workflow_call:
+    inputs:
+      base-sha:
+        description: Merge-base commit to compare
+        required: false
+        type: string
+      head-sha:
+        description: Commit containing proposed dependency changes
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-policy:
+    name: dependency-policy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout proposed repository state
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve comparison commits
+        id: comparison
+        env:
+          INPUT_BASE: ${{ inputs.base-sha }}
+          INPUT_HEAD: ${{ inputs.head-sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          base="${INPUT_BASE:-${PR_BASE:-${QUEUE_BASE:-}}}"
+          head="${INPUT_HEAD:-HEAD}"
+          if [[ -z "$base" ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "${base}^{commit}"
+          git cat-file -e "${head}^{commit}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce dependency policy
+        uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@97f218574d3510d77abbe6ce855154f6edd6453e # policy-v1
+        with:
+          base-sha: ${{ steps.comparison.outputs.base }}
+          head-sha: ${{ steps.comparison.outputs.head }}
+          require-caller: "true"
+          caller-repository: InteractionLabs/traversal-connector
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Report dependency evidence
+        if: always()
+        run: |
+          if [[ -s dependency-policy-results.json ]]; then
+            {
+              echo "## Dependency policy evidence"
+              echo
+              echo '```json'
+              cat dependency-policy-results.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dependency policy evidence was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload dependency evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dependency-policy-results
+          path: dependency-policy-results.json
+          if-no-files-found: warn
