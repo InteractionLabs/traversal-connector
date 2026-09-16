@@ -11,12 +11,12 @@ class DependencyPolicyVendorTest(unittest.TestCase):
     def test_policy_matches_declared_infrastructure_source(self):
         self.assertEqual(
             (POLICY / "SOURCE").read_text().strip(),
-            "InteractionLabs/infrastructure@77b320bf486076813b1db60159b7785b03427ca8",
+            "InteractionLabs/infrastructure@823724812ee7dcd1482c4f43f086669dcb480c05",
         )
         expected = {
             "action.yml": "a3617eea9a33cf8b55333bad9eb238bf112c071036d4e367291952f6d60bf4c0",
-            "policy.py": "0157bac891a43d39afa7e653e70a99b896ae805b15cce89e2edddd155b46764d",
-            "repository_invariants.py": "77e0eb2b64d7b82a39d056ce845218ba5962df743024fe8ce4edf9f17b62a442",
+            "policy.py": "d72ff3199b5475df8fabad5c1ac763cc3f284eba079b3cd53c6c794746712a68",
+            "repository_invariants.py": "3cf8531929363228bc0c5d09c047fe95c41a6248527e4137be5b850419a620b4",
         }
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((POLICY / name).read_bytes()).hexdigest(), digest)

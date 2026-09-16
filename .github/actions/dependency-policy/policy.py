@@ -32,11 +32,14 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
 REPOSITORY = Path(".")
-LATEST_POLICY_REFERENCES = {
-    "InteractionLabs/infrastructure/.github/actions/dependency-policy@main": ".github/workflows/reusable-dependency-policy.yml",
-    "InteractionLabs/infrastructure/.github/workflows/reusable-dependency-policy.yml@main": ".github/workflows/dependency-policy.yml",
-    "InteractionLabs/traversal-connector/.github/actions/dependency-policy@main": ".github/workflows/reusable-dependency-policy.yml",
-    "InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@main": ".github/workflows/dependency-policy.yml",
+LATEST_POLICY_REFERENCE = re.compile(
+    r"^(?i:InteractionLabs)/[A-Za-z0-9_.-]+/\.github/"
+    r"(?P<kind>actions/dependency-policy|"
+    r"workflows/reusable-dependency-policy\.yml)@main$"
+)
+LATEST_POLICY_PATHS = {
+    "actions/dependency-policy": ".github/workflows/reusable-dependency-policy.yml",
+    "workflows/reusable-dependency-policy.yml": ".github/workflows/dependency-policy.yml",
 }
 
 
@@ -116,7 +119,11 @@ def discover_github_actions(path: str, text: str) -> set[Dependency]:
         target = match.group(1).strip("\"'")
         if target.startswith("./"):
             continue
-        if LATEST_POLICY_REFERENCES.get(target) == path:
+        policy_reference = LATEST_POLICY_REFERENCE.fullmatch(target)
+        if (
+            policy_reference
+            and LATEST_POLICY_PATHS[policy_reference["kind"]] == path
+        ):
             artifact, version = target.rsplit("@", 1)
             found.add(Dependency("policy-exception", artifact, version, path))
             continue
