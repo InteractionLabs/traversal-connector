@@ -9,4 +9,4 @@ permissions:
 
 jobs:
   dependency-policy:
-    uses: InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@09d573adb0fa9cbd7ea272fd91bb8df7ccde6bfe # policy-v1
+    uses: InteractionLabs/traversal-connector/.github/workflows/reusable-dependency-policy.yml@a5ff43f767091272a2d7941ae201b055912c78b1 # policy-v1
