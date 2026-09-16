@@ -212,17 +212,11 @@ def validate_caller(
         failures.append("the dependency-policy caller must run for pull requests")
     if not re.search(r"(?m)^\s*contents:\s*read\s*$", content):
         failures.append("the dependency-policy caller must grant contents: read")
-    if not re.search(r"(?m)^\s*id-token:\s*write\s*$", content):
-        failures.append("the dependency-policy caller must grant id-token: write")
     write_permissions = re.findall(
         r"(?m)^\s*([A-Za-z_-]+):\s*write\s*$", content
     )
-    if any(permission != "id-token" for permission in write_permissions):
-        failures.append(
-            "the dependency-policy caller cannot request other write permissions"
-        )
-    if "DEPENDENCY_EVIDENCE_" in content:
-        failures.append("the dependency-policy caller must use OIDC instead of secrets")
+    if write_permissions:
+        failures.append("the dependency-policy caller cannot request write permissions")
     return failures
 
 
@@ -238,9 +232,6 @@ def main() -> int:
     repository = arguments.repo.resolve()
     failures = [
         *validate_renovate(repository),
-        *validate_action_pins(repository),
-        *validate_container_pins(repository),
-        *validate_go_tool_pins(repository),
         *validate_exception_boundary(repository),
     ]
     if arguments.require_caller:

@@ -5,13 +5,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +32,10 @@ FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
 REPOSITORY = Path(".")
+
+
+class UnverifiableEvidence(ValueError):
+    pass
 
 
 @dataclass(frozen=True, order=True)
@@ -468,107 +470,11 @@ def go_index_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
     raise ValueError("Go module index returned no first-observed timestamp")
 
 
-def ledger_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
-    bucket = os.getenv("DEPENDENCY_EVIDENCE_BUCKET")
-    repository = os.getenv("GITHUB_REPOSITORY")
-    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-    if not bucket or not repository or not region:
-        raise ValueError("S3 first-observed evidence is not configured")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ValueError("GITHUB_REPOSITORY is not a canonical owner/repository")
-
-    coordinate = {
-        "ecosystem": dependency.ecosystem,
-        "artifact": dependency.artifact,
-        "version": dependency.version,
-    }
-    canonical = json.dumps(
-        coordinate, sort_keys=True, separators=(",", ":")
-    ).encode()
-    digest = hashlib.sha256(canonical).hexdigest()
-    object_key = (
-        f"v1/repositories/{repository}/{dependency.ecosystem}/{digest}.json"
-    )
-
-    def run_aws(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["aws", "s3api", *arguments, "--region", region, "--no-cli-pager"],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-    def head_object() -> Optional[dict]:
-        result = run_aws(
-            "head-object", "--bucket", bucket, "--key", object_key
-        )
-        if result.returncode == 0:
-            value = json.loads(result.stdout)
-            if not isinstance(value, dict):
-                raise ValueError("S3 first-observed evidence metadata is invalid")
-            return value
-        if re.search(r"\((?:404|NoSuchKey|NotFound)\)", result.stderr):
-            return None
-        raise OSError(
-            "S3 first-observed evidence lookup failed: "
-            f"{result.stderr.strip() or 'unknown AWS CLI error'}"
-        )
-
-    metadata = head_object()
-    if metadata is None:
-        github = {
-            name.removeprefix("GITHUB_").lower(): os.getenv(name)
-            for name in (
-                "GITHUB_REPOSITORY",
-                "GITHUB_REPOSITORY_ID",
-                "GITHUB_WORKFLOW_REF",
-                "GITHUB_RUN_ID",
-                "GITHUB_RUN_ATTEMPT",
-                "GITHUB_SHA",
-                "GITHUB_EVENT_NAME",
-            )
-        }
-        payload = {
-            "schema_version": 1,
-            "coordinate": coordinate,
-            "github": github,
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json"
-        ) as body:
-            json.dump(payload, body, sort_keys=True, separators=(",", ":"))
-            body.flush()
-            result = run_aws(
-                "put-object",
-                "--bucket",
-                bucket,
-                "--key",
-                object_key,
-                "--body",
-                body.name,
-                "--content-type",
-                "application/json",
-                "--checksum-algorithm",
-                "SHA256",
-                "--if-none-match",
-                "*",
-            )
-        if result.returncode != 0 and not re.search(
-            r"\((?:412|PreconditionFailed)\)", result.stderr
-        ):
-            raise OSError(
-                "S3 first-observed evidence write failed: "
-                f"{result.stderr.strip() or 'unknown AWS CLI error'}"
-            )
-        metadata = head_object()
-        if metadata is None:
-            raise OSError("S3 first-observed evidence disappeared after write")
-
-    last_modified = metadata.get("LastModified")
-    if not isinstance(last_modified, str):
-        raise ValueError("S3 first-observed evidence has no LastModified timestamp")
-    return parse_time(last_modified), f"s3://{bucket}/{object_key}"
+def github_repository(artifact: str) -> str:
+    parts = artifact.split("/")
+    if len(parts) < 2 or not all(parts[:2]):
+        raise ValueError("GitHub dependency must use owner/repository form")
+    return "/".join(parts[:2])
 
 
 def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
@@ -629,10 +535,21 @@ def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
         published = data.get("published_at")
         if published:
             return parse_time(published), url
+    if dependency.ecosystem == "github-commit":
+        repository = github_repository(dependency.artifact)
+        data, url = request(
+            f"https://api.github.com/repos/"
+            f"{quote(repository, safe='/')}/commits/"
+            f"{quote(dependency.version, safe='')}"
+        )
+        assert isinstance(data, dict)
+        committed = data.get("commit", {}).get("committer", {}).get("date")
+        if not committed:
+            raise ValueError("GitHub returned no commit timestamp")
+        return parse_time(committed), url
     if dependency.ecosystem == "go":
         return go_index_evidence(dependency)
     if dependency.ecosystem in {
-        "github-commit",
         "github-tag",
         "helm",
         "mise",
@@ -640,7 +557,9 @@ def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
         "terraform-module",
         "terraform-provider",
     }:
-        return ledger_evidence(dependency)
+        raise UnverifiableEvidence(
+            f"no public publication-time resolver for {dependency.ecosystem}"
+        )
     raise ValueError(
         f"no trusted publication-time resolver for {dependency.ecosystem}"
     )
@@ -648,18 +567,7 @@ def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
 
 def evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
     validate_exact_version(dependency.ecosystem, dependency.version)
-    try:
-        return registry_evidence(dependency)
-    except (
-        AssertionError,
-        json.JSONDecodeError,
-        KeyError,
-        OSError,
-        TypeError,
-        urllib.error.URLError,
-        ValueError,
-    ):
-        return ledger_evidence(dependency)
+    return registry_evidence(dependency)
 
 
 def validate_exact_version(ecosystem: str, version: str) -> None:
@@ -725,7 +633,18 @@ def check(
         try:
             published, evidence_source = evidence(dependency)
             eligible = published + COOLDOWN
-            status = "eligible" if now >= eligible else "blocked"
+            internal_repository = (
+                dependency.ecosystem == "github-commit"
+                and github_repository(dependency.artifact)
+                == os.getenv("GITHUB_REPOSITORY")
+            )
+            if internal_repository:
+                status = "internal"
+            else:
+                status = "eligible" if now >= eligible else "blocked"
+        except UnverifiableEvidence as error:
+            status = "unverifiable"
+            detail = str(error)
         except (
             AssertionError,
             json.JSONDecodeError,
