@@ -151,8 +151,42 @@ jobs:
       WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
       WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
 
+  package-chart:
+    needs: prepare
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: read
+    env:
+      HELM_VERSION: v3.18.6
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: '1.58.0'
+
+      - name: Install Helm
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar --extract --gzip --strip-components=1 --directory=/usr/local/bin linux-amd64/helm
+          helm version --short
+
+      - name: Validate and package chart
+        run: just chart-package "${{ needs.prepare.outputs.version }}"
+
+      - name: Upload chart workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-chart
+          path: |
+            dist/*.tgz
+            dist/*.tgz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
-    needs: [prepare, build, sign]
+    needs: [prepare, build, sign, package-chart]
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
@@ -168,7 +202,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Tag image and publish release
+      - name: Download chart workflow artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-chart
+          path: dist
+
+      - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -180,20 +220,61 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Apply the public version tag only after the immutable digest has
-          # passed the signer workflow's scan and signature steps.
+          chart_version=${VERSION#v}
+          chart="traversal-connector-charts-${chart_version}.tgz"
+          checksum="${chart}.sha256"
+          test -f "dist/$chart"
+          test -f "dist/$checksum"
+          (cd dist && sha256sum --check "$checksum")
+
+          tag_cleanup_needed=false
+          draft_created=false
+          published=false
+          cleanup() {
+            status=$?
+            if [[ "$status" -ne 0 && "$published" != true ]]; then
+              if [[ "$draft_created" == true ]]; then
+                echo "Removing incomplete draft release $VERSION."
+                gh release delete "$VERSION" --yes || true
+              fi
+              if [[ "$tag_cleanup_needed" == true ]]; then
+                echo "Rolling back Git tag $VERSION."
+                git push origin ":refs/tags/$VERSION" || true
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          git tag -a "$VERSION" -m "$NOTES"
+          # Arm cleanup before the push to close the process-termination window;
+          # deleting a remote ref that was never created is harmless.
+          tag_cleanup_needed=true
+          git push origin "$VERSION"
+
+          gh release create "$VERSION" --draft --title "$VERSION" --notes "$NOTES" --verify-tag
+          draft_created=true
+          gh release upload "$VERSION" "dist/$chart" "dist/$checksum"
+
+          asset_names=$(gh release view "$VERSION" --json assets --jq '.assets[].name')
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$chart")" -eq 1
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$checksum")" -eq 1
+
+          mkdir verified-assets
+          gh release download "$VERSION" --dir verified-assets --pattern "$chart" --pattern "$checksum"
+          test -f "verified-assets/$chart"
+          test -f "verified-assets/$checksum"
+          (cd verified-assets && sha256sum --check "$checksum")
+
+          # Apply the public image tag only after the draft contains verified
+          # release assets. The digest was already scanned and signed. GitHub
+          # and Docker Hub cannot publish transactionally: if publishing the
+          # draft fails next, cleanup removes the draft and Git tag, but this
+          # already-validated public image tag may remain for the retry.
           docker buildx imagetools create \
             --tag "${IMAGE_REF}:${VERSION}" \
             "${IMAGE_REF}@${DIGEST}"
 
-          git tag -a "$VERSION" -m "$NOTES"
-          git push origin "$VERSION"
-
-          # If the release fails after the tag is pushed, roll the Git tag back so a
-          # rerun recomputes the same version instead of orphaning it. The image tag
-          # is safe to retain because it names the already scanned and signed digest.
-          if ! gh release create "$VERSION" --title "$VERSION" --notes "$NOTES" --verify-tag; then
-            echo "::error::Failed to create GitHub Release; rolling back Git tag $VERSION."
-            git push origin ":refs/tags/$VERSION" || true
-            exit 1
-          fi
+          gh release edit "$VERSION" --draft=false
+          published=true
+          trap - EXIT

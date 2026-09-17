@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+chart_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+fixtures="$chart_dir/ci"
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_contains() {
+  local file=$1 expected=$2
+  grep -Fq -- "$expected" "$file" || fail "expected '$expected' in $file"
+}
+
+assert_not_contains() {
+  local file=$1 unexpected=$2
+  if grep -Fq -- "$unexpected" "$file"; then
+    fail "did not expect '$unexpected' in $file"
+  fi
+}
+
+render() {
+  local name=$1 values=$2
+  shift 2
+  helm template "$name" "$chart_dir" -f "$values" "$@" > "$tmp_dir/$name.yaml"
+}
+
+assert_render_fails() {
+  local name=$1 expected=$2
+  shift 2
+  if helm template "$name" "$chart_dir" "$@" >"$tmp_dir/$name.out" 2>"$tmp_dir/$name.err"; then
+    fail "$name unexpectedly rendered"
+  fi
+  assert_contains "$tmp_dir/$name.err" "$expected"
+}
+
+render direct "$fixtures/direct-export-values.yaml"
+assert_contains "$tmp_dir/direct.yaml" 'value: "https://telemetry.example.invalid/v1/metrics"'
+assert_not_contains "$tmp_dir/direct.yaml" 'name: telemetry-sidecar'
+assert_contains "$tmp_dir/direct.yaml" 'kind: ConfigMap'
+assert_contains "$tmp_dir/direct.yaml" 'synthetic-token'
+assert_contains "$tmp_dir/direct.yaml" 'image: "traversalext/traversal-connector:dev"'
+
+render override "$fixtures/direct-export-values.yaml" --set-string image.tag=v9.8.7
+assert_contains "$tmp_dir/override.yaml" 'image: "traversalext/traversal-connector:v9.8.7"'
+
+render sidecar "$fixtures/sidecar-values.yaml"
+assert_contains "$tmp_dir/sidecar.yaml" 'name: telemetry-sidecar'
+assert_contains "$tmp_dir/sidecar.yaml" 'name: sidecar-traversal-connector-telemetry-sidecar'
+assert_contains "$tmp_dir/sidecar.yaml" 'name: ci-controller-tls'
+assert_contains "$tmp_dir/sidecar.yaml" 'value: "http://127.0.0.1:4318/v1/metrics"'
+
+render disabled "$fixtures/telemetry-disabled-values.yaml"
+assert_contains "$tmp_dir/disabled.yaml" 'name: TRAVERSAL_DISABLE_TELEMETRY'
+assert_contains "$tmp_dir/disabled.yaml" 'value: "true"'
+assert_not_contains "$tmp_dir/disabled.yaml" 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
+assert_not_contains "$tmp_dir/disabled.yaml" 'name: telemetry-sidecar'
+
+common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false)
+assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
+assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
+assert_render_fails missing-id 'connectorID is required' "${common[@]}" --set connectorID=
+assert_render_fails non-boolean 'disableTelemetry must be a boolean' "${common[@]}" --set-string disableTelemetry=false
+assert_render_fails sidecar-no-tls 'otel.sidecar.enabled requires controllerTLS' -f "$fixtures/sidecar-values.yaml" --set controllerTLS.existingSecret=
+assert_render_fails divergent-sidecar 'requires a single OTLP egress endpoint' -f "$fixtures/sidecar-values.yaml" --set otel.logsEndpoint=https://logs.example.invalid:4317
+assert_render_fails invalid-endpoint 'must be an https:// URL' "${common[@]}" --set otel.logsEndpoint=not-a-url
+assert_render_fails insecure-endpoint 'must be an https:// URL' "${common[@]}" --set otel.logsEndpoint=http://telemetry.example.invalid:4317
+
+echo "All chart tests passed."

@@ -1,0 +1,187 @@
+# Traversal Connector — values template.
+#
+# All customer-specific fields are left blank. Required fields error at install
+# time if not overridden. Optional fields are no-ops when blank.
+
+image:
+  repository: traversalext/traversal-connector
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 5
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: "1"
+    memory: 4Gi
+
+# ─── Required ────────────────────────────────────────────────────────────────
+# Customer environment label (e.g. "amex-prod"). Maps to ENV_NAME.
+envName: ""
+# ConnectRPC URL of the Traversal control plane. Maps to TRAVERSAL_CONTROLLER_URL.
+controllerURL: ""
+# Unique identifier for this connector deployment, provided to you by Traversal.
+# Maps to TRAVERSAL_CONNECTOR_ID.
+connectorID: ""
+
+# ─── Optional connection tuning ──────────────────────────────────────────────
+# All values left blank fall back to connector built-in defaults.
+envLevel: ""               # ENV_LEVEL: production | development
+proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
+maxTunnelsAllowed: ""      # MAX_TUNNELS_ALLOWED (default 2)
+maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 10)
+reconnectInterval: ""      # RECONNECT_INTERVAL (default 5s)
+maxBackoffDelay: ""        # MAX_BACKOFF_DELAY (default 60s)
+requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
+maxRequestBodySizeMB: ""   # MAX_REQUEST_BODY_SIZE_MB (default 32)
+# Ceilings on an upstream response, both enforced so redaction always scans the
+# whole body: the wire ceiling caps what is read, and the decoded ceiling caps a
+# gzip expansion, which the compressed length cannot predict. A response over
+# either one is refused rather than forwarded unscanned.
+maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
+maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
+httpPort: ""               # HTTP_PORT (default 8080)
+
+# ─── mTLS to the Traversal control plane (optional) ──────────────────────────
+# Either provide PEM strings inline (chart will render a Secret) or reference
+# an existing Secret with keys: tls.crt, tls.key, ca.crt.
+# Since v0.3.0, this same cert + key are also presented for mTLS to the OTLP
+# telemetry endpoints when those endpoints are TLS-enabled.
+controllerTLS:
+  certPEM: ""              # → TLS_CERT_BASE64
+  keyPEM: ""               # → TLS_KEY_BASE64
+  caPEM: ""                # → TLS_CA_BASE64
+  existingSecret: ""       # name of pre-existing Secret (overrides PEM fields)
+
+# ─── Upstream TLS (validating customer observability endpoints) ──────────────
+upstreamTLS:
+  verify: true             # UPSTREAM_TLS_VERIFY
+  caPEM: ""                # → UPSTREAM_TLS_CA_BASE64
+  existingSecret: ""       # name of pre-existing Secret with key ca.crt
+
+# ─── Telemetry (OTLP) ────────────────────────────────────────────────────────
+# Telemetry is the only view Traversal has into a connector running inside your
+# network: tunnel health, request outcomes, and the reason a connector stopped
+# serving traffic all arrive this way.
+#
+# STRONGLY DISCOURAGED: setting this to true stops all export, and Traversal
+# cannot diagnose or assist with issues in a deployment that reports nothing.
+# It also disables the forwarder sidecar below.
+disableTelemetry: false     # → TRAVERSAL_DISABLE_TELEMETRY (only set when true)
+
+otel:
+  serviceName: "traversal-connector"  # OTEL_SERVICE_NAME
+  protocol: "grpc"                    # OTEL_EXPORTER_OTLP_PROTOCOL: grpc | http/protobuf | http/json
+
+  # Endpoints default to Traversal's hosted ingest — grpc to
+  # telemetry.traversal.com:4317, http/* to telemetry.traversal.com/v1/{signal}.
+  # Override all three to route through a collector you operate instead. Each
+  # resolved endpoint must be an https:// URL, or install fails: unless
+  # disableTelemetry is set, a connector that exports nowhere is not a supported
+  # configuration.
+  metricsEndpoint: ""      # OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+  tracesEndpoint: ""       # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+  logsEndpoint: ""         # OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+
+  # ─── In-pod telemetry forwarder (optional) ─────────────────────────────────
+  # When enabled, the connector sends all three signals — metrics, traces, and
+  # logs — as OTLP over the pod loopback to a co-located forwarder sidecar. The
+  # sidecar buffers them in a disk-backed queue and forwards to the otel
+  # endpoints above over the connector's controllerTLS identity. Direct export
+  # (below settings) is used when this is disabled.
+  #
+  # Egress is OTLP/gRPC: the otel.*Endpoint the sidecar forwards to must be a
+  # gRPC OTLP endpoint, which is why an enabled sidecar defaults those endpoints
+  # to the gRPC form regardless of otel.protocol — that setting governs only the
+  # connector→sidecar loopback hop, not this egress. Only the defaults follow the
+  # sidecar's transport, so an endpoint set explicitly here must be host:port
+  # shaped; a path-bearing one is rejected at install.
+  #
+  # The queue is disk-backed on an emptyDir, so buffered telemetry survives a
+  # sidecar process/container restart but is lost on pod eviction or reschedule
+  # (the emptyDir is cleared) — it is not durable across node loss.
+  #
+  # The sidecar also forwards its own metrics and logs over the same egress,
+  # under service.name=traversal-connector-telemetry-sidecar, so a forwarder
+  # that is dropping or failing to export is visible rather than silent.
+  sidecar:
+    enabled: true
+    image:
+      repository: traversalext/alloy
+      tag: "v1.18.0"
+      pullPolicy: IfNotPresent
+    port: 4318                                  # sidecar HTTP OTLP receiver and connector loopback target
+    # A memory limit is required for the sidecar's memory_limiter to bound
+    # against the cgroup rather than total node memory.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+
+# ─── Redaction (optional) ────────────────────────────────────────────────────
+# Set enabled: true and configure exactly one rules source.
+# See https://github.com/InteractionLabs/traversal-connector for TOML syntax.
+#
+# DEPRECATED: redactionRules (plain string) is still accepted for backwards
+# compatibility but will be removed in a future chart version. Migrate to the
+# redaction stanza below.
+redactionRules: ""
+
+redaction:
+  enabled: false
+
+  # Option A: provide TOML rules inline — the chart creates a ConfigMap for you.
+  # Mutually exclusive with existingConfigMap and existingSecret.
+  rulesContent: ""
+  # Example:
+  # rulesContent: |
+  #   version = "1"
+  #   [[rules]]
+  #   name = "ssn"
+  #   type = "regex"
+  #   pattern = '\b\d{3}-\d{2}-(\d{4})\b'
+  #   replacement = "***-**-$1"
+
+  # Option B: reference a ConfigMap you manage externally.
+  # The ConfigMap must contain a key named `redaction-rules.toml`.
+  # Mutually exclusive with rulesContent.
+  existingConfigMap: ""
+
+
+
+# ─── Health probes ───────────────────────────────────────────────────────────
+# Connector exposes /healthz (always 200 once HTTP server is up) and /readyz
+# (200 only when at least one tunnel to the controller is active). Startup
+# probe gives a long grace window for cold-start mTLS handshake; once it
+# passes, liveness + readiness can run aggressively.
+probes:
+  startup:
+    enabled: true
+    failureThreshold: 30   # 30 × 5s = 150s grace before liveness kicks in
+    periodSeconds: 5
+  liveness:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 10
+  readiness:
+    enabled: true
+    initialDelaySeconds: 0
+    periodSeconds: 10
+
+# ─── Pod / scheduling ────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

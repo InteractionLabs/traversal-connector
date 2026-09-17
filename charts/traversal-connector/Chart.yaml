@@ -1,0 +1,6 @@
+apiVersion: v2
+name: traversal-connector-charts
+description: Helm chart for deploying the Traversal Connector inside a customer cluster.
+type: application
+version: 0.0.0-dev
+appVersion: dev

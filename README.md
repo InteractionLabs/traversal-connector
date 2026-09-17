@@ -74,6 +74,43 @@ cd connector-lib && buf format -w
 Generated code lives under [`connector-lib/gen/`](connector-lib/gen/) and is
 checked in.
 
+## Installing with Helm
+
+Each connector release publishes a matching Helm chart and portable SHA-256
+checksum as GitHub Release assets. The chart version omits the leading `v`; its
+`appVersion` and the default connector image tag retain the complete release
+version.
+
+```bash
+VERSION=v0.8.5
+CHART="traversal-connector-charts-${VERSION#v}.tgz"
+DOWNLOAD_PATH="releases/download"
+BASE="https://github.com/InteractionLabs/traversal-connector/${DOWNLOAD_PATH}/${VERSION}"
+
+curl -fLO "${BASE}/${CHART}"
+curl -fLO "${BASE}/${CHART}.sha256"
+
+# Linux:
+sha256sum --check "${CHART}.sha256"
+# macOS alternative:
+# shasum -a 256 --check "${CHART}.sha256"
+
+helm upgrade --install traversal-connector "./${CHART}" \
+  --namespace traversal-connector \
+  --create-namespace \
+  -f customer-values.yaml
+```
+
+`image.tag` is empty in the canonical values and therefore falls back to the
+chart's `appVersion`, keeping the chart and connector image on the same release.
+An explicit `image.tag` override remains supported when a deployment needs to
+pin another image.
+
+Historical chart availability is intentionally incomplete: release assets are
+backfilled only where an authentic version-specific chart exists. Previously
+published Docker Hub OCI chart artifacts remain available as legacy, read-only
+artifacts; new chart distribution uses GitHub Release assets.
+
 ## Verifying a release image
 
 Released images are published as

@@ -1,0 +1,38 @@
+{{/*
+Backwards compatibility: if the deprecated redactionRules string is set and the
+new redaction stanza is not explicitly enabled, treat it as redaction.rulesContent.
+*/}}
+{{- $legacyContent := .Values.redactionRules | default "" }}
+{{- $enabled := or .Values.redaction.enabled (ne $legacyContent "") }}
+{{- if $enabled }}
+{{/*
+Validation: exactly one rules source must be configured.
+Legacy redactionRules counts as rulesContent for this check.
+*/}}
+{{- $hasContent   := or (not (empty .Values.redaction.rulesContent)) (not (empty $legacyContent)) }}
+{{- $hasConfigMap := not (empty .Values.redaction.existingConfigMap) }}
+{{- $hasSecret    := false }}
+{{- $sourceCount  := add (ternary 1 0 $hasContent) (ternary 1 0 $hasConfigMap) }}
+{{- if eq $sourceCount 0 }}
+{{- fail "redaction.enabled is true but no rules source is configured. Set one of: rulesContent or existingConfigMap." }}
+{{- end }}
+{{- if gt $sourceCount 1 }}
+{{- fail "redaction: rulesContent and existingConfigMap are mutually exclusive — set exactly one." }}
+{{- end }}
+{{/*
+Only render a ConfigMap when rulesContent is provided inline.
+For existingConfigMap the operator owns that resource.
+*/}}
+{{- if and $hasContent (not $hasConfigMap) }}
+{{- $content := .Values.redaction.rulesContent | default $legacyContent }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "traversal-connector.fullname" . }}-redaction-rules
+  labels:
+    {{- include "traversal-connector.labels" . | nindent 4 }}
+data:
+  redaction-rules.toml: |
+    {{- $content | nindent 4 }}
+{{- end }}
+{{- end }}

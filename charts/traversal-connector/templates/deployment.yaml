@@ -1,0 +1,367 @@
+{{- $controllerSecret := default (printf "%s-controller-tls" (include "traversal-connector.fullname" .)) .Values.controllerTLS.existingSecret -}}
+{{- $upstreamSecret  := default (printf "%s-upstream-tls"  (include "traversal-connector.fullname" .)) .Values.upstreamTLS.existingSecret -}}
+{{- $hasControllerTLS := or .Values.controllerTLS.existingSecret .Values.controllerTLS.certPEM .Values.controllerTLS.keyPEM .Values.controllerTLS.caPEM -}}
+{{- $hasUpstreamTLS  := or .Values.upstreamTLS.existingSecret  .Values.upstreamTLS.caPEM -}}
+{{- $legacyContent := .Values.redactionRules | default "" -}}
+{{- $redactionEnabled := or .Values.redaction.enabled (ne $legacyContent "") -}}
+{{- $sidecar := .Values.otel.sidecar -}}
+{{- /* Any non-bool — a quoted "false", a --set-string, a null — is truthy to
+       Helm, so an unguarded read would silence telemetry while the values file
+       still reads as having it on. */}}
+{{- if not (kindIs "bool" .Values.disableTelemetry) }}
+{{- fail (printf "disableTelemetry must be a boolean (true or false), got %q." (toString .Values.disableTelemetry)) }}
+{{- end }}
+{{- $telemetryEnabled := not .Values.disableTelemetry -}}
+{{- $sidecarEnabled := include "traversal-connector.sidecarEnabled" . -}}
+{{- $otlp := dict -}}
+{{- if $telemetryEnabled }}
+{{- range $signal := list "metrics" "traces" "logs" }}
+{{- $_ := set $otlp $signal (include "traversal-connector.otlpEndpoint" (dict "root" $ "signal" $signal)) }}
+{{- end }}
+{{- /* Telemetry is the only view Traversal has into a connector inside a
+       customer network. A config that would export nowhere, or in plaintext, is
+       rejected at render rather than found during an incident nobody can see. */}}
+{{- range $key, $endpoint := $otlp }}
+{{- if not (regexMatch "^https://[a-zA-Z0-9._-]+(:[0-9]+)?(/[^[:space:]]*)?$" $endpoint) }}
+{{- fail (printf "otel.%sEndpoint must be an https:// URL (got %q). Telemetry is required; set disableTelemetry: true only if you accept that Traversal cannot support this deployment." $key $endpoint) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $sidecarEgress := "" -}}
+{{- if $sidecarEnabled }}
+{{- /* The sidecar forwards all three signals through a single OTLP exporter to
+       one egress endpoint. Reject a config that sets divergent per-signal
+       endpoints, which the sidecar cannot honor. */}}
+{{- if gt (len (values $otlp | uniq)) 1 }}
+{{- fail "otel.sidecar.enabled requires a single OTLP egress endpoint: otel.tracesEndpoint, otel.metricsEndpoint and otel.logsEndpoint must be identical." }}
+{{- end }}
+{{- $sidecarEgress = $otlp.traces | trimPrefix "https://" }}
+{{- /* The sidecar's exporter is OTLP/gRPC, whose dial target is a host:port. A
+       path-bearing endpoint — the shape otel.protocol http/* asks for — becomes
+       part of the name it tries to resolve, so nothing exports and the failure is
+       invisible by construction. Only the endpoint defaults follow the sidecar's
+       transport; an explicit value has to be given in the right shape. */}}
+{{- if contains "/" $sidecarEgress }}
+{{- fail (printf "otel.sidecar.enabled requires a gRPC OTLP egress endpoint with no path, but the configured endpoint resolves to %q. Set otel.{metrics,traces,logs}Endpoint to an https://host:port URL (the sidecar's egress is gRPC regardless of otel.protocol), or set otel.sidecar.enabled=false to export over HTTP directly." $sidecarEgress) }}
+{{- end }}
+{{- /* The sidecar egresses over the connector's controllerTLS mTLS identity and
+       has no other credentials; without it the exporter falls back to a
+       client-certless TLS handshake that fails at runtime with no render signal. */}}
+{{- if not $hasControllerTLS }}
+{{- fail "otel.sidecar.enabled requires controllerTLS to be configured (controllerTLS.existingSecret, or certPEM/keyPEM/caPEM): the sidecar forwards over the connector's mTLS identity." }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "traversal-connector.fullname" . }}
+  labels:
+    {{- include "traversal-connector.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "traversal-connector.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "traversal-connector.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: connector
+          image: "{{ .Values.image.repository }}:{{ include "traversal-connector.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+          env:
+            - name: ENV_NAME
+              value: {{ required "envName is required" .Values.envName | quote }}
+            - name: TRAVERSAL_CONTROLLER_URL
+              value: {{ required "controllerURL is required" .Values.controllerURL | quote }}
+            - name: TRAVERSAL_CONNECTOR_ID
+              value: {{ required "connectorID is required" .Values.connectorID | quote }}
+            - name: UPSTREAM_TLS_VERIFY
+              value: {{ .Values.upstreamTLS.verify | quote }}
+            {{- with .Values.envLevel }}
+            - name: ENV_LEVEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.proxyURL }}
+            - name: EGRESS_PROXY_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.httpPort }}
+            - name: HTTP_PORT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxTunnelsAllowed }}
+            - name: MAX_TUNNELS_ALLOWED
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxConcurrentRequests }}
+            - name: MAX_CONCURRENT_REQUESTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.reconnectInterval }}
+            - name: RECONNECT_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxBackoffDelay }}
+            - name: MAX_BACKOFF_DELAY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.requestTimeout }}
+            - name: REQUEST_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxRequestBodySizeMB }}
+            - name: MAX_REQUEST_BODY_SIZE_MB
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxResponseBodySizeMB }}
+            - name: MAX_RESPONSE_BODY_SIZE_MB
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.maxDecodedResponseBodySizeMB }}
+            - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not $telemetryEnabled }}
+            - name: TRAVERSAL_DISABLE_TELEMETRY
+              value: "true"
+            {{- else }}
+            {{- with .Values.otel.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $sidecarEnabled }}
+            {{- /* http/json is this connector's only true-HTTP transport; http/protobuf maps to its gRPC exporter.
+                   Per-signal endpoints carry the explicit /v1/{signal} path: the connector forwards the endpoint
+                   path verbatim, and otlploghttp's WithEndpoint resolves a pathless endpoint to "/" (not /v1/logs),
+                   which the sidecar receiver 404s. */}}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "http/json"
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: "http://127.0.0.1:{{ $sidecar.port }}/v1/metrics"
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://127.0.0.1:{{ $sidecar.port }}/v1/traces"
+            - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+              value: "http://127.0.0.1:{{ $sidecar.port }}/v1/logs"
+            {{- else }}
+            {{- with .Values.otel.protocol }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: {{ $otlp.metrics | quote }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ $otlp.traces | quote }}
+            - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+              value: {{ $otlp.logs | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $hasControllerTLS }}
+            - name: TLS_CERT_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: tls.crt
+                  optional: true
+            - name: TLS_KEY_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: tls.key
+                  optional: true
+            - name: TLS_CA_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: ca.crt
+                  optional: true
+            {{- end }}
+            {{- if $hasUpstreamTLS }}
+            - name: UPSTREAM_TLS_CA_BASE64
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $upstreamSecret }}
+                  key: ca.crt
+            {{- end }}
+            {{- if $redactionEnabled }}
+            - name: REDACTION_RULES_FILE
+              value: /etc/traversal/redaction-rules.toml
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ default 8080 .Values.httpPort }}
+              protocol: TCP
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          {{- end }}
+          {{- if $redactionEnabled }}
+          volumeMounts:
+            - name: redaction-rules
+              mountPath: /etc/traversal
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+        {{- if $sidecarEnabled }}
+        - name: telemetry-sidecar
+          image: "{{ $sidecar.image.repository }}:{{ $sidecar.image.tag }}"
+          imagePullPolicy: {{ $sidecar.image.pullPolicy }}
+          args:
+            - run
+            {{- /* File-backed export queue uses the file storage extension, which ships below the default GA stability gate. */}}
+            - --stability.level=public-preview
+            - --storage.path=/var/lib/telemetry-sidecar/data
+            {{- /* Pinned because the self-scrape target in the config depends on it. Loopback keeps the
+                   debug UI, which renders component arguments, off the pod IP where other pods could read it. */}}
+            - --server.http.listen-addr=127.0.0.1:12345
+            {{- /* Alloy otherwise reports its enabled components to grafana.com on a timer. A pod running in a
+                   customer's network egresses only to the endpoints that deployment authorized. */}}
+            - --disable-reporting
+            - /etc/telemetry-sidecar/config.alloy
+          env:
+            {{- /* gRPC OTLP exporter takes a bare host:port; TLS comes from the client cert/CA below, so any URL scheme is stripped. */}}
+            - name: OTLP_EGRESS_ENDPOINT
+              value: {{ $sidecarEgress | quote }}
+            {{- /* With the sidecar enabled, remote egress moves from the connector to Alloy, so the
+                   forward proxy must move with it. Alloy's gRPC exporter honors HTTPS_PROXY; exclude
+                   loopback so the connector's in-pod OTLP is never routed through it. */}}
+            {{- with .Values.proxyURL }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            - name: NO_PROXY
+              value: "127.0.0.1,localhost"
+            {{- end }}
+            {{- /* Source identity stamped onto every forwarded signal, matching the in-cluster collector's resource shape. */}}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.otel.serviceName | quote }}
+            - name: SERVICE_VERSION
+              value: {{ include "traversal-connector.imageTag" . | quote }}
+            {{- /* The forwarder's own version, kept separate from the connector's so its self-telemetry
+                   attributes the forwarder rather than whatever it happens to be co-located with. */}}
+            - name: SIDECAR_VERSION
+              value: {{ $sidecar.image.tag | quote }}
+            - name: ENV_NAME
+              value: {{ required "envName is required" .Values.envName | quote }}
+            - name: CONNECTOR_ID
+              value: {{ required "connectorID is required" .Values.connectorID | quote }}
+            - name: K8S_DEPLOYMENT_NAME
+              value: {{ include "traversal-connector.fullname" . | quote }}
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTLP_TLS_CERT_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: tls.crt
+                  optional: true
+            - name: OTLP_TLS_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: tls.key
+                  optional: true
+            - name: OTLP_TLS_CA_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controllerSecret }}
+                  key: ca.crt
+                  optional: true
+          volumeMounts:
+            - name: telemetry-sidecar-config
+              mountPath: /etc/telemetry-sidecar
+              readOnly: true
+            - name: telemetry-sidecar-data
+              mountPath: /var/lib/telemetry-sidecar
+          resources:
+            {{- toYaml $sidecar.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+        {{- end }}
+      {{- if or $redactionEnabled $sidecarEnabled }}
+      volumes:
+        {{- if $redactionEnabled }}
+        - name: redaction-rules
+          {{- if not (empty .Values.redaction.existingConfigMap) }}
+          configMap:
+            name: {{ .Values.redaction.existingConfigMap }}
+          {{- else }}
+          configMap:
+            name: {{ include "traversal-connector.fullname" . }}-redaction-rules
+          {{- end }}
+        {{- end }}
+        {{- if $sidecarEnabled }}
+        - name: telemetry-sidecar-data
+          emptyDir: {}
+        - name: telemetry-sidecar-config
+          configMap:
+            name: {{ include "traversal-connector.fullname" . }}-telemetry-sidecar
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,4 @@
+envName: ci
+controllerURL: https://controller.example.invalid
+connectorID: ci
+disableTelemetry: true
