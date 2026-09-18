@@ -1,0 +1,22 @@
+# Synthetic values for install/upgrade validation in a disposable cluster.
+# The validation script supplies a throwaway mTLS certificate and key.
+envName: chart-install-validation
+controllerURL: https://controller.example.invalid
+connectorID: chart-install-validation
+disableTelemetry: true
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+# /readyz requires an active controller tunnel. Disable only that probe so a
+# synthetic upgrade can complete while startup/liveness still exercise /healthz.
+probes:
+  readiness:
+    enabled: false

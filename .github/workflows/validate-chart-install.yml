@@ -1,0 +1,97 @@
+name: Validate released chart install
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published GitHub Release version (vX.Y.Z)'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-chart-install-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  HELM_VERSION: v3.18.6
+  HELM_SHA256_AMD64: 3f43c0aa57243852dd542493a0f54f1396c0bc8ec7296bbb2c01e802010819ce
+  HELM_SHA256_ARM64: 5b8e00b6709caab466cbbb0bc29ee09059b8dc9417991dd04b497530e49b1737
+  KIND_SHA256_AMD64: 517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889
+  KIND_SHA256_ARM64: 7ea2de9d2d190022ed4a8a4e3ac0636c8a455e460b9a13ccf19f15d07f4f00eb
+  KUBECTL_VERSION: v1.34.1
+  KUBECTL_SHA256_AMD64: 7721f265e18709862655affba5343e85e1980639395d5754473dafaadcaa69e3
+  KUBECTL_SHA256_ARM64: 420e6110e3ba7ee5a3927b5af868d18df17aae36b720529ffa4e9e945aa95450
+
+jobs:
+  validate:
+    # Released images ship linux/amd64 and linux/arm64; validate both.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pinned cluster tools
+        env:
+          ARCH: ${{ matrix.arch }}
+          HELM_SHA256: ${{ matrix.arch == 'arm64' && env.HELM_SHA256_ARM64 || env.HELM_SHA256_AMD64 }}
+          KIND_SHA256: ${{ matrix.arch == 'arm64' && env.KIND_SHA256_ARM64 || env.KIND_SHA256_AMD64 }}
+          KUBECTL_SHA256: ${{ matrix.arch == 'arm64' && env.KUBECTL_SHA256_ARM64 || env.KUBECTL_SHA256_AMD64 }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz"
+          echo "${HELM_SHA256}  /tmp/helm.tgz" | sha256sum --check
+          tar --extract --gzip --strip-components=1 --directory=/usr/local/bin \
+            --file=/tmp/helm.tgz "linux-${ARCH}/helm"
+
+          curl --fail --location --silent --show-error \
+            --output /usr/local/bin/kind \
+            "https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-${ARCH}"
+          echo "${KIND_SHA256}  /usr/local/bin/kind" | sha256sum --check
+          chmod +x /usr/local/bin/kind
+
+          curl --fail --location --silent --show-error \
+            --output /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum --check
+          chmod +x /usr/local/bin/kubectl
+
+          helm version --short
+          kind version
+          kubectl version --client
+
+      - name: Download and verify GitHub Release chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must match vX.Y.Z, got: $VERSION" >&2
+            exit 1
+          fi
+          chart="traversal-connector-charts-${VERSION#v}.tgz"
+          mkdir -p dist
+          gh release download "$VERSION" --dir dist \
+            --pattern "$chart" --pattern "$chart.sha256"
+          test -f "dist/$chart"
+          test -f "dist/$chart.sha256"
+          (cd dist && sha256sum --check "$chart.sha256")
+
+      - name: Validate install and upgrade
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          scripts/validate-chart-install.sh \
+            "dist/traversal-connector-charts-${VERSION#v}.tgz" \
+            --image-ref "docker.io/traversalext/traversal-connector:${VERSION}"

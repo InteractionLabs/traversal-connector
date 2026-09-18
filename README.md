@@ -129,6 +129,24 @@ Docker Hub OCI coverage may differ from GitHub Release asset coverage; future
 normal releases are mirrored while this transitional compatibility path remains
 in place.
 
+### Validating chart installation locally
+
+With Docker, kind, kubectl, Helm, curl, and OpenSSL installed, validate that a
+downloaded release chart installs and upgrades in a disposable kind cluster:
+
+```bash
+scripts/validate-chart-install.sh \
+  ./traversal-connector-charts-0.8.5.tgz \
+  --image-ref docker.io/traversalext/traversal-connector:v0.8.5
+```
+
+The validator checks `/healthz` rather than Kubernetes readiness. `/readyz`
+requires an active tunnel to a real Traversal controller, which the disposable
+cluster intentionally does not have. The cluster is always deleted on exit.
+
+This validator is transitional: it will be replaced by the future deploy
+system's install-validation flow.
+
 ## Verifying a release image
 
 Released images are published as
