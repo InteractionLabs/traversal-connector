@@ -227,23 +227,27 @@ jobs:
           KUBECTL_SHA256: ${{ matrix.arch == 'arm64' && env.KUBECTL_SHA256_ARM64 || env.KUBECTL_SHA256_AMD64 }}
         run: |
           set -euo pipefail
+          # Download to a scratch dir and `sudo install`: the runner image ships
+          # root-owned tools at these paths, so writing/chmodding them directly
+          # fails with EPERM.
           curl --fail --location --silent --show-error \
             --output /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz"
           echo "${HELM_SHA256}  /tmp/helm.tgz" | sha256sum --check
-          tar --extract --gzip --strip-components=1 --directory=/usr/local/bin \
+          tar --extract --gzip --strip-components=1 --directory=/tmp \
             --file=/tmp/helm.tgz "linux-${ARCH}/helm"
+          sudo install -m 0755 /tmp/helm /usr/local/bin/helm
 
           curl --fail --location --silent --show-error \
-            --output /usr/local/bin/kind \
+            --output /tmp/kind \
             "https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-${ARCH}"
-          echo "${KIND_SHA256}  /usr/local/bin/kind" | sha256sum --check
-          chmod +x /usr/local/bin/kind
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum --check
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
 
           curl --fail --location --silent --show-error \
-            --output /usr/local/bin/kubectl \
+            --output /tmp/kubectl \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
-          echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum --check
-          chmod +x /usr/local/bin/kubectl
+          echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum --check
+          sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
 
       - name: Validate packaged chart install and upgrade
         env:
