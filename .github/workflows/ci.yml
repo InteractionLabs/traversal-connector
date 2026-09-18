@@ -54,6 +54,9 @@ jobs:
       - name: Validate and package chart
         run: just chart-package v0.0.0
 
+      - name: Test OCI chart publisher
+        run: bash scripts/test-publish-chart-oci.sh
+
       - name: Verify packaged metadata and rendering
         run: |
           set -euo pipefail
