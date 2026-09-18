@@ -176,10 +176,10 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | Variable | Default | Description |
 |---|---|---|
 | `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
-| `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
+| `MAX_TUNNELS_ALLOWED` | `2` | Number of long-lived tunnel slots. Each slot maintains at most one gRPC tunnel. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
-| `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
-| `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
+| `RECONNECT_INTERVAL` | `5s` | Positive delay before a tunnel slot retries after the control plane rejects it because tunnel capacity is exhausted. |
+| `MAX_BACKOFF_DELAY` | `60s` | Duration of at least `1s` that caps exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
 | `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |

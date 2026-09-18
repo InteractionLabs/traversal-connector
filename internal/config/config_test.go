@@ -286,6 +286,50 @@ func TestLoad_RequiresConnectorID(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsMaxBackoffDelayBelowInitialDelay(t *testing.T) {
+	for _, value := range []string{"0s", "-1s", "500ms"} {
+		t.Run(value, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("MAX_BACKOFF_DELAY", value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error; expected MAX_BACKOFF_DELAY error")
+			}
+			if !strings.Contains(err.Error(), "MAX_BACKOFF_DELAY must be at least 1s") {
+				t.Fatalf("Load() error = %q, want MAX_BACKOFF_DELAY validation", err)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsNonPositiveReconnectInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("RECONNECT_INTERVAL", value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load() returned nil error; expected RECONNECT_INTERVAL error")
+			}
+			if !strings.Contains(err.Error(), "RECONNECT_INTERVAL must be greater than zero") {
+				t.Fatalf("Load() error = %q, want RECONNECT_INTERVAL validation", err)
+			}
+		})
+	}
+}
+
 func TestLoad_EnvFileMissing(t *testing.T) {
 	clearEnv()
 	defer clearEnv()

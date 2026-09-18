@@ -55,9 +55,6 @@ type ConnectionManager struct {
 	metrics     *connectionMetrics
 	hostname    string
 	tunnelFunc  func(ctx context.Context) error
-
-	backoffMu sync.Mutex
-	backoff   time.Duration
 }
 
 // NewConnectionManager creates a new ConnectionManager with the given configuration.
