@@ -275,6 +275,6 @@ jobs:
             --tag "${IMAGE_REF}:${VERSION}" \
             "${IMAGE_REF}@${DIGEST}"
 
-          gh release edit "$VERSION" --draft=false
+          gh release edit "$VERSION" --draft=false --latest
           published=true
           trap - EXIT
