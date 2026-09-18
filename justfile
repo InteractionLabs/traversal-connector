@@ -58,6 +58,10 @@ chart-lint:
 chart-test:
     bash charts/traversal-connector/ci/test-chart.sh
 
+# Exercise OCI publication without registry or credential access.
+chart-oci-publish-test:
+    bash scripts/test-publish-chart-oci.sh
+
 # Package a release chart and portable checksum. Usage: just chart-package v0.8.5
 chart-package version:
     #!/usr/bin/env bash
