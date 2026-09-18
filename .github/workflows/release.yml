@@ -23,6 +23,7 @@ concurrency:
 env:
   REGISTRY: docker.io
   IMAGE: traversalext/traversal-connector
+  HELM_VERSION: v3.18.6
 
 jobs:
   prepare:
@@ -156,8 +157,6 @@ jobs:
     runs-on: [ubuntu-latest]
     permissions:
       contents: read
-    env:
-      HELM_VERSION: v3.18.6
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -201,6 +200,13 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+
+      - name: Install Helm
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar --extract --gzip --strip-components=1 --directory=/usr/local/bin linux-amd64/helm
+          helm version --short
 
       - name: Download chart workflow artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -265,6 +271,11 @@ jobs:
           test -f "verified-assets/$chart"
           test -f "verified-assets/$checksum"
           (cd verified-assets && sha256sum --check "$checksum")
+
+          # Transitional compatibility mirror. Keep GitHub assets canonical,
+          # but fail while the GitHub Release is still a draft if OCI
+          # publication or verification does not succeed.
+          scripts/publish-chart-oci.sh "verified-assets/$chart"
 
           # Apply the public image tag only after the draft contains verified
           # release assets. The digest was already scanned and signed. GitHub
