@@ -77,9 +77,9 @@ checked in.
 ## Installing with Helm
 
 Each connector release publishes a matching Helm chart and portable SHA-256
-checksum as GitHub Release assets. The chart version omits the leading `v`; its
-`appVersion` and the default connector image tag retain the complete release
-version.
+checksum as GitHub Release assets. These assets are the canonical and preferred
+installation source. The chart version omits the leading `v`; its `appVersion`
+and the default connector image tag retain the complete release version.
 
 ```bash
 VERSION=v0.8.5
@@ -101,15 +101,33 @@ helm upgrade --install traversal-connector "./${CHART}" \
   -f customer-values.yaml
 ```
 
+For temporary compatibility with existing OCI-based installations, new release
+charts are also mirrored to Docker Hub. OCI versions do not include the leading
+`v`:
+
+```bash
+CHART_VERSION=0.8.5
+OCI_CHART="oci://registry-1.docker.io/traversalext/traversal-connector-charts"
+
+# Pull the mirrored archive locally, or install it directly.
+helm pull "$OCI_CHART" --version "$CHART_VERSION"
+helm upgrade --install traversal-connector "$OCI_CHART" \
+  --version "$CHART_VERSION" \
+  --namespace traversal-connector \
+  --create-namespace \
+  -f customer-values.yaml
+```
+
 `image.tag` is empty in the canonical values and therefore falls back to the
 chart's `appVersion`, keeping the chart and connector image on the same release.
 An explicit `image.tag` override remains supported when a deployment needs to
 pin another image.
 
 Historical chart availability is intentionally incomplete: release assets are
-backfilled only where an authentic version-specific chart exists. Previously
-published Docker Hub OCI chart artifacts remain available as legacy, read-only
-artifacts; new chart distribution uses GitHub Release assets.
+backfilled only where an authentic version-specific chart exists. Historical
+Docker Hub OCI coverage may differ from GitHub Release asset coverage; future
+normal releases are mirrored while this transitional compatibility path remains
+in place.
 
 ## Verifying a release image
 
