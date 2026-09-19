@@ -61,6 +61,19 @@ assert_not_contains "$tmp_dir/disabled.yaml" 'OTEL_EXPORTER_OTLP_METRICS_ENDPOIN
 assert_not_contains "$tmp_dir/disabled.yaml" 'name: telemetry-sidecar'
 
 common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false)
+render tls-one "$fixtures/direct-export-values.yaml" \
+  --set-string controllerTLS.certPEM=certificate-one \
+  --set-string controllerTLS.keyPEM=private-key \
+  --set-string podAnnotations.example\\.com/owner=ci
+render tls-two "$fixtures/direct-export-values.yaml" \
+  --set-string controllerTLS.certPEM=certificate-two \
+  --set-string controllerTLS.keyPEM=private-key
+checksum_one=$(grep 'checksum/controller-tls:' "$tmp_dir/tls-one.yaml")
+checksum_two=$(grep 'checksum/controller-tls:' "$tmp_dir/tls-two.yaml")
+[[ "$checksum_one" != "$checksum_two" ]] || fail "controller TLS certificate change did not change the pod-template checksum"
+assert_contains "$tmp_dir/tls-one.yaml" 'example.com/owner: ci'
+assert_not_contains "$tmp_dir/direct.yaml" 'checksum/controller-tls:'
+
 assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
 assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
 assert_render_fails missing-id 'connectorID is required' "${common[@]}" --set connectorID=
