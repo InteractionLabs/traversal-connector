@@ -74,6 +74,44 @@ cd connector-lib && buf format -w
 Generated code lives under [`connector-lib/gen/`](connector-lib/gen/) and is
 checked in.
 
+### Prerelease test images
+
+Build and load the `production` image for the current host platform with a
+default tag of `traversal-connector:prerelease-<short-sha>`:
+
+```bash
+just prerelease-image-local
+```
+
+An explicit push publishes an unsigned, multi-platform test image to an existing
+Amazon ECR repository selected by the caller:
+
+```bash
+just prerelease-image-push --region <aws-region> \
+  --ecr-repository traversal-connector
+```
+
+The AWS account is derived from the active credential chain. Use `--profile` to
+select a configured profile; region resolution follows `--region`, `AWS_REGION`,
+`AWS_DEFAULT_REGION`, then the AWS CLI configuration. The ECR repository must
+already exist. The push refuses to replace an existing tag, so prerelease tags
+are immutable by convention.
+
+These images are not signed, are for testing only, and are not supported
+releases. The command does not create Git tags, GitHub releases, Helm assets,
+stable image tags, or `latest`. Use `--tag prerelease-<name>` to override the
+default tag.
+
+The command prints the immutable image reference after publishing. To test its
+tag with the existing chart, use the printed registry/repository as the image
+repository:
+
+```bash
+helm upgrade --install traversal-connector <chart> \
+  --set image.repository=<printed-registry/repository> \
+  --set image.tag=prerelease-<short-sha>
+```
+
 ## Installing with Helm
 
 Each connector release publishes a matching Helm chart and portable SHA-256

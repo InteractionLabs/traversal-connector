@@ -50,6 +50,18 @@ dependency-policy-test:
     python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_*.py'
     just dependency-policy-check
 
+# Build and load an image for the current host platform.
+prerelease-image-local *args:
+    scripts/build-prerelease-image.sh local {{args}}
+
+# Build and push a multi-platform unsigned prerelease image to Amazon ECR.
+prerelease-image-push *args:
+    scripts/build-prerelease-image.sh push {{args}}
+
+# Test prerelease image safeguards without building or pushing an image.
+prerelease-image-test:
+    scripts/test-build-prerelease-image.sh
+
 # Lint the canonical Helm chart with a valid direct-export configuration.
 chart-lint:
     helm lint charts/traversal-connector -f charts/traversal-connector/ci/direct-export-values.yaml
