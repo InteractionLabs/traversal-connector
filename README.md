@@ -267,7 +267,7 @@ The connector verifies upstream TLS certificates by default. Tune via:
 | Variable | Default | Description |
 |---|---|---|
 | `UPSTREAM_TLS_VERIFY` | `true` | Verify TLS certificates when calling upstream HTTPS services. Set to `false` to accept self-signed. |
-| `UPSTREAM_TLS_CA_BASE64` | (none) | CA certificate (raw PEM or base64-encoded) for validating upstream certificates. When set, only certificates signed by this CA are accepted (effectively certificate pinning). |
+| `UPSTREAM_TLS_CA_BASE64` | (none) | CA certificate (raw PEM or base64-encoded) for validating upstream certificates. When set, this CA is added to the connector container's system trust store. The connector does not inherit trust from the Kubernetes node. |
 
 Examples:
 
@@ -278,7 +278,7 @@ UPSTREAM_TLS_VERIFY=true
 # Accept self-signed (no verification).
 UPSTREAM_TLS_VERIFY=false
 
-# Pin to an internal CA.
+# Add an internal CA alongside the container's system CAs.
 UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 ```

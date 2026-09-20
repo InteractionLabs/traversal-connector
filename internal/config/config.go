@@ -138,8 +138,8 @@ type Config struct {
 	UpstreamTLSVerify bool
 	// UpstreamTLSCA is the optional CA certificate PEM content for validating
 	// upstream observability platform certificates. Read from UPSTREAM_TLS_CA_BASE64;
-	// may be provided as raw PEM or base64-encoded PEM.
-	// When set with UpstreamTLSVerify=true, only certificates signed by this CA are accepted.
+	// may be provided as raw PEM or base64-encoded PEM. Additional roots are
+	// appended to the system trust store.
 	UpstreamTLSCA *string
 	// RedactionRulesFile is the optional path to a TOML file containing redaction
 	// rules applied to all upstream response bodies before they leave the customer
