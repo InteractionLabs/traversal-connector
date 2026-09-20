@@ -70,9 +70,9 @@ chart-lint:
 chart-test:
     bash charts/traversal-connector/ci/test-chart.sh
 
-# Black-box the released v0.8.4 chart/image against a private-CA HTTPS upstream.
-e2e-upstream-tls:
-    bash tests/e2e/upstream-tls/run.sh
+# Black-box an explicitly tagged or digest-pinned image using the released chart.
+e2e-upstream-tls *args:
+    bash tests/e2e/upstream-tls/run.sh {{args}}
 
 # Package a release chart and portable checksum. Usage: just chart-package v0.8.5
 chart-package version:

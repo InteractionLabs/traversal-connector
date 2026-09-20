@@ -40,40 +40,64 @@ func (c *controller) Tunnel(
 	}
 	c.mu.Unlock()
 
-	if err := stream.Send(&pb.ControllerMessage{
-		RequestId: requestID,
-		Message: &pb.ControllerMessage_HttpRequest{HttpRequest: &pb.HttpRequest{
-			Method: http.MethodGet,
-			Url:    "https://upstream-tls:8443/probe",
-		}},
-	}); err != nil {
-		return err
+	requests := []struct {
+		id  string
+		url string
+	}{
+		{id: requestID + "-custom", url: "https://upstream-tls:8443/probe"},
+	}
+	if os.Getenv("EXPECT") == "custom-and-system-success" {
+		requests = append(requests, struct {
+			id  string
+			url string
+		}{id: requestID + "-system", url: "https://system-upstream-tls:8444/probe"})
 	}
 
-	for {
-		message, err := stream.Receive()
+	for _, request := range requests {
+		if err := stream.Send(&pb.ControllerMessage{
+			RequestId: request.id,
+			Message: &pb.ControllerMessage_HttpRequest{HttpRequest: &pb.HttpRequest{
+				Method: http.MethodGet,
+				Url:    request.url,
+			}},
+		}); err != nil {
+			return err
+		}
+
+		message, err := receiveResult(stream, request.id)
 		if err != nil {
 			return err
 		}
-		if message.GetRequestId() != requestID {
-			continue
-		}
-
 		if err := validateResult(message); err != nil {
 			log.Printf("CASE_FAIL: %s: %v", caseToken, err)
 			return connect.NewError(connect.CodeInternal, err)
 		}
-		c.mu.Lock()
-		c.complete = true
-		c.mu.Unlock()
-		log.Printf("CASE_PASS: %s: %s", caseToken, os.Getenv("EXPECT"))
-		return nil
+	}
+	c.mu.Lock()
+	c.complete = true
+	c.mu.Unlock()
+	log.Printf("CASE_PASS: %s: %s", caseToken, os.Getenv("EXPECT"))
+	return nil
+}
+
+func receiveResult(
+	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
+	requestID string,
+) (*pb.ConnectorMessage, error) {
+	for {
+		message, err := stream.Receive()
+		if err != nil {
+			return nil, err
+		}
+		if message.GetRequestId() == requestID {
+			return message, nil
+		}
 	}
 }
 
 func validateResult(message *pb.ConnectorMessage) error {
 	switch os.Getenv("EXPECT") {
-	case "success":
+	case "success", "custom-and-system-success":
 		response := message.GetHttpResponse()
 		if response == nil {
 			return fmt.Errorf("wanted HTTP response, got %T", message.GetMessage())
@@ -100,31 +124,39 @@ func validateResult(message *pb.ConnectorMessage) error {
 }
 
 func main() {
-	cert, err := tls.LoadX509KeyPair("/certs/tls.crt", "/certs/tls.key")
+	customCert, err := tls.LoadX509KeyPair("/certs/custom/tls.crt", "/certs/custom/tls.key")
 	if err != nil {
-		log.Fatalf("load shim certificate: %v", err)
+		log.Fatalf("load custom-root shim certificate: %v", err)
+	}
+	systemCert, err := tls.LoadX509KeyPair("/certs/system/tls.crt", "/certs/system/tls.key")
+	if err != nil {
+		log.Fatalf("load system-root shim certificate: %v", err)
 	}
 
-	shim := &http.Server{
-		Addr:              ":8443",
-		ReadHeaderTimeout: 5 * time.Second,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		},
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/probe" {
-				http.NotFound(w, r)
-				return
-			}
-			_, _ = w.Write([]byte("shim-ok\n"))
-		}),
-	}
-	go func() {
-		if err := shim.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("serve HTTPS shim: %v", err)
+	startShim := func(address string, cert tls.Certificate) {
+		shim := &http.Server{
+			Addr:              address,
+			ReadHeaderTimeout: 5 * time.Second,
+			TLSConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			},
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/probe" {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte("shim-ok\n"))
+			}),
 		}
-	}()
+		go func() {
+			if err := shim.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("serve HTTPS shim on %s: %v", address, err)
+			}
+		}()
+	}
+	startShim(":8443", customCert)
+	startShim(":8444", systemCert)
 
 	path, handler := connectorconnect.NewConnectorServiceHandler(&controller{})
 	mux := http.NewServeMux()
