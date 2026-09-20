@@ -48,6 +48,17 @@ assert_contains "$tmp_dir/direct.yaml" 'image: "traversalext/traversal-connector
 render override "$fixtures/direct-export-values.yaml" --set-string image.tag=v9.8.7
 assert_contains "$tmp_dir/override.yaml" 'image: "traversalext/traversal-connector:v9.8.7"'
 
+render upstream-inline "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.caPEM=synthetic-upstream-ca
+assert_contains "$tmp_dir/upstream-inline.yaml" $'  name: upstream-inline-traversal-connector-upstream-tls\n'
+assert_contains "$tmp_dir/upstream-inline.yaml" '  ca.crt: c3ludGhldGljLXVwc3RyZWFtLWNh'
+assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: UPSTREAM_TLS_VERIFY\n              value: "true"'
+assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: UPSTREAM_TLS_CA_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: upstream-inline-traversal-connector-upstream-tls\n                  key: ca.crt'
+
+render upstream-existing "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.existingSecret=supplied-upstream-ca --set upstreamTLS.verify=false
+assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_VERIFY\n              value: "false"'
+assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_CA_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: supplied-upstream-ca\n                  key: ca.crt'
+assert_not_contains "$tmp_dir/upstream-existing.yaml" 'name: upstream-existing-traversal-connector-upstream-tls'
+
 render sidecar "$fixtures/sidecar-values.yaml"
 assert_contains "$tmp_dir/sidecar.yaml" 'name: telemetry-sidecar'
 assert_contains "$tmp_dir/sidecar.yaml" 'name: sidecar-traversal-connector-telemetry-sidecar'
