@@ -42,6 +42,8 @@ const (
 	headerRedacted = "X-Traversal-Redacted"
 )
 
+var systemCertPool = x509.SystemCertPool
+
 // Reasons a response was dropped rather than forwarded. The set is closed so the
 // refusal counter stays cheap to alert on.
 const (
@@ -83,9 +85,14 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 		InsecureSkipVerify: !cfg.UpstreamTLSVerify, //nolint:gosec
 	}
 
-	// If a custom CA is provided, use it for validating upstream certificates
 	if cfg.UpstreamTLSCA != nil && *cfg.UpstreamTLSCA != "" {
-		caCertPool := x509.NewCertPool()
+		caCertPool, err := systemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to load system certificate pool for upstream TLS: %w",
+				err,
+			)
+		}
 		if !caCertPool.AppendCertsFromPEM([]byte(*cfg.UpstreamTLSCA)) {
 			return nil, errors.New("failed to parse upstream CA certificate")
 		}
