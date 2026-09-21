@@ -69,9 +69,14 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations (and (not .Values.controllerTLS.existingSecret) $hasControllerTLS) }}
       annotations:
+        {{- if and (not .Values.controllerTLS.existingSecret) $hasControllerTLS }}
+        checksum/controller-tls: {{ printf "%s\n---KEY---\n%s\n---CA---\n%s" .Values.controllerTLS.certPEM .Values.controllerTLS.keyPEM .Values.controllerTLS.caPEM | sha256sum | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
