@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"strings"
@@ -692,9 +693,6 @@ func TestDecodeCertificate(t *testing.T) {
 }
 
 func TestBuildClientTLSConfig(t *testing.T) {
-	certPEM, keyPEM := generateTestKeyPair(t)
-	caPEM, _ := generateTestKeyPair(t)
-
 	t.Run("nil when no client cert/key", func(t *testing.T) {
 		got, err := BuildClientTLSConfig(&Config{})
 		if err != nil {
@@ -715,30 +713,138 @@ func TestBuildClientTLSConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("CA populates RootCAs", func(t *testing.T) {
-		withCA, err := BuildClientTLSConfig(&Config{
-			TLSCert: ptrTo(certPEM),
-			TLSKey:  ptrTo(keyPEM),
-			TLSCA:   ptrTo(caPEM),
-		})
-		if err != nil {
-			t.Fatalf("BuildClientTLSConfig() error: %v", err)
-		}
-		if withCA.RootCAs == nil {
-			t.Error("RootCAs = nil, want populated pool from TLSCA")
-		}
+}
 
-		withoutCA, err := BuildClientTLSConfig(&Config{
-			TLSCert: ptrTo(certPEM),
-			TLSKey:  ptrTo(keyPEM),
+func TestBuildClientTLSConfigUsesDefaultSystemRootsWithoutCustomCA(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	originalSystemCertPool := systemCertPool
+	systemCertPool = func() (*x509.CertPool, error) {
+		t.Fatal("systemCertPool must not be called without a custom controller CA")
+		return nil, nil
+	}
+	t.Cleanup(func() { systemCertPool = originalSystemCertPool })
+
+	for _, tc := range []struct {
+		name  string
+		tlsCA *string
+	}{
+		{name: "nil", tlsCA: nil},
+		{name: "empty", tlsCA: ptrTo("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tlsConfig, err := BuildClientTLSConfig(&Config{
+				TLSCert: ptrTo(certPEM),
+				TLSKey:  ptrTo(keyPEM),
+				TLSCA:   tc.tlsCA,
+			})
+			if err != nil {
+				t.Fatalf("BuildClientTLSConfig() failed: %v", err)
+			}
+			if tlsConfig.RootCAs != nil {
+				t.Error("expected nil RootCAs so TLS uses the default system trust store")
+			}
 		})
-		if err != nil {
-			t.Fatalf("BuildClientTLSConfig() error: %v", err)
-		}
-		if withoutCA.RootCAs != nil {
-			t.Error("RootCAs should be nil when TLSCA is unset (system roots)")
-		}
+	}
+}
+
+func TestBuildClientTLSConfigExtendsSystemRootsWithCustomCA(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	systemRoot, _ := newTestRootCA(t, "fake system root", 1)
+	customRoot, customPEM := newTestRootCA(t, "custom root", 2)
+	systemRoots := x509.NewCertPool()
+	systemRoots.AddCert(systemRoot)
+
+	originalSystemCertPool := systemCertPool
+	systemCertPool = func() (*x509.CertPool, error) { return systemRoots, nil }
+	t.Cleanup(func() { systemCertPool = originalSystemCertPool })
+
+	customCA := string(customPEM)
+	tlsConfig, err := BuildClientTLSConfig(&Config{
+		TLSCert: ptrTo(certPEM),
+		TLSKey:  ptrTo(keyPEM),
+		TLSCA:   &customCA,
 	})
+	if err != nil {
+		t.Fatalf("BuildClientTLSConfig() failed: %v", err)
+	}
+
+	assertCertificateTrusted(t, systemRoot, tlsConfig.RootCAs)
+	assertCertificateTrusted(t, customRoot, tlsConfig.RootCAs)
+}
+
+func TestBuildClientTLSConfigRejectsInvalidCustomCA(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	originalSystemCertPool := systemCertPool
+	systemCertPool = func() (*x509.CertPool, error) { return x509.NewCertPool(), nil }
+	t.Cleanup(func() { systemCertPool = originalSystemCertPool })
+
+	invalidCA := "not a PEM certificate"
+	_, err := BuildClientTLSConfig(&Config{
+		TLSCert: ptrTo(certPEM),
+		TLSKey:  ptrTo(keyPEM),
+		TLSCA:   &invalidCA,
+	})
+	if err == nil || err.Error() != "failed to parse controller CA certificate" {
+		t.Fatalf("expected invalid custom CA error, got %v", err)
+	}
+}
+
+func TestBuildClientTLSConfigReturnsSystemCertPoolError(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	wantErr := errors.New("system trust store unavailable")
+	originalSystemCertPool := systemCertPool
+	systemCertPool = func() (*x509.CertPool, error) { return nil, wantErr }
+	t.Cleanup(func() { systemCertPool = originalSystemCertPool })
+
+	_, customPEM := newTestRootCA(t, "custom root", 3)
+	customCA := string(customPEM)
+	_, err := BuildClientTLSConfig(&Config{
+		TLSCert: ptrTo(certPEM),
+		TLSKey:  ptrTo(keyPEM),
+		TLSCA:   &customCA,
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected system certificate pool error, got %v", err)
+	}
+	if got, want := err.Error(), "failed to load system certificate pool for controller TLS: system trust store unavailable"; got != want {
+		t.Fatalf("error mismatch: got %q, want %q", got, want)
+	}
+}
+
+func newTestRootCA(t *testing.T, commonName string, serial int64) (*x509.Certificate, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test CA key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(serial),
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             time.Unix(0, 0),
+		NotAfter:              time.Unix(1<<31, 0),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create test CA: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse test CA: %v", err)
+	}
+	return cert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func assertCertificateTrusted(t *testing.T, cert *x509.Certificate, roots *x509.CertPool) {
+	t.Helper()
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		t.Errorf("expected %q to be trusted: %v", cert.Subject.CommonName, err)
+	}
 }
 
 func clearEnv() {

@@ -39,6 +39,8 @@ const (
 	defaultRedactionReloadInterval = 10 * time.Second
 )
 
+var systemCertPool = x509.SystemCertPool
+
 // Config holds all configuration for the Traversal Connector service.
 type Config struct {
 	// HTTPPort is the HTTP server port for health/readiness endpoints.
@@ -94,9 +96,10 @@ type Config struct {
 	// for mTLS to the Traversal control plane. Read from TLS_KEY_BASE64;
 	// may be provided as raw PEM or base64-encoded PEM.
 	TLSKey *string
-	// TLSCA is the optional CA certificate PEM content for server
-	// certificate verification. Read from TLS_CA_BASE64;
-	// may be provided as raw PEM or base64-encoded PEM.
+	// TLSCA is the optional CA certificate PEM content for server certificate
+	// verification. Read from TLS_CA_BASE64; may be provided as raw PEM or
+	// base64-encoded PEM. Additional roots are appended to the connector
+	// container's system trust store.
 	TLSCA *string
 	// ConnectorID is the identifier stamped on every gRPC request to the
 	// Traversal control plane via the X-Traversal-Connector-ID header, letting
@@ -448,13 +451,18 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 		Certificates: []tls.Certificate{cert},
 	}
 
-	if cfg.TLSCA != nil {
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)); ok {
-			tlsConfig.RootCAs = caCertPool
-		} else {
-			slog.Error("failed to parse CA certificate, using system CA bundle")
+	if cfg.TLSCA != nil && *cfg.TLSCA != "" {
+		caCertPool, err := systemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to load system certificate pool for controller TLS: %w",
+				err,
+			)
 		}
+		if !caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)) {
+			return nil, errors.New("failed to parse controller CA certificate")
+		}
+		tlsConfig.RootCAs = caCertPool
 	}
 
 	return tlsConfig, nil
