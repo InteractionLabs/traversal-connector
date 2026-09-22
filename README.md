@@ -114,6 +114,10 @@ helm upgrade --install traversal-connector <chart> \
 
 ## Installing with Helm
 
+Docker Hub is the canonical public image distribution. Before publishing each
+GitHub Release, the workflow also copies the validated OCI index and its existing
+signatures, attestations, and SBOMs to an internal Amazon ECR repository.
+
 Each connector release publishes a matching Helm chart and portable SHA-256
 checksum as GitHub Release assets. These assets are the canonical and preferred
 installation source. The chart version omits the leading `v`; its `appVersion`
