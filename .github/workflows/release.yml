@@ -28,6 +28,7 @@ env:
   HELM_SHA256_ARM64: 5b8e00b6709caab466cbbb0bc29ee09059b8dc9417991dd04b497530e49b1737
   KIND_SHA256_AMD64: 517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889
   KIND_SHA256_ARM64: 7ea2de9d2d190022ed4a8a4e3ac0636c8a455e460b9a13ccf19f15d07f4f00eb
+  KIND_NODE_IMAGE: kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a
   KUBECTL_VERSION: v1.34.1
   KUBECTL_SHA256_AMD64: 7721f265e18709862655affba5343e85e1980639395d5754473dafaadcaa69e3
   KUBECTL_SHA256_ARM64: 420e6110e3ba7ee5a3927b5af868d18df17aae36b720529ffa4e9e945aa95450
@@ -213,6 +214,9 @@ jobs:
         with:
           name: release-chart
           path: dist
+
+      - name: Pull pinned kind node image before scoped Docker Hub login
+        run: docker pull "$KIND_NODE_IMAGE"
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
