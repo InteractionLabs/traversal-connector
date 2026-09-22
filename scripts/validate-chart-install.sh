@@ -92,7 +92,11 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout "$tmp_dir/tls.key" -out "$tmp_dir/tls.crt" >/dev/null 2>&1
 
 echo "Creating disposable kind cluster $cluster"
-kind create cluster --name "$cluster" --wait 90s
+if [[ -n "${KIND_NODE_IMAGE:-}" ]]; then
+  kind create cluster --name "$cluster" --image "$KIND_NODE_IMAGE" --wait 90s
+else
+  kind create cluster --name "$cluster" --wait 90s
+fi
 
 image_args=()
 expected_image=""
