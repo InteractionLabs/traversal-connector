@@ -227,10 +227,13 @@ data:
     otelcol.exporter.otlp "telemetry" {
       client {
         endpoint = sys.env("OTLP_EGRESS_ENDPOINT")
+        authority = sys.env("OTLP_EGRESS_AUTHORITY")
         tls {
           cert_pem = sys.env("OTLP_TLS_CERT_PEM")
           key_pem  = sys.env("OTLP_TLS_KEY_PEM")
           ca_pem   = sys.env("OTLP_TLS_CA_PEM")
+          server_name = sys.env("OTLP_EGRESS_SERVER_NAME")
+          include_system_ca_certs_pool = true
         }
       }
       sending_queue {
