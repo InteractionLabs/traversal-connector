@@ -74,7 +74,7 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 	cm := &ConnectionManager{
 		config: &config.Config{
 			MaxTunnelsAllowed: 1,
-			// Long interval so only reconnectCh — not the ticker — triggers reconnect.
+			// Long interval so the backoff, not a clean-close wait, paces the retry.
 			ReconnectInterval: time.Hour,
 		},
 		connections: make([]*StreamConnection, 0),
@@ -106,6 +106,56 @@ func TestRun_ReconnectsOnDrop(t *testing.T) {
 		// Reconnect happened after backoff delay.
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for reconnect after tunnel drop")
+	}
+}
+
+// Regression test for the reconnect race. The old reconciler counted only
+// established tunnels, so slots still dialing or waiting in backoff were
+// invisible and each tick launched duplicate workers for them. Here no tunnel
+// ever registers a connection, so a reconciler would keep topping up; fixed
+// slots must dial exactly MaxTunnelsAllowed times.
+func TestRun_DoesNotExceedDesiredTunnelsWhileConnecting(t *testing.T) {
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatalf("initConnectionMetrics: %v", err)
+	}
+
+	const desired = 3
+	cm := &ConnectionManager{
+		config: &config.Config{
+			MaxTunnelsAllowed: desired,
+			// Short enough that a reconciler would have ticked many times
+			// during the wait below.
+			ReconnectInterval: 5 * time.Millisecond,
+		},
+		connections: make([]*StreamConnection, 0),
+		metrics:     metrics,
+	}
+
+	var calls atomic.Int32
+	cm.tunnelFunc = func(ctx context.Context) error {
+		calls.Add(1)
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = cm.Run(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != desired {
+		t.Errorf("tunnel dial attempts = %d, want %d", got, desired)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("connection manager did not stop")
 	}
 }
 
