@@ -152,7 +152,7 @@ func newTransport(cfg *config.Config) (http.RoundTripper, error) {
 					"cert will be ignored",
 			)
 		}
-		return newH2CTransport(), nil
+		return newH2CTransport(cfg.TraversalControllerConnectTo), nil
 	}
 
 	slog.Info("transport selected",
@@ -173,6 +173,13 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 			"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
 		)
 	}
+	controllerURL, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil || controllerURL.Hostname() == "" {
+		return nil, errors.New("https:// controller URL requires a hostname")
+	}
+	// Pin verification to the logical URL. A routing override must never change
+	// SNI or the certificate identity being verified.
+	tlsConfig.ServerName = controllerURL.Hostname()
 	var egressProxyURL *url.URL
 	if cfg.EgressProxyURL != nil {
 		var perr error
@@ -189,6 +196,10 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
+	}
+	if cfg.TraversalControllerConnectTo != "" {
+		transport.Proxy = nil
+		transport.DialContext = fixedTargetDialer(cfg.TraversalControllerConnectTo)
 	}
 	if egressProxyURL != nil {
 		transport.Proxy = http.ProxyURL(egressProxyURL)
@@ -208,8 +219,8 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 
 // newH2CTransport creates an HTTP/2 cleartext transport for direct connections
 // without a proxy. Used for local development.
-func newH2CTransport() *http2.Transport {
-	return &http2.Transport{
+func newH2CTransport(connectTo string) *http2.Transport {
+	transport := &http2.Transport{
 		AllowHTTP:       true,
 		ReadIdleTimeout: h2ReadIdleTimeout,
 		PingTimeout:     h2PingTimeout,
@@ -220,6 +231,20 @@ func newH2CTransport() *http2.Transport {
 		) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
+	}
+	if connectTo != "" {
+		transport.DialTLSContext = func(
+			ctx context.Context, network, _ string, _ *tls.Config,
+		) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, connectTo)
+		}
+	}
+	return transport
+}
+
+func fixedTargetDialer(address string) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
 }
 
