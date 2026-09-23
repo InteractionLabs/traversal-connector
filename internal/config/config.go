@@ -48,6 +48,11 @@ type Config struct {
 	// TraversalControllerURL is the ConnectRPC URL of the Traversal control plane
 	// to connect to. Required.
 	TraversalControllerURL string
+	// TraversalControllerConnectTo is a curl --connect-to-style override that
+	// changes only the TCP socket destination for controller connections. The
+	// logical URL remains the source of the scheme, HTTP authority, path, TLS SNI,
+	// and certificate verification identity.
+	TraversalControllerConnectTo string
 	// EnvName is the customer's environment name.
 	EnvName string
 	// EnvLevel is the deployment level (production or development).
@@ -124,6 +129,10 @@ type Config struct {
 	// OTLPProtocol selects the OTLP exporter transport.
 	// "grpc" or "http/protobuf" → gRPC; "http/json" or "" → HTTP.
 	OTLPProtocol string
+	// OTLPConnectTo is a curl --connect-to-style override that changes only the
+	// TCP socket destination used by every direct OTLP exporter. Logical endpoints
+	// retain their scheme, authority, path, TLS SNI, and certificate identity.
+	OTLPConnectTo string
 	// DisableTelemetry opts the deployment out of all telemetry export. Read
 	// from TRAVERSAL_DISABLE_TELEMETRY, false by default.
 	//
@@ -192,10 +201,38 @@ func Load() (Config, error) {
 	trimmedConnectorID := strings.Trim(*connectorID, `"'`)
 	connectorID = &trimmedConnectorID
 
+	controllerConnectTo := env.GetEnvString("TRAVERSAL_CONTROLLER_CONNECT_TO", "")
+	otlpConnectTo := env.GetEnvString("OTEL_EXPORTER_OTLP_CONNECT_TO", "")
+	disableTelemetry := env.GetEnvBool("TRAVERSAL_DISABLE_TELEMETRY", false)
+	if disableTelemetry {
+		otlpConnectTo = ""
+	}
+	proxyRaw := env.GetEnvString("EGRESS_PROXY_URL", "")
+	if proxyRaw != "" && (controllerConnectTo != "" || otlpConnectTo != "") {
+		return Config{}, errors.New(
+			"EGRESS_PROXY_URL cannot be combined with " +
+				"TRAVERSAL_CONTROLLER_CONNECT_TO or OTEL_EXPORTER_OTLP_CONNECT_TO",
+		)
+	}
+
+	if err := validateConnectTo(
+		"TRAVERSAL_CONTROLLER_CONNECT_TO",
+		controllerConnectTo,
+	); err != nil {
+		return Config{}, err
+	}
+	if err := validateConnectTo(
+		"OTEL_EXPORTER_OTLP_CONNECT_TO",
+		otlpConnectTo,
+	); err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
-		HTTPPort:               env.GetEnvString("HTTP_PORT", defaultHTTPPort),
-		TraversalControllerURL: *traversalControllerURL,
-		EnvName:                *envName,
+		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
+		TraversalControllerURL:       *traversalControllerURL,
+		TraversalControllerConnectTo: controllerConnectTo,
+		EnvName:                      *envName,
 		EnvLevel: env.EnvLevel(
 			env.GetEnvString("ENV_LEVEL", string(env.EnvLevelDevelopment)),
 		),
@@ -233,7 +270,8 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
-		DisableTelemetry: env.GetEnvBool("TRAVERSAL_DISABLE_TELEMETRY", false),
+		OTLPConnectTo:    otlpConnectTo,
+		DisableTelemetry: disableTelemetry,
 		MaxConcurrentRequests: env.GetEnvInt(
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
@@ -275,6 +313,7 @@ func applyTelemetryPolicy(cfg *Config) error {
 		cfg.OTLPMetricsEndpoint = ""
 		cfg.OTLPTracesEndpoint = ""
 		cfg.OTLPLogsEndpoint = ""
+		cfg.OTLPConnectTo = ""
 		return nil
 	}
 
@@ -292,6 +331,36 @@ func applyTelemetryPolicy(cfg *Config) error {
 		if err := endpoint.validate(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateConnectTo validates a routing-only host:port without ever echoing
+// its value. This keeps malformed credential-bearing input out of startup logs.
+func validateConnectTo(envVar, address string) error {
+	if address == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid %s: expected host:port", envVar)
+	}
+	if host == "" || strings.TrimSpace(host) != host || port == "" ||
+		strings.TrimSpace(port) != port {
+		return fmt.Errorf(
+			"invalid %s: host and port must be non-empty and contain no surrounding whitespace",
+			envVar,
+		)
+	}
+	if strings.ContainsAny(host, "/?#@") || strings.Contains(host, "://") {
+		return fmt.Errorf(
+			"invalid %s: expected host:port without scheme, path, query, fragment, or credentials",
+			envVar,
+		)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > maxTCPPort {
+		return fmt.Errorf("invalid %s: port must be a number from 1 to %d", envVar, maxTCPPort)
 	}
 	return nil
 }
