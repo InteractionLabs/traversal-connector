@@ -58,6 +58,7 @@ func main() {
 			cfg.EnvName,
 			otlpTLS,
 			otlpEgressProxyURL,
+			cfg.OTLPConnectTo,
 		)
 		if logErr != nil {
 			slog.Error("failed to initialize OTLP log export",
@@ -107,6 +108,7 @@ func main() {
 		cfg.EnvName,
 		otlpTLS,
 		otlpEgressProxyURL,
+		cfg.OTLPConnectTo,
 	)
 	if err != nil {
 		slog.Error("failed to initialize metrics", "err", err)
@@ -140,6 +142,7 @@ func main() {
 		cfg.EnvName,
 		otlpTLS,
 		otlpEgressProxyURL,
+		cfg.OTLPConnectTo,
 	)
 	if err != nil {
 		slog.Error("failed to initialize tracing", "err", err)
@@ -186,7 +189,11 @@ func main() {
 	}
 
 	slog.InfoContext(ctx, "traversal connector service starting",
-		"traversal_controller_url", cfg.TraversalControllerURL,
+		"controller_logical_url", cfg.TraversalControllerURL,
+		"controller_logical_authority", logicalAuthority(cfg.TraversalControllerURL),
+		"controller_effective_address", effectiveAddress(
+			cfg.TraversalControllerConnectTo, cfg.TraversalControllerURL,
+		),
 		"max_tunnels", cfg.MaxTunnelsAllowed,
 		"env", cfg.EnvName)
 
@@ -226,6 +233,21 @@ func main() {
 	}
 
 	slog.InfoContext(ctx, "traversal connector service shutting down")
+}
+
+func effectiveAddress(connectTo, logicalURL string) string {
+	if connectTo != "" {
+		return connectTo
+	}
+	return logicalAuthority(logicalURL)
+}
+
+func logicalAuthority(logicalURL string) string {
+	parsed, err := url.Parse(logicalURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 // parseOTLPEgressProxyURL parses cfg.EgressProxyURL for use by the OTLP

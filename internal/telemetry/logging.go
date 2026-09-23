@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -38,6 +37,7 @@ func InitLogging(
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
+	connectTo string,
 ) (*slog.Logger, func(context.Context) error, error) {
 	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: true,
@@ -49,7 +49,7 @@ func InitLogging(
 		return slog.New(jsonHandler), nil, nil
 	}
 
-	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL, connectTo)
 	slog.InfoContext(ctx, "initializing OTLP log export",
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
@@ -127,12 +127,8 @@ func newGRPCLogExporter(
 	} else {
 		opts = append(opts, otlploggrpc.WithInsecure())
 	}
-	if t.UseProxy() {
-		opts = append(opts,
-			otlploggrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
-			),
-		)
+	for _, dialOption := range t.grpcDialOptions() {
+		opts = append(opts, otlploggrpc.WithDialOption(dialOption))
 	}
 
 	return otlploggrpc.New(ctx, opts...)
@@ -159,6 +155,9 @@ func newHTTPLogExporter(
 		opts = append(opts,
 			otlploghttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
 		)
+	}
+	if client := t.overrideHTTPClient(); client != nil {
+		opts = append(opts, otlploghttp.WithHTTPClient(client))
 	}
 
 	return otlploghttp.New(ctx, opts...)
