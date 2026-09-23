@@ -36,6 +36,10 @@ case "$1 $2" in
       "${FAKE_ARN:-arn:aws:iam::000000000000:user/test-user}"
     ;;
   "ecr describe-images")
+    if [[ " $* " == *" --query imageDetails[0].imageDigest "* ]]; then
+      printf '%s\n' "${FAKE_ECR_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+      exit 0
+    fi
     case "${FAKE_DESCRIBE_RESULT:-missing}" in
       exists) exit 0 ;;
       missing) printf 'An error occurred (ImageNotFoundException): image absent\n' >&2; exit 254 ;;
@@ -78,6 +82,26 @@ case "${1:-} ${2:-}" in
       shift
     done
     ;;
+  "buildx imagetools")
+    case "${FAKE_INDEX_RESULT:-valid}" in
+      extra-architecture)
+        cat <<'EOF'
+{"schemaVersion":2,"manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64"}},{"platform":{"os":"linux","architecture":"s390x"}}]}
+EOF
+        ;;
+      malformed) printf '%s\n' '{not-json' ;;
+      missing-manifests) printf '%s\n' '{"schemaVersion":2}' ;;
+      single-image)
+        printf '%s\n' '{"schemaVersion":2,"config":{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}'
+        ;;
+      valid)
+        cat <<'EOF'
+{"schemaVersion":2,"manifests":[{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","platform":{"os":"linux","architecture":"amd64"}},{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":{"os":"linux","architecture":"arm64"}}]}
+EOF
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
   *) exit 2 ;;
 esac
 FAKE_DOCKER
@@ -114,6 +138,15 @@ grep -Fq 'buildx build --target production --load --tag traversal-connector:prer
 grep -Fq 'Loaded local prerelease image: traversal-connector:prerelease-abc1234' <<<"$output"
 [[ ! -s "$FAKE_AWS_LOG" ]]
 
+# Local mode must not require jq. Restrict PATH to only the commands that mode
+# uses so the host's jq installation cannot satisfy an accidental requirement.
+mkdir -p "$temp/local-bin"
+ln -s "$(command -v bash)" "$temp/local-bin/bash"
+ln -s "$temp/bin/git" "$temp/local-bin/git"
+ln -s "$temp/bin/docker" "$temp/local-bin/docker"
+reset_logs
+PATH="$temp/local-bin" "$builder" local >/dev/null
+
 reset_logs
 $builder local --repository example.test/team/connector --tag prerelease-demo.1 >/dev/null
 grep -Fq -- '--tag example.test/team/connector:prerelease-demo.1' "$FAKE_DOCKER_LOG"
@@ -129,11 +162,12 @@ grep -Fq -- '--target production' "$FAKE_DOCKER_LOG"
 grep -Fq -- '--sbom=true' "$FAKE_DOCKER_LOG"
 grep -Fq -- '--provenance=mode=max' "$FAKE_DOCKER_LOG"
 grep -Fq -- '--tag 000000000000.dkr.ecr.us-west-2.amazonaws.com/team/connector:prerelease-abc1234' "$FAKE_DOCKER_LOG"
+grep -Fq 'buildx imagetools inspect 000000000000.dkr.ecr.us-west-2.amazonaws.com/team/connector@sha256:aaaaaaaa' "$FAKE_DOCKER_LOG"
 grep -Fq 'Published unsigned prerelease image: 000000000000.dkr.ecr.us-west-2.amazonaws.com/team/connector@sha256:aaaaaaaa' <<<"$output"
 
 reset_logs
 $builder push --profile test-profile --region eu-central-1 >/dev/null
-[[ $(grep -Fc -- '--profile test-profile' "$FAKE_AWS_LOG") -eq 3 ]]
+[[ $(grep -Fc -- '--profile test-profile' "$FAKE_AWS_LOG") -eq 4 ]]
 
 reset_logs
 FAKE_ARN=arn:aws-cn:iam::000000000000:user/test-user \
@@ -212,5 +246,22 @@ reset_logs
 FAKE_METADATA_RESULT=missing expect_failure "missing digest metadata" "$builder" push --region us-west-2
 grep -Fq 'push succeeded but Buildx did not report an image digest' "$temp/failure.out"
 grep -Fq -- '--push' "$FAKE_DOCKER_LOG"
+
+reset_logs
+FAKE_INDEX_RESULT=extra-architecture expect_failure \
+  "extra image architecture" "$builder" push --region us-west-2
+grep -Fq 'must contain exactly linux/amd64 and linux/arm64' "$temp/failure.out"
+
+for result in malformed missing-manifests single-image; do
+  reset_logs
+  FAKE_INDEX_RESULT=$result expect_failure \
+    "$result image index" "$builder" push --region us-west-2
+  grep -Fq 'published object is not a valid OCI index' "$temp/failure.out"
+done
+
+reset_logs
+FAKE_ECR_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  expect_failure "ECR digest mismatch" "$builder" push --region us-west-2
+grep -Fq 'ECR tag digest does not match' "$temp/failure.out"
 
 printf 'All prerelease image builder tests passed.\n'

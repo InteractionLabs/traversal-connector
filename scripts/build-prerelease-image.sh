@@ -14,6 +14,7 @@ Usage:
   scripts/build-prerelease-image.sh local [--repository REPOSITORY] [--tag TAG]
   scripts/build-prerelease-image.sh push  [--ecr-repository NAME] [--profile PROFILE]
                                            [--region REGION] [--tag TAG]
+                                           [--metadata-output FILE]
 
 Modes:
   local  Build the Dockerfile production target for the current host platform
@@ -54,6 +55,7 @@ ecr_repository=traversal-connector
 profile=
 region=
 tag=
+metadata_output=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repository)
@@ -83,6 +85,12 @@ while [[ $# -gt 0 ]]; do
     --tag)
       [[ $# -ge 2 ]] || die "--tag requires a value"
       tag=$2
+      shift 2
+      ;;
+    --metadata-output)
+      [[ "$mode" == push ]] || die "--metadata-output is only valid in push mode"
+      [[ $# -ge 2 ]] || die "--metadata-output requires a value"
+      metadata_output=$2
       shift 2
       ;;
     -h | --help)
@@ -121,6 +129,7 @@ if [[ "$mode" == local ]]; then
 fi
 
 command -v aws >/dev/null 2>&1 || die "aws is required for push mode"
+command -v jq >/dev/null 2>&1 || die "jq is required for push mode"
 [[ ${#ecr_repository} -ge 2 && ${#ecr_repository} -le 256 ]] ||
   die "ECR repository name must be between 2 and 256 characters"
 [[ "$ecr_repository" =~ ^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$ ]] ||
@@ -202,6 +211,36 @@ docker buildx build \
   --metadata-file "$metadata" \
   .
 
-digest=$(sed -nE 's/.*"containerimage\.digest"[[:space:]]*:[[:space:]]*"(sha256:[0-9a-f]{64})".*/\1/p' "$metadata" | head -n 1)
+digest=$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "$metadata" 2>/dev/null || true)
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "push succeeded but Buildx did not report an image digest"
+
+raw_index=$(docker buildx imagetools inspect "${registry}/${ecr_repository}@${digest}" --raw)
+if ! architectures=$(printf '%s' "$raw_index" | jq -cer '
+  .manifests
+  | select(type == "array" and length > 0)
+  | map(select(.platform.os == "linux") | "linux/" + .platform.architecture)
+  | sort | unique
+' 2>/dev/null); then
+  die "published object is not a valid OCI index"
+fi
+[[ "$architectures" == '["linux/amd64","linux/arm64"]' ]] ||
+  die "published OCI index must contain exactly linux/amd64 and linux/arm64 images: $architectures"
+
+ecr_digest=$(aws ecr describe-images "${aws_args[@]}" \
+  --repository-name "$ecr_repository" \
+  --image-ids "imageTag=$tag" \
+  --query 'imageDetails[0].imageDigest' --output text)
+[[ "$ecr_digest" == "$digest" ]] ||
+  die "ECR tag digest does not match the published OCI index: $ecr_digest != $digest"
+
+if [[ -n "$metadata_output" ]]; then
+  mkdir -p "$(dirname "$metadata_output")"
+  jq -n \
+    --arg repository "${registry}/${ecr_repository}" \
+    --arg tag "$tag" \
+    --arg digest "$digest" \
+    --argjson architectures "$architectures" \
+    '{repository: $repository, tag: $tag, digest: $digest, immutable_ref: ($repository + "@" + $digest), architectures: $architectures}' \
+    > "$metadata_output"
+fi
 printf 'Published unsigned prerelease image: %s/%s@%s\n' "$registry" "$ecr_repository" "$digest"
