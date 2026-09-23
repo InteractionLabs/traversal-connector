@@ -112,6 +112,31 @@ helm upgrade --install traversal-connector <chart> \
   --set image.tag=prerelease-<short-sha>
 ```
 
+### Paired PR prerelease artifacts
+
+For an internal test build from a pull request, apply the existing
+`build:prerelease` label. The dedicated workflow runs only for same-repository
+PRs carrying that exact label; fork PRs and ordinary unlabeled PRs never receive
+AWS credentials or publish artifacts. A new PR commit cancels an older in-flight
+run and builds the exact new head SHA.
+
+The workflow publishes an unsigned, test-only multi-architecture image to the
+internal ECR repository as `prerelease-<12-character-head-sha>`. It uploads a
+paired Actions artifact named `prerelease-pr-<number>-<short-sha>` containing:
+
+- `traversal-connector-charts-0.0.0-pr.<number>.<short-sha>.tgz`
+- the chart's portable `.sha256` file
+- `manifest.json`, which binds the full source SHA and PR/run metadata to the
+  image's immutable `repository@sha256:...` reference and chart checksum
+
+Actions retains the bundle for seven days. Consumers should pin the immutable
+image reference from `manifest.json`, not reconstruct or rely on its tag. The
+chart `appVersion` equals the image tag, while its SemVer prerelease version
+also carries the PR number and commit. Rerunning the same commit fails clearly
+if its immutable ECR tag already exists; a changed commit receives a new tag and
+bundle. This path never writes Docker Hub, GitHub Releases, release Git tags, or
+the canonical chart OCI registry.
+
 ## Installing with Helm
 
 Docker Hub is the canonical public image distribution. Before publishing each

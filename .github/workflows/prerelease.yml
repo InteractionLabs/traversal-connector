@@ -1,0 +1,120 @@
+name: Build PR prerelease artifacts
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prerelease-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_ACCOUNT_ID: '885798945817'
+  AWS_REGION: us-west-2
+  PUBLIC_REPO_SIGNER_ROLE_ARN: arn:aws:iam::885798945817:role/public-repo-image-signing
+  HELM_VERSION: v3.18.6
+  HELM_SHA256_AMD64: 3f43c0aa57243852dd542493a0f54f1396c0bc8ec7296bbb2c01e802010819ce
+
+jobs:
+  publish:
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'build:prerelease')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the exact PR head commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Configure AWS credentials for internal ECR
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
+        with:
+          role-to-assume: ${{ env.PUBLIC_REPO_SIGNER_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      - name: Install Helm
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256_AMD64}  /tmp/helm.tgz" | sha256sum --check
+          tar --extract --gzip --strip-components=1 --directory=/tmp \
+            --file=/tmp/helm.tgz linux-amd64/helm
+          sudo install -m 0755 /tmp/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Validate immutable inputs
+        id: inputs
+        env:
+          ECR_MIRROR_REPOSITORY: ${{ secrets.ECR_MIRROR_REPOSITORY }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$HEAD_SHA" ]]
+
+          expected_registry="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          registry=${ECR_MIRROR_REPOSITORY%%/*}
+          repository=${ECR_MIRROR_REPOSITORY#*/}
+          [[ "$registry" == "$expected_registry" ]] || {
+            echo "::error::ECR_MIRROR_REPOSITORY must use the approved internal account and region."
+            exit 1
+          }
+          [[ "$repository" == traversal-connector ]] || {
+            echo "::error::ECR_MIRROR_REPOSITORY must name the traversal-connector repository."
+            exit 1
+          }
+          [[ "$(aws sts get-caller-identity --query Account --output text)" == "$AWS_ACCOUNT_ID" ]]
+
+          short_sha=${HEAD_SHA:0:12}
+          {
+            echo "short_sha=$short_sha"
+            echo "tag=prerelease-$short_sha"
+            echo "repository=$repository"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish commit-scoped image
+        run: |
+          scripts/build-prerelease-image.sh push \
+            --region "$AWS_REGION" \
+            --ecr-repository "${{ steps.inputs.outputs.repository }}" \
+            --tag "${{ steps.inputs.outputs.tag }}" \
+            --metadata-output dist/image.json
+
+      - name: Package paired chart and manifest
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          scripts/package-prerelease-artifacts.sh \
+            "$PR_NUMBER" "$PR_URL" "$HEAD_SHA" dist/image.json "$RUN_URL" dist/prerelease
+
+      - name: Upload paired prerelease artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prerelease-pr-${{ github.event.pull_request.number }}-${{ steps.inputs.outputs.short_sha }}
+          path: |
+            dist/prerelease/*.tgz
+            dist/prerelease/*.tgz.sha256
+            dist/prerelease/manifest.json
+          if-no-files-found: error
+          retention-days: 7
