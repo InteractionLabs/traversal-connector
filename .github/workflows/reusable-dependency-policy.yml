@@ -44,6 +44,14 @@ jobs:
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
 
+      - name: Restore dependency evidence cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/dependency-policy-cache
+          key: dependency-policy-evidence-v3-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dependency-policy-evidence-v3-${{ github.repository_id }}-
+
       - name: Enforce dependency policy
         uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@main # policy-v1
         with:
@@ -51,8 +59,26 @@ jobs:
           head-sha: ${{ steps.comparison.outputs.head }}
           require-caller: "true"
           caller-repository: InteractionLabs/traversal-connector
+          cache: ${{ runner.temp }}/dependency-policy-cache/evidence.json
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Check dependency evidence cache changes
+        id: dependency-policy-cache
+        if: always()
+        run: |
+          updated=false
+          if [[ -s dependency-policy-results.json ]] && jq -e '.cache.writes > 0' dependency-policy-results.json >/dev/null; then
+            updated=true
+          fi
+          echo "updated=$updated" >> "$GITHUB_OUTPUT"
+
+      - name: Save dependency evidence cache
+        if: always() && steps.dependency-policy-cache.outputs.updated == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/dependency-policy-cache
+          key: dependency-policy-evidence-v3-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Report dependency evidence
         if: always()
