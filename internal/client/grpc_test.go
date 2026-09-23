@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -192,6 +193,45 @@ func TestNewTransport_NoProxy(t *testing.T) {
 	}
 }
 
+func TestNewClient_H2COverridePreservesLogicalAuthorityAndPath(t *testing.T) {
+	var gotHost, gotPath string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Grpc-Status", "0")
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewUnstartedServer(handler)
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	server.Config.Protocols = protocols
+	server.Start()
+	t.Cleanup(server.Close)
+	serverURL, _ := net.ResolveTCPAddr("tcp", server.Listener.Addr().String())
+
+	cfg := &config.Config{
+		TraversalControllerURL:       "http://logical-controller.invalid:9080/base",
+		TraversalControllerConnectTo: serverURL.String(),
+		ConnectorID:                  "test",
+	}
+	rpcClient, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient() error: %v", err)
+	}
+	stream := rpcClient.Tunnel(context.Background())
+	_ = stream.Send(&pb.ConnectorMessage{RequestId: "hello"})
+	_, _ = stream.Receive()
+
+	if gotHost != "logical-controller.invalid:9080" {
+		t.Errorf("Host = %q, want logical authority", gotHost)
+	}
+	wantPath := "/base/connector.v1.ConnectorService/Tunnel"
+	if gotPath != wantPath {
+		t.Errorf("path = %q, want %q", gotPath, wantPath)
+	}
+}
+
 func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 	certPEM, keyPEM := generateTestKeyPair(t)
 
@@ -239,6 +279,31 @@ func TestNewTransport_WithTLSCertsAndProxy(t *testing.T) {
 	}
 	if diff := cmp.Diff("proxy.example.com:3128", egressProxyURL.Host); diff != "" {
 		t.Errorf("proxy host mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewTransport_TLSOverridePinsLogicalServerName(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	cfg := &config.Config{
+		TraversalControllerURL:       "https://logical-controller.example:9080/base",
+		TraversalControllerConnectTo: "127.0.0.1:9443",
+		TLSCert:                      &certPEM,
+		TLSKey:                       &keyPEM,
+	}
+
+	transport, err := newTransport(cfg)
+	if err != nil {
+		t.Fatalf("newTransport() error: %v", err)
+	}
+	httpTransport := transport.(*http.Transport)
+	if got := httpTransport.TLSClientConfig.ServerName; got != "logical-controller.example" {
+		t.Fatalf("TLS ServerName = %q", got)
+	}
+	if httpTransport.DialContext == nil {
+		t.Fatal("DialContext is nil with override")
+	}
+	if httpTransport.Proxy != nil {
+		t.Fatal("Proxy is set with fixed direct routing")
 	}
 }
 

@@ -4,13 +4,17 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -76,6 +80,7 @@ type otlpTransport struct {
 	Path           string
 	TLSConfig      *tls.Config
 	EgressProxyURL *url.URL
+	ConnectTo      string
 }
 
 // planOTLPTransport parses the raw endpoint and merges it with the
@@ -91,6 +96,7 @@ func planOTLPTransport(
 	rawEndpoint string,
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
+	connectTo string,
 ) otlpTransport {
 	ep := ParseOTLPEndpoint(rawEndpoint)
 	if !ep.TLS {
@@ -102,6 +108,7 @@ func planOTLPTransport(
 		Path:           ep.Path,
 		TLSConfig:      tlsConfig,
 		EgressProxyURL: egressProxyURL,
+		ConnectTo:      connectTo,
 	}
 }
 
@@ -123,11 +130,43 @@ func (t otlpTransport) UseProxy() bool {
 // init logs, so each signal logs the same shape.
 func (t otlpTransport) LogFields() []any {
 	return []any{
-		"host", t.Host,
-		"path", t.Path,
+		"logical_host", t.Host,
+		"logical_path", t.Path,
 		"mtls", t.UseMTLS(),
 		"proxy", t.UseProxy(),
+		"connect_to", t.ConnectTo,
 	}
+}
+
+func (t otlpTransport) grpcDialOptions() []grpc.DialOption {
+	if t.ConnectTo != "" {
+		return []grpc.DialOption{grpc.WithContextDialer(fixedDialer(t.ConnectTo))}
+	}
+	if t.UseProxy() {
+		return []grpc.DialOption{grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL))}
+	}
+	return nil
+}
+
+func fixedDialer(address string) func(context.Context, string) (net.Conn, error) {
+	return func(ctx context.Context, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	}
+}
+
+func (t otlpTransport) overrideHTTPClient() *http.Client {
+	if t.ConnectTo == "" {
+		return nil
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, t.ConnectTo)
+	}
+	if t.TLSConfig != nil {
+		transport.TLSClientConfig = t.TLSConfig.Clone()
+	}
+	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
 
 // NewResource builds an OTel resource with standard service metadata.

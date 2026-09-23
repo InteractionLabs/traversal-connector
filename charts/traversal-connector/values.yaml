@@ -24,6 +24,11 @@ resources:
 envName: ""
 # ConnectRPC URL of the Traversal control plane. Maps to TRAVERSAL_CONTROLLER_URL.
 controllerURL: ""
+# Optional curl --connect-to-style host:port override for the controller. Only
+# the TCP connection destination changes; controllerURL still supplies the
+# scheme, path, HTTP/2 :authority, TLS SNI, and certificate verification.
+# Cannot be combined with proxyURL.
+controllerConnectTo: ""  # TRAVERSAL_CONTROLLER_CONNECT_TO
 # Unique identifier for this connector deployment, provided to you by Traversal.
 # Maps to TRAVERSAL_CONNECTOR_ID.
 connectorID: ""
@@ -76,6 +81,15 @@ disableTelemetry: false     # → TRAVERSAL_DISABLE_TELEMETRY (only set when tru
 otel:
   serviceName: "traversal-connector"  # OTEL_SERVICE_NAME
   protocol: "grpc"                    # OTEL_EXPORTER_OTLP_PROTOCOL: grpc | http/protobuf | http/json
+
+  # Optional curl --connect-to-style host:port override shared by logs, metrics,
+  # and traces; all three logical endpoints must therefore be reachable through
+  # this one socket. Only the TCP connection destination changes. The logical
+  # URLs still supply scheme, path, HTTP Host/gRPC :authority, TLS SNI, and
+  # certificate verification. Cannot be combined with proxyURL. With
+  # sidecar.enabled, this changes Alloy's remote endpoint and is not passed to
+  # the connector.
+  connectTo: ""                       # OTEL_EXPORTER_OTLP_CONNECT_TO (direct export only)
 
   # Endpoints default to Traversal's hosted ingest — grpc to
   # telemetry.traversal.com:4317, http/* to telemetry.traversal.com/v1/{signal}.

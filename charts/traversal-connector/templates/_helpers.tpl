@@ -2,6 +2,36 @@
 {{- default "traversal-connector" .Chart.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- /* Validate a routing-only host:port. Bracketed IPv6 (including zone IDs),
+       IPv4, and DNS are accepted. The value is deliberately not included in
+       errors because malformed input may contain credentials. */}}
+{{- define "traversal-connector.validateConnectTo" -}}
+{{- $name := .name -}}
+{{- $address := .address | default "" -}}
+{{- if $address -}}
+{{- if not (regexMatch `^([^:/?#@[:space:]]+|\[[0-9A-Za-z_.:%-]+\]):[0-9]+$` $address) -}}
+{{- fail (printf "%s must be a host:port (DNS, IPv4, or bracketed IPv6) without a scheme, path, query, fragment, or credentials." $name) -}}
+{{- end -}}
+{{- $port := regexFind `[0-9]+$` $address | atoi -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail (printf "%s port must be from 1 to 65535." $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "traversal-connector.urlAuthority" -}}
+{{- regexReplaceAll `^https://([^/]+).*$` . `${1}` -}}
+{{- end -}}
+
+{{- define "traversal-connector.authorityHostname" -}}
+{{- $authority := . -}}
+{{- if hasPrefix "[" $authority -}}
+{{- regexReplaceAll `^\[([^]]+)\](?::[0-9]+)?$` $authority `${1}` -}}
+{{- else -}}
+{{- first (splitList ":" $authority) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "traversal-connector.fullname" -}}
 {{- if contains .Release.Name .Chart.Name -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}

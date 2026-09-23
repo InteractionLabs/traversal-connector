@@ -3,12 +3,20 @@ package telemetry
 import (
 	"context"
 	"crypto/tls"
+	"net"
+	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestParseOTLPEndpoint(t *testing.T) {
@@ -67,6 +75,111 @@ func TestParseOTLPEndpoint(t *testing.T) {
 					"ParseOTLPEndpoint(%q) mismatch (-want +got):\n%s",
 					tt.raw, diff,
 				)
+			}
+		})
+	}
+}
+
+func TestOverrideHTTPClientDisablesAmbientProxyAndPreservesTLS(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: "logical.example"}
+	plan := planOTLPTransport(
+		"https://logical.example/v1/logs", tlsConfig, nil, "127.0.0.1:4318",
+	)
+	client := plan.overrideHTTPClient()
+	if client == nil || client.Timeout != 10*time.Second {
+		t.Fatalf("override client = %#v", client)
+	}
+	transport := client.Transport.(*http.Transport)
+	if transport.Proxy != nil {
+		t.Fatal("override transport must ignore ambient proxy variables")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("override transport has no fixed dialer")
+	}
+	if transport.TLSClientConfig == tlsConfig {
+		t.Fatal("TLS config was not cloned")
+	}
+	if got := transport.TLSClientConfig.ServerName; got != "logical.example" {
+		t.Fatalf("TLS ServerName = %q", got)
+	}
+}
+
+func TestPlanOTLPTransportRetainsLogicalEndpointWithConnectToOverride(t *testing.T) {
+	plan := planOTLPTransport(
+		"https://telemetry.example:4317/custom/v1/traces",
+		&tls.Config{MinVersion: tls.VersionTLS12}, nil,
+		"telemetry-istio.traversal-gateways.svc.cluster.local:443",
+	)
+	if plan.Host != "telemetry.example:4317" || plan.Path != "/custom/v1/traces" {
+		t.Fatalf("logical endpoint changed: %+v", plan)
+	}
+	if plan.ConnectTo != "telemetry-istio.traversal-gateways.svc.cluster.local:443" {
+		t.Fatalf("ConnectTo = %q", plan.ConnectTo)
+	}
+	if len(plan.grpcDialOptions()) != 1 || plan.overrideHTTPClient() == nil {
+		t.Fatal("override was not applied to both gRPC and HTTP transports")
+	}
+}
+
+func TestGRPCDialOptionsPreserveLogicalAuthority(t *testing.T) {
+	tests := []struct {
+		name              string
+		target            func(string) string
+		connectTo         func(string) string
+		expectedAuthority func(string) string
+	}{
+		{
+			name:              "override dials fixed address",
+			target:            func(string) string { return "passthrough:///logical-telemetry.invalid:4317" },
+			connectTo:         func(address string) string { return address },
+			expectedAuthority: func(string) string { return "logical-telemetry.invalid:4317" },
+		},
+		{
+			name:              "absent override dials endpoint",
+			target:            func(address string) string { return address },
+			connectTo:         func(string) string { return "" },
+			expectedAuthority: func(address string) string { return address },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+
+			authority := make(chan string, 1)
+			server := grpc.NewServer(grpc.UnaryInterceptor(
+				func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+					md, _ := metadata.FromIncomingContext(ctx)
+					authority <- md.Get(":authority")[0]
+					return handler(ctx, req)
+				},
+			))
+			healthpb.RegisterHealthServer(server, health.NewServer())
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(server.Stop)
+
+			address := listener.Addr().String()
+			plan := otlpTransport{ConnectTo: tt.connectTo(address)}
+			opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+			opts = append(opts, plan.grpcDialOptions()...)
+			conn, err := grpc.NewClient(tt.target(address), opts...)
+			if err != nil {
+				t.Fatalf("new gRPC client: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{}); err != nil {
+				t.Fatalf("health check: %v", err)
+			}
+			if got := <-authority; got != tt.expectedAuthority(address) {
+				t.Errorf("authority = %q, want %q", got, tt.expectedAuthority(address))
 			}
 		})
 	}
@@ -239,7 +352,7 @@ func TestPlanOTLPTransport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plan := planOTLPTransport(tt.endpoint, tt.tlsConfig, tt.egressProxyURL)
+			plan := planOTLPTransport(tt.endpoint, tt.tlsConfig, tt.egressProxyURL, "")
 			if got := plan.UseMTLS(); got != tt.wantMTLS {
 				t.Errorf("UseMTLS() = %v, want %v", got, tt.wantMTLS)
 			}

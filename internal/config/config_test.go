@@ -607,6 +607,7 @@ func TestLoad_DisableTelemetryDropsConfiguredEndpoints(t *testing.T) {
 	// they are dropped rather than validated.
 	setOTLPEndpoints("http://otlp.example.com:4317")
 	_ = os.Setenv("TRAVERSAL_DISABLE_TELEMETRY", "true")
+	_ = os.Setenv("OTEL_EXPORTER_OTLP_CONNECT_TO", "collector.internal:4317")
 
 	cfg, err := Load()
 	if err != nil {
@@ -623,6 +624,102 @@ func TestLoad_DisableTelemetryDropsConfiguredEndpoints(t *testing.T) {
 		if got != "" {
 			t.Errorf("%s = %q, want empty", name, got)
 		}
+	}
+	if cfg.OTLPConnectTo != "" {
+		t.Errorf("OTLPConnectTo = %q, want empty", cfg.OTLPConnectTo)
+	}
+}
+
+func TestLoad_DisableTelemetryIgnoresInvalidOTLPConnectToAndProxyConflict(
+	t *testing.T,
+) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("TRAVERSAL_DISABLE_TELEMETRY", "true")
+	_ = os.Setenv("OTEL_EXPORTER_OTLP_CONNECT_TO", "not-an-address")
+	_ = os.Setenv("EGRESS_PROXY_URL", "http://proxy.internal:3128")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OTLPConnectTo != "" {
+		t.Fatalf("OTLPConnectTo = %q, want empty", cfg.OTLPConnectTo)
+	}
+}
+
+func TestLoad_ConnectToOverrides(t *testing.T) {
+	valid := []string{
+		"collector.internal:4317",
+		"127.0.0.1:443",
+		"[2001:db8::1]:4317",
+		"[fe80::1%eth0]:4317",
+	}
+	for _, address := range valid {
+		t.Run("valid "+address, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://logical.invalid:9080/base")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_CONNECT_TO", address)
+			_ = os.Setenv("OTEL_EXPORTER_OTLP_CONNECT_TO", address)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.TraversalControllerConnectTo != address ||
+				cfg.OTLPConnectTo != address {
+				t.Fatalf("connect-to overrides not retained: %+v", cfg)
+			}
+		})
+	}
+
+	invalid := []string{
+		"collector.internal", "collector.internal:", ":4317", " collector:4317",
+		"collector:abc", "collector:0", "collector:65536", "https://collector:4317",
+		"user:password@collector:4317", "collector:4317/path", "2001:db8::1:4317",
+	}
+	for _, address := range invalid {
+		t.Run("invalid "+address, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_CONNECT_TO", address)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "TRAVERSAL_CONTROLLER_CONNECT_TO") {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if strings.Contains(err.Error(), address) {
+				t.Fatalf("error exposed connect-to value: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsProxyWithConnectToOverride(t *testing.T) {
+	for _, override := range []string{
+		"TRAVERSAL_CONTROLLER_CONNECT_TO", "OTEL_EXPORTER_OTLP_CONNECT_TO",
+	} {
+		t.Run(override, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("EGRESS_PROXY_URL", "http://proxy.internal:3128")
+			_ = os.Setenv(override, "route.internal:443")
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "EGRESS_PROXY_URL") ||
+				!strings.Contains(err.Error(), override) {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -850,6 +947,7 @@ func assertCertificateTrusted(t *testing.T, cert *x509.Certificate, roots *x509.
 func clearEnv() {
 	envVars := []string{
 		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
+		"TRAVERSAL_CONTROLLER_CONNECT_TO", "EGRESS_PROXY_URL",
 		"RECONNECT_INTERVAL", "MAX_BACKOFF_DELAY", "REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "MAX_RESPONSE_BODY_SIZE_MB",
 		"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
@@ -859,6 +957,7 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_CONNECT_TO",
 		"TRAVERSAL_DISABLE_TELEMETRY",
 		"UPSTREAM_TLS_VERIFY",
 	}

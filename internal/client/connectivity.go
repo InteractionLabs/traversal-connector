@@ -43,6 +43,14 @@ func TestConnectivity(cfg *config.Config) error {
 			"failed to parse controller URL: %w", err,
 		)
 	}
+	if cfg.TraversalControllerConnectTo != "" {
+		addr = cfg.TraversalControllerConnectTo
+	}
+	logicalURL, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil || logicalURL.Hostname() == "" {
+		return fmt.Errorf("failed to parse controller TLS hostname")
+	}
+	logicalServerName := logicalURL.Hostname()
 
 	// --- shared TLS material ---
 	clientCerts, caPool, loadErr := loadTLSMaterial(cfg)
@@ -91,6 +99,7 @@ func TestConnectivity(cfg *config.Config) error {
 	//nolint:gosec // InsecureSkipVerify mirrors grpcurl -insecure.
 	insecureTLS := &tls.Config{
 		InsecureSkipVerify: true,
+		ServerName:         logicalServerName,
 		Certificates:       clientCerts,
 		RootCAs:            caPool,
 		NextProtos:         []string{"h2"},
@@ -116,6 +125,7 @@ func TestConnectivity(cfg *config.Config) error {
 	secureTLS := &tls.Config{
 		Certificates: clientCerts,
 		RootCAs:      caPool,
+		ServerName:   logicalServerName,
 		MinVersion:   tls.VersionTLS12,
 		NextProtos:   []string{"h2"},
 	}

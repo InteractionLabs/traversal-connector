@@ -261,6 +261,7 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | Variable | Default | Description |
 |---|---|---|
 | `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
+| `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
 | `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
 | `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
@@ -270,7 +271,7 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |
 | `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
 | `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
-| `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. When unset, the connector dials its destinations directly (h2c for the controller; default OTLP transport for telemetry). |
+| `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
 ### mTLS to the control plane
 
@@ -287,7 +288,7 @@ All certificate variables accept either raw PEM (starting with
 |---|---|---|
 | `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
 | `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
-| `TLS_CA_BASE64` | (none) | CA certificate used to validate the control plane's server certificate. When set, replaces the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
+| `TLS_CA_BASE64` | (none) | Additional CA certificate used to validate the control plane's server certificate. When set, it extends the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
 
 ### Upstream TLS (HTTPS to internal services)
 
@@ -448,6 +449,7 @@ the connector refuses to start without it.
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | (required) | OTLP endpoint for traces. Must be an `https://` URL. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | (required) | OTLP endpoint for logs. Must be an `https://` URL. Logs also always go to stdout. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | (empty) | `grpc` or `http/protobuf` selects gRPC; `http/json` (or empty) selects HTTP. |
+| `OTEL_EXPORTER_OTLP_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override shared by metrics, traces, and logs. Only the TCP connection destination changes; logical endpoint scheme and path, HTTP Host/gRPC `:authority`, TLS SNI, and certificate verification remain unchanged. All three endpoints must be reachable through the one socket. Cannot be combined with `EGRESS_PROXY_URL`; it is cleared when telemetry is disabled. |
 | `TRAVERSAL_DISABLE_TELEMETRY` | `false` | Opts out of all telemetry export. **Strongly discouraged**. Traversal cannot diagnose or assist with issues in a deployment that reports nothing. |
 
 Point all three endpoints either at a collector you operate or at the ingest
@@ -456,6 +458,17 @@ takes a host and port and names the signal in the request
 (`https://collector.example.com:4317`), while `http/*` names it in the path
 (`https://collector.example.com/v1/metrics`). The deployment chart fills these in;
 a deployment that sets the environment directly has to provide them.
+
+Connect-to overrides mirror curl `--connect-to` and support enterprise routing such as PrivateLink, split
+DNS, service-mesh gateways, Kubernetes Services, and tunnels without weakening
+TLS identity. For example, retain `https://telemetry.traversal.com:4317` as the
+logical endpoint while connecting to
+`telemetry-istio.traversal-gateways.svc.cluster.local:443`. With direct export,
+the connector receives `OTEL_EXPORTER_OTLP_CONNECT_TO`. With the chart's
+sidecar enabled, the connector continues exporting to loopback; the override is
+applied only to Alloy's remote endpoint while Alloy preserves the logical gRPC
+authority and TLS server name. Custom CA material remains additive to system
+roots in both modes.
 
 Startup rejects a telemetry configuration that would export nothing or export in
 cleartext:

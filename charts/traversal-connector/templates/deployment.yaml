@@ -14,6 +14,13 @@
 {{- $telemetryEnabled := not .Values.disableTelemetry -}}
 {{- $sidecarEnabled := include "traversal-connector.sidecarEnabled" . -}}
 {{- $otlp := dict -}}
+{{- include "traversal-connector.validateConnectTo" (dict "name" "controllerConnectTo" "address" .Values.controllerConnectTo) -}}
+{{- if $telemetryEnabled }}
+{{- include "traversal-connector.validateConnectTo" (dict "name" "otel.connectTo" "address" .Values.otel.connectTo) -}}
+{{- end }}
+{{- if and .Values.proxyURL (or .Values.controllerConnectTo (and $telemetryEnabled .Values.otel.connectTo)) }}
+{{- fail "proxyURL cannot be combined with controllerConnectTo or otel.connectTo; fixed socket routing and forward proxy routing are mutually exclusive." }}
+{{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}
 {{- $_ := set $otlp $signal (include "traversal-connector.otlpEndpoint" (dict "root" $ "signal" $signal)) }}
@@ -22,12 +29,22 @@
        customer network. A config that would export nowhere, or in plaintext, is
        rejected at render rather than found during an incident nobody can see. */}}
 {{- range $key, $endpoint := $otlp }}
-{{- if not (regexMatch "^https://[a-zA-Z0-9._-]+(:[0-9]+)?(/[^[:space:]]*)?$" $endpoint) }}
+{{- if not (regexMatch `^https://([^:/?#@[:space:]]+|\[[0-9A-Za-z_.:%-]+\])(:[0-9]+)?(/[^[:space:]]*)?$` $endpoint) }}
 {{- fail (printf "otel.%sEndpoint must be an https:// URL (got %q). Telemetry is required; set disableTelemetry: true only if you accept that Traversal cannot support this deployment." $key $endpoint) }}
+{{- end }}
+{{- $authority := include "traversal-connector.urlAuthority" $endpoint -}}
+{{- $portText := regexFind `:[0-9]+$` $authority | trimPrefix ":" -}}
+{{- if $portText -}}
+{{- $port := atoi $portText -}}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail (printf "otel.%sEndpoint port must be from 1 to 65535." $key) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
 {{- $sidecarEgress := "" -}}
+{{- $sidecarAuthority := "" -}}
+{{- $sidecarServerName := "" -}}
 {{- if $sidecarEnabled }}
 {{- /* The sidecar forwards all three signals through a single OTLP exporter to
        one egress endpoint. Reject a config that sets divergent per-signal
@@ -36,6 +53,11 @@
 {{- fail "otel.sidecar.enabled requires a single OTLP egress endpoint: otel.tracesEndpoint, otel.metricsEndpoint and otel.logsEndpoint must be identical." }}
 {{- end }}
 {{- $sidecarEgress = $otlp.traces | trimPrefix "https://" }}
+{{- $sidecarAuthority = include "traversal-connector.urlAuthority" $otlp.traces -}}
+{{- $sidecarServerName = include "traversal-connector.authorityHostname" $sidecarAuthority -}}
+{{- if .Values.otel.connectTo }}
+{{- $sidecarEgress = .Values.otel.connectTo -}}
+{{- end }}
 {{- /* The sidecar's exporter is OTLP/gRPC, whose dial target is a host:port. A
        path-bearing endpoint — the shape otel.protocol http/* asks for — becomes
        part of the name it tries to resolve, so nothing exports and the failure is
@@ -95,6 +117,10 @@ spec:
               value: {{ required "envName is required" .Values.envName | quote }}
             - name: TRAVERSAL_CONTROLLER_URL
               value: {{ required "controllerURL is required" .Values.controllerURL | quote }}
+            {{- with .Values.controllerConnectTo }}
+            - name: TRAVERSAL_CONTROLLER_CONNECT_TO
+              value: {{ . | quote }}
+            {{- end }}
             - name: TRAVERSAL_CONNECTOR_ID
               value: {{ required "connectorID is required" .Values.connectorID | quote }}
             - name: UPSTREAM_TLS_VERIFY
@@ -175,6 +201,10 @@ spec:
               value: {{ $otlp.traces | quote }}
             - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
               value: {{ $otlp.logs | quote }}
+            {{- with .Values.otel.connectTo }}
+            - name: OTEL_EXPORTER_OTLP_CONNECT_TO
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- if $hasControllerTLS }}
@@ -264,6 +294,10 @@ spec:
             {{- /* gRPC OTLP exporter takes a bare host:port; TLS comes from the client cert/CA below, so any URL scheme is stripped. */}}
             - name: OTLP_EGRESS_ENDPOINT
               value: {{ $sidecarEgress | quote }}
+            - name: OTLP_EGRESS_AUTHORITY
+              value: {{ $sidecarAuthority | quote }}
+            - name: OTLP_EGRESS_SERVER_NAME
+              value: {{ $sidecarServerName | quote }}
             {{- /* With the sidecar enabled, remote egress moves from the connector to Alloy, so the
                    forward proxy must move with it. Alloy's gRPC exporter honors HTTPS_PROXY; exclude
                    loopback so the connector's in-pod OTLP is never routed through it. */}}

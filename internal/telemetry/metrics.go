@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/sdk/metric"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
@@ -35,6 +34,7 @@ func InitMetrics(
 	serviceName, otlpEndpoint, protocol, envName string,
 	tlsConfig *tls.Config,
 	egressProxyURL *url.URL,
+	connectTo string,
 ) (func(context.Context) error, error) {
 	if otlpEndpoint == "" {
 		slog.InfoContext(ctx,
@@ -43,7 +43,7 @@ func InitMetrics(
 		return nil, nil
 	}
 
-	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL)
+	transport := planOTLPTransport(otlpEndpoint, tlsConfig, egressProxyURL, connectTo)
 	slog.InfoContext(ctx, "initializing OTLP metrics export",
 		"otlp_endpoint", otlpEndpoint,
 		"protocol", protocol,
@@ -116,12 +116,8 @@ func newGRPCMetricsExporter(
 	} else {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
-	if t.UseProxy() {
-		opts = append(opts,
-			otlpmetricgrpc.WithDialOption(
-				grpc.WithContextDialer(httpConnectDialer(t.EgressProxyURL)),
-			),
-		)
+	for _, dialOption := range t.grpcDialOptions() {
+		opts = append(opts, otlpmetricgrpc.WithDialOption(dialOption))
 	}
 
 	return otlpmetricgrpc.New(ctx, opts...)
@@ -148,6 +144,9 @@ func newHTTPMetricsExporter(
 		opts = append(opts,
 			otlpmetrichttp.WithProxy(http.ProxyURL(t.EgressProxyURL)),
 		)
+	}
+	if client := t.overrideHTTPClient(); client != nil {
+		opts = append(opts, otlpmetrichttp.WithHTTPClient(client))
 	}
 
 	return otlpmetrichttp.New(ctx, opts...)
