@@ -62,6 +62,16 @@ prerelease-image-push *args:
 prerelease-image-test:
     scripts/test-build-prerelease-image.sh
 
+# Package a PR chart plus checksum and provenance manifest from image metadata.
+prerelease-artifacts-package pr_number pr_url sha image_metadata run_url output_dir="dist/prerelease":
+    scripts/package-prerelease-artifacts.sh \
+        {{pr_number}} {{pr_url}} {{sha}} {{image_metadata}} {{run_url}} {{output_dir}}
+
+# Test commit-scoped prerelease image and paired chart safeguards.
+prerelease-artifacts-test:
+    scripts/test-build-prerelease-image.sh
+    scripts/test-package-prerelease-artifacts.sh
+
 # Lint the canonical Helm chart with a valid direct-export configuration.
 chart-lint:
     helm lint charts/traversal-connector -f charts/traversal-connector/ci/direct-export-values.yaml
