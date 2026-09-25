@@ -3,6 +3,8 @@ name: dependency-policy
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
