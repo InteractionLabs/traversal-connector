@@ -103,6 +103,7 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 		Timeout: cfg.RequestTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: tlsConfig,
+			Proxy:           http.ProxyFromEnvironment,
 		},
 	}
 

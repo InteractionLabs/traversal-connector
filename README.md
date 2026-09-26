@@ -313,6 +313,28 @@ UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 ```
 
+### Upstream forward proxy
+
+Requests to upstream services honor the standard proxy environment variables
+(via Go's `http.ProxyFromEnvironment`), evaluated per request against the target
+URL. They are read once at startup, so changes require a restart:
+
+| Variable | Default | Description |
+|---|---|---|
+| `HTTPS_PROXY` | (none) | Forward proxy for `https://` upstream targets. |
+| `HTTP_PROXY` | (none) | Forward proxy for `http://` upstream targets. |
+| `NO_PROXY` | (none) | Comma-separated hosts that are dialed directly. `.example.com` (or `example.com`) matches the domain and all subdomains; `host:port` matches one port; CIDRs match only targets addressed by IP, since hostnames are not resolved before matching. Loopback targets always bypass the proxy. |
+
+These apply only to upstream requests. The controller tunnel and OTLP export use
+`EGRESS_PROXY_URL` and ignore these variables.
+
+```sh
+# Internet-hosted integrations via the corporate proxy; internal services direct.
+HTTPS_PROXY=http://proxy.corp.example.com:3128
+HTTP_PROXY=http://proxy.corp.example.com:3128
+NO_PROXY=.corp.example.com,10.0.0.0/8
+```
+
 ### Redaction
 
 The connector can redact sensitive values from upstream response bodies before
