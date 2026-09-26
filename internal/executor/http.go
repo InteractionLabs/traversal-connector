@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/net/http/httpproxy"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -105,7 +103,7 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 		Timeout: cfg.RequestTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: tlsConfig,
-			Proxy:           upstreamProxyFromEnvironment(),
+			Proxy:           http.ProxyFromEnvironment,
 		},
 	}
 
@@ -119,33 +117,6 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 		metrics:  metrics,
 		redactor: r,
 	}, nil
-}
-
-// upstreamProxyFromEnvironment routes upstream requests through the forward
-// proxy named by HTTP_PROXY / HTTPS_PROXY, bypassing it for hosts matched by
-// NO_PROXY. The environment is read here rather than through
-// http.ProxyFromEnvironment, which caches it process-wide on first use.
-func upstreamProxyFromEnvironment() func(*http.Request) (*url.URL, error) {
-	proxyCfg := httpproxy.FromEnvironment()
-	if proxyCfg.HTTPProxy != "" || proxyCfg.HTTPSProxy != "" {
-		slog.Info("upstream requests will honor proxy environment",
-			"http_proxy", redactProxyURL(proxyCfg.HTTPProxy),
-			"https_proxy", redactProxyURL(proxyCfg.HTTPSProxy),
-			"no_proxy", proxyCfg.NoProxy,
-		)
-	}
-	proxyFunc := proxyCfg.ProxyFunc()
-	return func(req *http.Request) (*url.URL, error) {
-		return proxyFunc(req.URL)
-	}
-}
-
-func redactProxyURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "<unparseable>"
-	}
-	return u.Redacted()
 }
 
 // Execute converts a protobuf HttpRequest into a real HTTP request, executes it

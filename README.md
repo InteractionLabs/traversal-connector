@@ -315,8 +315,9 @@ UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 
 ### Upstream forward proxy
 
-Requests to upstream services honor the standard proxy environment variables,
-evaluated per request against the target URL:
+Requests to upstream services honor the standard proxy environment variables
+(via Go's `http.ProxyFromEnvironment`), evaluated per request against the target
+URL. They are read once at startup, so changes require a restart:
 
 | Variable | Default | Description |
 |---|---|---|
