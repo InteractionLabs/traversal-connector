@@ -169,6 +169,7 @@ type ownedConn struct {
 	dialFn func(context.Context, string, string) (net.Conn, error)
 	mu     sync.Mutex
 	conns  []net.Conn
+	closed bool
 }
 
 func (o *ownedConn) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -177,14 +178,20 @@ func (o *ownedConn) dial(ctx context.Context, network, addr string) (net.Conn, e
 		return nil, err
 	}
 	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
 	o.conns = append(o.conns, conn)
-	o.mu.Unlock()
 	return conn, nil
 }
 
 func (o *ownedConn) close() {
 	o.mu.Lock()
+	o.closed = true
 	conns := o.conns
+	o.conns = nil
 	o.mu.Unlock()
 	for _, conn := range conns {
 		_ = conn.Close()

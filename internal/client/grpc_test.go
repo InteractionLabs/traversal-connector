@@ -619,3 +619,36 @@ func TestHandleMessage_UnknownMessage_ReturnsErrorResponse(t *testing.T) {
 		t.Error("expected non-empty error code")
 	}
 }
+
+func TestOwnedConnCloseRejectsALaterDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+
+	owned := &ownedConn{dialFn: (&net.Dialer{}).DialContext}
+	owned.close()
+	if _, err := owned.dial(context.Background(), "tcp", ln.Addr().String()); err == nil {
+		t.Fatal("dial after close returned a connection")
+	}
+
+	select {
+	case conn := <-accepted:
+		t.Cleanup(func() { _ = conn.Close() })
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("late dial stayed open after close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("late dial never reached the listener")
+	}
+}
