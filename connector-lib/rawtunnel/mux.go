@@ -15,12 +15,12 @@
 //
 // A stalled pipe stops only its own sends. A slow destination fills the
 // connection window the same way a frozen peer does, and a bulk transfer is
-// allowed to pause, so a blocked write does not end the tunnel. The Mux pings
-// on its own instead. A ping that was written and not acknowledged ends the
-// tunnel; a ping that is still waiting behind a blocked write does not. A
-// peer that has stopped running is detected by the HTTP/2 connection.
-// ConfigureHTTP2 sets those timeouts. When they close the connection, Send
-// and Receive return and the tunnel ends.
+// allowed to pause, so a blocked write does not end the tunnel. The Mux sends
+// its own pings so an idle tunnel still produces traffic. A ping that goes
+// unanswered does not end it: the acknowledgement is written by the same send
+// loop a slow pipe can block. A peer that has stopped running is detected by
+// the HTTP/2 connection. ConfigureHTTP2 sets those timeouts. When they close
+// the connection, Send and Receive return and the tunnel ends.
 package rawtunnel
 
 import (
@@ -51,7 +51,9 @@ const (
 	DefaultMaxLifetime = 4 * time.Hour
 	// DefaultPingInterval is how often a tunnel pings its peer.
 	DefaultPingInterval = 30 * time.Second
-	// DefaultPingTimeout is how long a written ping may go unanswered.
+	// DefaultPingTimeout is how long Ping waits for an acknowledgement. A miss
+	// does not end the tunnel: the peer may be unable to write it while a slow
+	// pipe blocks its send loop.
 	DefaultPingTimeout = 10 * time.Second
 	// DefaultWriteByteTimeout is how long an HTTP/2 connection write may make
 	// no progress before the connection is closed. Flow control does not start
@@ -74,9 +76,6 @@ var (
 	ErrCapacity = errors.New("rawtunnel: tunnel at pipe capacity")
 	// ErrPipeClosed reports that a pipe ended before it could be started.
 	ErrPipeClosed = errors.New("rawtunnel: pipe closed")
-	// errPingUnsent means the ping frame was still queued behind a write when
-	// its deadline passed. That is backpressure, not a dead peer.
-	errPingUnsent = errors.New("rawtunnel: ping was not written")
 )
 
 // ProtocolError reports a peer frame that violates the tunnel protocol. It
@@ -124,8 +123,8 @@ type Config struct {
 	// PingInterval is how often the tunnel pings its peer. Zero uses
 	// DefaultPingInterval.
 	PingInterval time.Duration
-	// PingTimeout is how long a written ping may go unanswered. A ping that is
-	// still queued does not count. Zero uses DefaultPingTimeout.
+	// PingTimeout is how long Ping waits for an acknowledgement. A miss does not
+	// end the tunnel. Zero uses DefaultPingTimeout.
 	PingTimeout time.Duration
 	// Accept is required for RoleConnector and invalid for RoleController. The
 	// Mux calls it on a new goroutine for every admitted open, and it must
@@ -133,8 +132,8 @@ type Config struct {
 	// Context is cancelled if the pipe ends first, so Accept can abandon a dial.
 	Accept func(p *Pipe, open *pb.RawOpen)
 	// Abort releases a Send or Receive blocked on the stream. The Mux calls it
-	// once, when the tunnel ends, and Run waits until both have returned. It
-	// must not block and must not use the Mux.
+	// once, when the tunnel ends, and Run does not return until Abort has
+	// returned. It must not block and must not use the Mux.
 	//
 	// For a Connect server, set the handler response's read and write deadlines
 	// to the past. For a Connect client, cancel the call context. Call
@@ -181,13 +180,9 @@ type Mux struct {
 
 	pingSeq, pingNonce uint64
 	pingPending        bool
-	// pingWrittenNonce is the nonce of the last ping whose Send returned.
-	// A later ping does not inherit it: a write that completes after that
-	// ping was abandoned is not evidence the new one was written.
-	pingWrittenNonce uint64
-	pingWaiter       chan struct{}
-	pingAckPending   bool
-	pingAckNonce     uint64
+	pingWaiter         chan struct{}
+	pingAckPending     bool
+	pingAckNonce       uint64
 }
 
 // New validates cfg and returns a Mux for stream. The caller performs the hello
@@ -294,24 +289,23 @@ func (m *Mux) sendLoop() {
 			m.end(fmt.Errorf("rawtunnel: send: %w", err))
 			return
 		}
-		m.mu.Lock()
-		if ping := f.GetPing(); ping != nil && !ping.GetAck() {
-			m.pingWrittenNonce = ping.GetNonce()
+		if sent == nil {
+			continue
 		}
+		m.mu.Lock()
 		if m.err != nil {
 			m.mu.Unlock()
 			return
 		}
-		if sent != nil {
-			sent()
-		}
+		sent()
 		m.mu.Unlock()
 	}
 }
 
-// keepalive ends the tunnel when a written ping goes unanswered. A ping still
-// queued behind a data write is backpressure from a slow pipe, so it is retried
-// rather than taken as the peer being gone.
+// keepalive sends pings so an idle tunnel still produces traffic. An
+// acknowledgement that never arrives is retried on the next interval. It is
+// not a failure: the peer writes it on the same send loop a slow pipe can
+// block, and a stopped process is detected by HTTP/2.
 func (m *Mux) keepalive(ctx context.Context) {
 	defer close(m.keepaliveStopped)
 	ticker := time.NewTicker(m.cfg.PingInterval)
@@ -325,15 +319,8 @@ func (m *Mux) keepalive(ctx context.Context) {
 		case <-ticker.C:
 		}
 		pctx, cancel := context.WithTimeout(ctx, m.cfg.PingTimeout)
-		err := m.Ping(pctx)
+		_ = m.Ping(pctx)
 		cancel()
-		if errors.Is(err, errPingUnsent) {
-			continue
-		}
-		if err != nil && ctx.Err() == nil && !errors.Is(err, ErrClosed) {
-			m.end(fmt.Errorf("rawtunnel: keepalive: %w", err))
-			return
-		}
 	}
 }
 
@@ -447,12 +434,8 @@ func (m *Mux) Ping(ctx context.Context) error {
 		return ErrClosed
 	case <-ctx.Done():
 		m.mu.Lock()
-		written := m.pingWrittenNonce == m.pingNonce
 		m.pingWaiter = nil
 		m.mu.Unlock()
-		if !written {
-			return errPingUnsent
-		}
 		return ctx.Err()
 	}
 }
