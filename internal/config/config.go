@@ -741,8 +741,9 @@ func (r RawTunnelConfig) validate() error {
 	if r.MaxTunnels <= 0 || r.MaxPipesPerTunnel <= 0 || r.MaxPipesPerPod <= 0 {
 		return errors.New("raw tunnel limits must be positive")
 	}
-	if r.MaxPipesPerTunnel > 1_000_000 || r.MaxPipesPerPod > 1_000_000 {
-		return errors.New("raw tunnel pipe limits are too large")
+	if r.MaxTunnels > 1_000_000 || r.MaxPipesPerTunnel > 1_000_000 ||
+		r.MaxPipesPerPod > 1_000_000 {
+		return errors.New("raw tunnel limits are too large")
 	}
 	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.OpenTimeout <= 0 ||
 		r.ShutdownGrace <= 0 || r.PingInterval <= 0 || r.RotationDeadline <= 0 {

@@ -24,6 +24,23 @@
 {{- if and .Values.proxyURL (or .Values.controllerConnectTo (and $telemetryEnabled .Values.otel.connectTo)) }}
 {{- fail "proxyURL cannot be combined with controllerConnectTo or otel.connectTo; fixed socket routing and forward proxy routing are mutually exclusive." }}
 {{- end }}
+{{- if .Values.rawTunnel.enabled }}
+{{- if ge (int .Values.rawTunnel.shutdownGraceSeconds) (int .Values.rawTunnel.terminationGraceSeconds) }}
+{{- fail "rawTunnel.shutdownGraceSeconds must be less than rawTunnel.terminationGraceSeconds so the connector can close pipes before Kubernetes sends SIGKILL" }}
+{{- end }}
+{{- if not .Values.rawTunnel.issuer }}
+{{- fail "rawTunnel.issuer is required when rawTunnel.enabled is true" }}
+{{- end }}
+{{- if not .Values.rawTunnel.allowedSubjects }}
+{{- fail "rawTunnel.allowedSubjects is required when rawTunnel.enabled is true" }}
+{{- end }}
+{{- if or (not .Values.rawTunnel.currentKeyID) (not .Values.rawTunnel.currentPublicKeyPEM) }}
+{{- fail "rawTunnel.currentKeyID and rawTunnel.currentPublicKeyPEM are required when rawTunnel.enabled is true" }}
+{{- end }}
+{{- if or (and .Values.rawTunnel.nextKeyID (not .Values.rawTunnel.nextPublicKeyPEM)) (and .Values.rawTunnel.nextPublicKeyPEM (not .Values.rawTunnel.nextKeyID)) }}
+{{- fail "rawTunnel.nextKeyID and rawTunnel.nextPublicKeyPEM must be set together" }}
+{{- end }}
+{{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}
 {{- $_ := set $otlp $signal (include "traversal-connector.otlpEndpoint" (dict "root" $ "signal" $signal)) }}
@@ -104,6 +121,9 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      {{- if .Values.rawTunnel.enabled }}
+      terminationGracePeriodSeconds: {{ .Values.rawTunnel.terminationGraceSeconds }}
+      {{- end }}
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
@@ -244,6 +264,46 @@ spec:
             {{- if $redactionEnabled }}
             - name: REDACTION_RULES_FILE
               value: /etc/traversal/redaction-rules.toml
+            {{- end }}
+            {{- if .Values.rawTunnel.enabled }}
+            - name: RAW_TUNNEL_ENABLED
+              value: "true"
+            - name: RAW_TUNNEL_MAX_TUNNELS
+              value: {{ .Values.rawTunnel.maxTunnels | quote }}
+            - name: RAW_TUNNEL_MAX_PIPES_PER_TUNNEL
+              value: {{ .Values.rawTunnel.maxPipesPerTunnel | quote }}
+            - name: RAW_TUNNEL_MAX_PIPES_PER_POD
+              value: {{ .Values.rawTunnel.maxPipesPerPod | quote }}
+            - name: RAW_TUNNEL_IDLE_TIMEOUT
+              value: {{ .Values.rawTunnel.idleTimeout | quote }}
+            - name: RAW_TUNNEL_MAX_LIFETIME
+              value: {{ .Values.rawTunnel.maxLifetime | quote }}
+            - name: RAW_TUNNEL_PING_INTERVAL
+              value: {{ .Values.rawTunnel.pingInterval | quote }}
+            - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS
+              value: {{ .Values.rawTunnel.shutdownGraceSeconds | quote }}
+            - name: RAW_TUNNEL_ISSUER
+              value: {{ .Values.rawTunnel.issuer | quote }}
+            - name: RAW_TUNNEL_ALLOWED_SUBJECTS
+              value: {{ join "," .Values.rawTunnel.allowedSubjects | quote }}
+            - name: RAW_TUNNEL_CURRENT_KEY_ID
+              value: {{ .Values.rawTunnel.currentKeyID | quote }}
+            - name: RAW_TUNNEL_CURRENT_PUBLIC_KEY
+              value: {{ .Values.rawTunnel.currentPublicKeyPEM | b64enc | quote }}
+            {{- with .Values.rawTunnel.nextKeyID }}
+            - name: RAW_TUNNEL_NEXT_KEY_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawTunnel.nextPublicKeyPEM }}
+            - name: RAW_TUNNEL_NEXT_PUBLIC_KEY
+              value: {{ . | b64enc | quote }}
+            {{- end }}
+            {{- with .Values.rawTunnel.forbiddenCIDRs }}
+            - name: RAW_TUNNEL_FORBIDDEN_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS
+              value: {{ .Values.rawTunnel.allowDelegatedProxyChecks | quote }}
             {{- end }}
           ports:
             - name: http

@@ -113,6 +113,19 @@ checksum_two=$(grep 'checksum/controller-tls:' "$tmp_dir/tls-two.yaml")
 [[ "$checksum_one" != "$checksum_two" ]] || fail "controller TLS certificate change did not change the pod-template checksum"
 assert_contains "$tmp_dir/tls-one.yaml" 'example.com/owner: ci'
 assert_not_contains "$tmp_dir/direct.yaml" 'checksum/controller-tls:'
+assert_not_contains "$tmp_dir/direct.yaml" 'RAW_TUNNEL_ENABLED'
+assert_not_contains "$tmp_dir/direct.yaml" 'terminationGracePeriodSeconds'
+
+render raw-on "$fixtures/direct-export-values.yaml" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
+assert_contains "$tmp_dir/raw-on.yaml" 'name: RAW_TUNNEL_ENABLED'
+assert_contains "$tmp_dir/raw-on.yaml" 'terminationGracePeriodSeconds: 45'
+assert_contains "$tmp_dir/raw-on.yaml" 'value: "traversal-raw-tunnel/ci"'
+assert_not_contains "$tmp_dir/raw-on.yaml" '-----BEGIN PUBLIC KEY-----'
 
 assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
 assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
@@ -130,6 +143,15 @@ assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
 assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
 assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
+assert_render_fails raw-no-issuer 'rawTunnel.issuer is required' "${common[@]}" --set rawTunnel.enabled=true
+assert_render_fails raw-grace 'shutdownGraceSeconds must be less' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set rawTunnel.shutdownGraceSeconds=45 \
+  --set rawTunnel.terminationGraceSeconds=45
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca

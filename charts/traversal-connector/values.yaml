@@ -200,3 +200,30 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ─── Raw tunnels ─────────────────────────────────────────────────────────────
+# Disabled by default. Enabling does not change the customer hostname, port
+# 443, mTLS identity, or firewall rules, and it does not change legacy tunnel
+# count, readiness, or health. Hosts covered by a redaction rule are refused
+# before dial. A customer forward proxy for raw destinations is HTTPS_PROXY /
+# NO_PROXY, not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
+# allowDelegatedProxyChecks is true. The per-pod pipe cap counts pipes on
+# draining tunnels, so a rotation cannot grow memory without a bound.
+rawTunnel:
+  enabled: false
+  maxTunnels: 2
+  maxPipesPerTunnel: 100
+  maxPipesPerPod: 200
+  idleTimeout: 15m
+  maxLifetime: 4h
+  pingInterval: 30s
+  shutdownGraceSeconds: 30
+  terminationGraceSeconds: 45
+  issuer: ""
+  allowedSubjects: []
+  currentKeyID: ""
+  currentPublicKeyPEM: ""
+  nextKeyID: ""
+  nextPublicKeyPEM: ""
+  forbiddenCIDRs: []
+  allowDelegatedProxyChecks: false

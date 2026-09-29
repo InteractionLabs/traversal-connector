@@ -280,6 +280,46 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
+### Raw tunnels
+
+Raw tunnels are off unless `RAW_TUNNEL_ENABLED=true`. Leaving them off changes
+nothing: the same number of legacy tunnels, the same readiness and health
+behavior, and the same process exit timing. Turning them on does not change
+the customer hostname, port 443, mTLS identity, or firewall rules. A connector
+that cannot open a raw tunnel keeps serving legacy tunnels.
+
+Pipes are checked in order: capability, exact host and port, redaction, DNS,
+forbidden addresses, then dial. A destination covered by any redaction rule is
+refused with `inspection_required` and is not dialed. The customer forward
+proxy for those dials is `HTTPS_PROXY` / `NO_PROXY`, which is separate from
+`EGRESS_PROXY_URL`. Proxied hostnames are refused unless
+`RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS=true`.
+
+`RAW_TUNNEL_MAX_PIPES_PER_POD` counts pipes on draining tunnels too, so a
+rotation cannot grow memory without a bound. New pipes may be refused with
+`capacity` until the old ones finish. On SIGTERM the connector stops admitting
+pipes, waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains.
+The pod's termination grace must be longer than that wait.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RAW_TUNNEL_ENABLED` | `false` | Open raw tunnels alongside the legacy ones. |
+| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod. Draining tunnels are extra. |
+| `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel. |
+| `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels. |
+| `RAW_TUNNEL_IDLE_TIMEOUT` | `15m` | Close a pipe that moves no bytes for this long. |
+| `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. |
+| `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. An unanswered ping does not close it. |
+| `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` | `30` | How long SIGTERM waits for pipes before closing them. |
+| `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. |
+| `RAW_TUNNEL_ALLOWED_SUBJECTS` | **required when enabled** | Comma-separated `sub` claims allowed to open pipes. |
+| `RAW_TUNNEL_CURRENT_KEY_ID` | **required when enabled** | `kid` of the current ES256 public key. |
+| `RAW_TUNNEL_CURRENT_PUBLIC_KEY` | **required when enabled** | PKIX P-256 public key, PEM or base64-encoded PEM. |
+| `RAW_TUNNEL_NEXT_KEY_ID` | (none) | `kid` trusted during a key rotation. Set with the next public key. |
+| `RAW_TUNNEL_NEXT_PUBLIC_KEY` | (none) | Next PKIX P-256 public key, PEM or base64-encoded PEM. |
+| `RAW_TUNNEL_FORBIDDEN_CIDRS` | (none) | Extra comma-separated CIDRs a pipe must never dial. |
+| `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS` | `false` | Allow proxied dials to hostnames. Leave false unless the proxy itself refuses loopback, link-local, and metadata addresses. |
+
 ### mTLS to the control plane
 
 mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
