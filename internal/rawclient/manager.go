@@ -35,6 +35,8 @@ type Manager struct {
 	opener  *opener
 	metrics *rawMetrics
 	hello   connectorHello
+	// backoff is copied into each slot. Slots do not share its counter, so one
+	// raw tunnel's failures cannot delay the others or the legacy tunnels.
 	backoff backoff
 	log     *slog.Logger
 
@@ -180,11 +182,9 @@ func (m *Manager) serve(
 	go m.watch(sess, next)
 	select {
 	case <-next:
-		if !m.spawnSlot(ctx) {
-			<-sess.runDone
-			m.finish(sess)
-			return false
-		}
+		// This goroutine waits out pipes already on the draining tunnel. The
+		// replacement is a separate slot, so the active-tunnel limit stays put.
+		_ = m.spawnSlot(ctx)
 		<-sess.runDone
 		m.finish(sess)
 		return false
