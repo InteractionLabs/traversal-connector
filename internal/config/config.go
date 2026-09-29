@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -149,9 +150,10 @@ type Config struct {
 	// When false, self-signed certificates are accepted.
 	UpstreamTLSVerify bool
 	// UpstreamTLSCA is the optional CA certificate PEM content for validating
-	// upstream observability platform certificates. Read from UPSTREAM_TLS_CA_BASE64;
-	// may be provided as raw PEM or base64-encoded PEM. Additional roots are
-	// appended to the system trust store.
+	// upstream observability platform certificates. Read from UPSTREAM_TLS_CA_BASE64
+	// (raw PEM or base64-encoded PEM) or from the file at UPSTREAM_TLS_CA_FILE;
+	// setting both is an error. Additional roots are appended to the system
+	// trust store.
 	UpstreamTLSCA *string
 	// RedactionRulesFile is the optional path to a TOML file containing redaction
 	// rules applied to all upstream response bodies before they leave the customer
@@ -228,6 +230,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	upstreamTLSCA, err := loadUpstreamTLSCA()
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL:       *traversalControllerURL,
@@ -276,10 +283,8 @@ func Load() (Config, error) {
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
 		),
-		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
-		UpstreamTLSCA: decodeCertificate(
-			env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64"),
-		),
+		UpstreamTLSVerify:  env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
+		UpstreamTLSCA:      upstreamTLSCA,
 		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
 		RedactionReloadInterval: env.GetEnvDuration(
 			"REDACTION_RELOAD_INTERVAL",
@@ -535,6 +540,29 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 	}
 
 	return tlsConfig, nil
+}
+
+// loadUpstreamTLSCA resolves the upstream CA from exactly one of
+// UPSTREAM_TLS_CA_BASE64 or UPSTREAM_TLS_CA_FILE. Both set is rejected rather
+// than resolved by precedence, since a silently ignored CA surfaces only as an
+// opaque x509 error at the first upstream request.
+func loadUpstreamTLSCA() (*string, error) {
+	inline := env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64")
+	path := env.GetEnvOptionalString("UPSTREAM_TLS_CA_FILE")
+	if inline != nil && path != nil {
+		return nil, errors.New(
+			"UPSTREAM_TLS_CA_BASE64 and UPSTREAM_TLS_CA_FILE are mutually exclusive: set only one",
+		)
+	}
+	if path == nil {
+		return decodeCertificate(inline), nil
+	}
+	contents, err := os.ReadFile(*path)
+	if err != nil {
+		return nil, fmt.Errorf("read UPSTREAM_TLS_CA_FILE: %w", err)
+	}
+	ca := string(contents)
+	return &ca, nil
 }
 
 // decodeCertificate attempts to decode a base64-encoded certificate.

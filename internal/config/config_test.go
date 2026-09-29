@@ -723,6 +723,72 @@ func TestLoad_RejectsProxyWithConnectToOverride(t *testing.T) {
 	}
 }
 
+func TestLoad_UpstreamTLSCASources(t *testing.T) {
+	const caPEM = "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----\n"
+	caFile := t.TempDir() + "/ca.crt"
+	if err := os.WriteFile(caFile, []byte(caPEM), 0o600); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    *string
+		wantErr string
+	}{
+		{
+			name: "file is read",
+			env:  map[string]string{"UPSTREAM_TLS_CA_FILE": caFile},
+			want: ptrTo(caPEM),
+		},
+		{
+			name: "base64 is decoded",
+			env: map[string]string{
+				"UPSTREAM_TLS_CA_BASE64": base64.StdEncoding.EncodeToString([]byte(caPEM)),
+			},
+			want: ptrTo(caPEM),
+		},
+		{
+			name: "both set is rejected",
+			env: map[string]string{
+				"UPSTREAM_TLS_CA_FILE":   caFile,
+				"UPSTREAM_TLS_CA_BASE64": caPEM,
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "missing file is rejected",
+			env:     map[string]string{"UPSTREAM_TLS_CA_FILE": caFile + ".missing"},
+			wantErr: "read UPSTREAM_TLS_CA_FILE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			for k, v := range tt.env {
+				_ = os.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, cfg.UpstreamTLSCA); diff != "" {
+				t.Fatalf("UpstreamTLSCA mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestDecodeCertificate(t *testing.T) {
 	pemCert := "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----"
 	pemKey := "-----BEGIN EC PRIVATE KEY-----\nMIIByyy\n-----END EC PRIVATE KEY-----" //nolint:gosec // test fixture, not a real key
@@ -959,7 +1025,7 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 		"OTEL_EXPORTER_OTLP_CONNECT_TO",
 		"TRAVERSAL_DISABLE_TELEMETRY",
-		"UPSTREAM_TLS_VERIFY",
+		"UPSTREAM_TLS_VERIFY", "UPSTREAM_TLS_CA_BASE64", "UPSTREAM_TLS_CA_FILE",
 	}
 	for _, key := range envVars {
 		_ = os.Unsetenv(key)
