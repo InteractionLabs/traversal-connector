@@ -244,6 +244,9 @@ func TestLoad(t *testing.T) {
 				t.Fatalf("Load() returned error: %v", err)
 			}
 
+			// These cases leave raw tunnels disabled. Load still fills the
+			// defaults so enabling the feature is a one-variable change.
+			tt.expected.RawTunnel = disabledRawTunnel()
 			if diff := cmp.Diff(tt.expected, cfg, cmp.AllowUnexported(Config{})); diff != "" {
 				t.Errorf("Load() mismatch (-want +got):\n%s", diff)
 			}
@@ -1010,6 +1013,45 @@ func assertCertificateTrusted(t *testing.T, cert *x509.Certificate, roots *x509.
 	}
 }
 
+func disabledRawTunnel() RawTunnelConfig {
+	return RawTunnelConfig{
+		MaxTunnels:        2,
+		MaxPipesPerTunnel: 100,
+		MaxPipesPerPod:    200,
+		IdleTimeout:       15 * time.Minute,
+		MaxLifetime:       4 * time.Hour,
+		PingInterval:      30 * time.Second,
+		ShutdownGrace:     30 * time.Second,
+	}
+}
+
+func TestLoad_RawTunnelDisabledDoesNotRequireIssuer(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RawTunnel.Enabled {
+		t.Fatal("raw tunnels enabled by default")
+	}
+}
+
+func TestLoad_RawTunnelEnabledRequiresIssuer(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("RAW_TUNNEL_ENABLED", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("enabled raw tunnels without an issuer")
+	}
+}
+
 func clearEnv() {
 	envVars := []string{
 		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
@@ -1026,6 +1068,22 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_CONNECT_TO",
 		"TRAVERSAL_DISABLE_TELEMETRY",
 		"UPSTREAM_TLS_VERIFY", "UPSTREAM_TLS_CA_BASE64", "UPSTREAM_TLS_CA_FILE",
+		"RAW_TUNNEL_ENABLED",
+		"RAW_TUNNEL_MAX_TUNNELS",
+		"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL",
+		"RAW_TUNNEL_MAX_PIPES_PER_POD",
+		"RAW_TUNNEL_IDLE_TIMEOUT",
+		"RAW_TUNNEL_MAX_LIFETIME",
+		"RAW_TUNNEL_PING_INTERVAL",
+		"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
+		"RAW_TUNNEL_ISSUER",
+		"RAW_TUNNEL_ALLOWED_SUBJECTS",
+		"RAW_TUNNEL_CURRENT_KEY_ID",
+		"RAW_TUNNEL_CURRENT_PUBLIC_KEY",
+		"RAW_TUNNEL_NEXT_KEY_ID",
+		"RAW_TUNNEL_NEXT_PUBLIC_KEY",
+		"RAW_TUNNEL_FORBIDDEN_CIDRS",
+		"RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS",
 	}
 	for _, key := range envVars {
 		_ = os.Unsetenv(key)

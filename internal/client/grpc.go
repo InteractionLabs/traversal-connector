@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"buf.build/go/protovalidate"
@@ -23,6 +24,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawtunnel"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -76,6 +78,117 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 		cfg.TraversalControllerURL,
 		opts...,
 	), nil
+}
+
+// rawFrameMaxBytes is large enough for a 32 KiB data frame or a 4 KiB
+// capability, and small enough that one raw tunnel cannot inherit the legacy
+// multi-megabyte message limit.
+const rawFrameMaxBytes = 128 << 10
+
+// NewIsolatedClient returns a Connector client whose connections are not shared
+// with any other client. Each raw tunnel uses one, so it never rides a legacy
+// tunnel's TCP connection, and raw reconnects cannot multiply legacy dials.
+// The cleanup func closes the tunnel's TCP connection. Cancelling the call
+// context does not unblock a read while the peer holds the connection open.
+func NewIsolatedClient(
+	cfg *config.Config,
+) (connectorconnect.ConnectorServiceClient, func(), error) {
+	transport, closeConn, err := newIsolatedTransport(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	rpc := connectorconnect.NewConnectorServiceClient(
+		&http.Client{Transport: transport},
+		cfg.TraversalControllerURL,
+		connect.WithGRPC(),
+		connect.WithReadMaxBytes(rawFrameMaxBytes),
+		connect.WithSendMaxBytes(rawFrameMaxBytes),
+		connect.WithInterceptors(
+			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
+		),
+	)
+	return rpc, func() {
+		closeConn()
+		transport.CloseIdleConnections()
+	}, nil
+}
+
+// newIsolatedTransport is a fresh HTTP/2 transport. It is not the legacy
+// tunnel transport: raw tunnels set the HTTP/2 ping and write timeouts that
+// detect a stopped controller, and each call returns a new pool.
+func newIsolatedTransport(cfg *config.Config) (*http.Transport, func(), error) {
+	controllerURL, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"invalid TRAVERSAL_CONTROLLER_URL %q: %w",
+			cfg.TraversalControllerURL, err,
+		)
+	}
+	var protocols http.Protocols
+	transport := &http.Transport{}
+	if controllerURL.Scheme == "https" {
+		tlsConfig, tlsErr := config.BuildClientTLSConfig(cfg)
+		if tlsErr != nil {
+			return nil, nil, tlsErr
+		}
+		if tlsConfig == nil {
+			return nil, nil, errors.New(
+				"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
+			)
+		}
+		tlsConfig.ServerName = controllerURL.Hostname()
+		transport.TLSClientConfig = tlsConfig
+		protocols.SetHTTP2(true)
+	} else {
+		protocols.SetUnencryptedHTTP2(true)
+	}
+	transport.Protocols = &protocols
+	http2cfg := &http.HTTP2Config{}
+	rawtunnel.ConfigureHTTP2(http2cfg)
+	transport.HTTP2 = http2cfg
+	dial := (&net.Dialer{}).DialContext
+	if cfg.TraversalControllerConnectTo != "" {
+		dial = fixedTargetDialer(cfg.TraversalControllerConnectTo)
+	}
+	owned := &ownedConn{dialFn: dial}
+	transport.DialContext = owned.dial
+	if cfg.EgressProxyURL != nil {
+		proxyURL, perr := url.Parse(*cfg.EgressProxyURL)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("invalid EGRESS_PROXY_URL: %w", perr)
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	return transport, owned.close, nil
+}
+
+// ownedConn remembers the TCP connection a raw tunnel dialed so Abort can
+// close it. A raw tunnel has one connection; closing it unblocks a read the
+// request context left waiting.
+type ownedConn struct {
+	dialFn func(context.Context, string, string) (net.Conn, error)
+	mu     sync.Mutex
+	conns  []net.Conn
+}
+
+func (o *ownedConn) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := o.dialFn(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	o.mu.Lock()
+	o.conns = append(o.conns, conn)
+	o.mu.Unlock()
+	return conn, nil
+}
+
+func (o *ownedConn) close() {
+	o.mu.Lock()
+	conns := o.conns
+	o.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 // tunnelMessageMaxBytes converts a configured HTTP body limit to a limit for

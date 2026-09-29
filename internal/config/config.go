@@ -38,6 +38,13 @@ const (
 	defaultMaxBackoffDelay         = 60 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
+	defaultRawMaxTunnels           = 2
+	defaultRawMaxPipesPerTunnel    = 100
+	defaultRawMaxPipesPerPod       = 200
+	defaultRawIdleTimeout          = 15 * time.Minute
+	defaultRawMaxLifetime          = 4 * time.Hour
+	defaultRawPingInterval         = 30 * time.Second
+	defaultRawShutdownGrace        = 30 * time.Second
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -161,6 +168,30 @@ type Config struct {
 	// RedactionReloadInterval is how often the redaction rules file is checked for
 	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
 	RedactionReloadInterval time.Duration
+	// RawTunnel configures the raw pipe tunnels. Disabled by default, and when
+	// disabled it changes nothing about the legacy tunnels.
+	RawTunnel RawTunnelConfig
+}
+
+// RawTunnelConfig is the raw-tunnel feature. Zero values are the defaults
+// applied by Load; Enabled is the only switch that turns the feature on.
+type RawTunnelConfig struct {
+	Enabled                   bool
+	MaxTunnels                int
+	MaxPipesPerTunnel         int
+	MaxPipesPerPod            int
+	IdleTimeout               time.Duration
+	MaxLifetime               time.Duration
+	PingInterval              time.Duration
+	ShutdownGrace             time.Duration
+	Issuer                    string
+	AllowedSubjects           []string
+	CurrentKeyID              string
+	CurrentPublicKeyPEM       string
+	NextKeyID                 string
+	NextPublicKeyPEM          string
+	ForbiddenCIDRs            []string
+	AllowDelegatedProxyChecks bool
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -289,8 +320,12 @@ func Load() (Config, error) {
 			"REDACTION_RELOAD_INTERVAL",
 			defaultRedactionReloadInterval,
 		),
+		RawTunnel: loadRawTunnelConfig(),
 	}
 
+	if err := cfg.RawTunnel.validate(); err != nil {
+		return Config{}, err
+	}
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
 	}
@@ -584,4 +619,109 @@ func decodeCertificate(encoded *string) *string {
 
 	decodedStr := string(decoded)
 	return &decodedStr
+}
+
+func loadRawTunnelConfig() RawTunnelConfig {
+	cfg := RawTunnelConfig{
+		Enabled: env.GetEnvBool("RAW_TUNNEL_ENABLED", false),
+		MaxTunnels: env.GetEnvInt(
+			"RAW_TUNNEL_MAX_TUNNELS", defaultRawMaxTunnels,
+		),
+		MaxPipesPerTunnel: env.GetEnvInt(
+			"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL", defaultRawMaxPipesPerTunnel,
+		),
+		MaxPipesPerPod: env.GetEnvInt(
+			"RAW_TUNNEL_MAX_PIPES_PER_POD", defaultRawMaxPipesPerPod,
+		),
+		IdleTimeout: env.GetEnvDuration(
+			"RAW_TUNNEL_IDLE_TIMEOUT", defaultRawIdleTimeout,
+		),
+		MaxLifetime: env.GetEnvDuration(
+			"RAW_TUNNEL_MAX_LIFETIME", defaultRawMaxLifetime,
+		),
+		PingInterval: env.GetEnvDuration(
+			"RAW_TUNNEL_PING_INTERVAL", defaultRawPingInterval,
+		),
+		ShutdownGrace: time.Duration(env.GetEnvInt(
+			"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
+			int(defaultRawShutdownGrace/time.Second),
+		)) * time.Second,
+		Issuer: env.GetEnvString("RAW_TUNNEL_ISSUER", ""),
+		AllowedSubjects: splitList(env.GetEnvString(
+			"RAW_TUNNEL_ALLOWED_SUBJECTS", "",
+		)),
+		CurrentKeyID: env.GetEnvString("RAW_TUNNEL_CURRENT_KEY_ID", ""),
+		CurrentPublicKeyPEM: decodedPEM(env.GetEnvString(
+			"RAW_TUNNEL_CURRENT_PUBLIC_KEY", "",
+		)),
+		NextKeyID: env.GetEnvString("RAW_TUNNEL_NEXT_KEY_ID", ""),
+		NextPublicKeyPEM: decodedPEM(env.GetEnvString(
+			"RAW_TUNNEL_NEXT_PUBLIC_KEY", "",
+		)),
+		ForbiddenCIDRs: splitList(env.GetEnvString(
+			"RAW_TUNNEL_FORBIDDEN_CIDRS", "",
+		)),
+		AllowDelegatedProxyChecks: env.GetEnvBool(
+			"RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS", false,
+		),
+	}
+	return cfg
+}
+
+// validate reports configuration that would admit raw pipes without the
+// identity material required to check them. Disabled tunnels skip it, so a
+// deployment that never sets the flag keeps today's startup behavior.
+func (r RawTunnelConfig) validate() error {
+	if !r.Enabled {
+		return nil
+	}
+	if r.MaxTunnels <= 0 || r.MaxPipesPerTunnel <= 0 || r.MaxPipesPerPod <= 0 {
+		return errors.New("raw tunnel limits must be positive")
+	}
+	if r.MaxPipesPerTunnel > 1_000_000 || r.MaxPipesPerPod > 1_000_000 {
+		return errors.New("raw tunnel pipe limits are too large")
+	}
+	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.ShutdownGrace <= 0 ||
+		r.PingInterval <= 0 {
+		return errors.New("raw tunnel timeouts must be positive")
+	}
+	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||
+		r.CurrentKeyID == "" || r.CurrentPublicKeyPEM == "" {
+		return errors.New(
+			"RAW_TUNNEL_ISSUER, RAW_TUNNEL_ALLOWED_SUBJECTS, " +
+				"RAW_TUNNEL_CURRENT_KEY_ID, and RAW_TUNNEL_CURRENT_PUBLIC_KEY " +
+				"are required when raw tunnels are enabled",
+		)
+	}
+	if (r.NextKeyID == "") != (r.NextPublicKeyPEM == "") {
+		return errors.New(
+			"RAW_TUNNEL_NEXT_KEY_ID and RAW_TUNNEL_NEXT_PUBLIC_KEY must be set together",
+		)
+	}
+	return nil
+}
+
+func splitList(value string) []string {
+	if value == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func decodedPEM(value string) string {
+	if value == "" || strings.HasPrefix(value, pemPrefix) {
+		return value
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return value
+	}
+	return string(decoded)
 }
