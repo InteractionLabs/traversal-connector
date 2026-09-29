@@ -32,6 +32,7 @@ type Manager struct {
 	cfg     *config.Config
 	enabled bool
 	newRPC  clientFactory
+	opener  *opener
 	metrics *rawMetrics
 	hello   connectorHello
 	backoff backoff
@@ -93,9 +94,16 @@ func newManager(
 		log:     logger,
 		started: make(chan struct{}),
 	}
-	// Pipe relay arrives with the opener. Until then an open is refused, so a
-	// controller cannot hang waiting for Start, and this process never dials.
-	_, _ = redactor, policy
+	if !cfg.RawTunnel.Enabled {
+		return m, nil
+	}
+	opener, err := newOpener(
+		cfg, redactor, policy, metrics, logger, m.hello.hostname, m.isShutdown,
+	)
+	if err != nil {
+		return nil, err
+	}
+	m.opener = opener
 	return m, nil
 }
 
@@ -254,6 +262,7 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 	sessCtx, cancel := context.WithCancel(ctx)
 	stream := rpc.RawTunnel(sessCtx)
 	stop := sync.OnceFunc(func() { closeClient(cleanup) })
+	opener := m.opener
 	var mux *rawtunnel.Mux
 	mux, err = rawtunnel.New(rawtunnel.Config{
 		Role:          rawtunnel.RoleConnector,
@@ -268,11 +277,8 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 			cancel()
 			stop()
 		},
-		Accept: func(p *rawtunnel.Pipe, _ *pb.RawOpen) {
-			_ = p.Refuse(
-				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING,
-				"connector draining",
-			)
+		Accept: func(p *rawtunnel.Pipe, open *pb.RawOpen) {
+			opener.accept(mux.TunnelID(), p, open)
 		},
 	}, rawtunnel.FromChunks(stream))
 	if err != nil {
@@ -425,11 +431,20 @@ func (m *Manager) shutdown() {
 	m.mu.Lock()
 	m.shuttingDown = true
 	cancel := m.cancel
+	opener := m.opener
 	m.mu.Unlock()
+	if opener != nil {
+		opener.mu.Lock()
+		opener.stop = true
+		opener.mu.Unlock()
+	}
 	if cancel != nil {
 		cancel()
 	}
 	m.wg.Wait()
+	if opener != nil {
+		opener.live.Wait()
+	}
 }
 
 func (m *Manager) isShutdown() bool {

@@ -1,6 +1,7 @@
 package rawclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,9 +10,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -230,6 +234,63 @@ func TestIncompatibleRawHelloLeavesLegacyTunnelUp(t *testing.T) {
 	}
 }
 
+func TestRotationKeepsThePipeAndOpensAReplacement(t *testing.T) {
+	ctrl := newMuxCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var dials int
+	policy := directPolicy(t,
+		func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{checkedAddr()}, nil
+		},
+		countDialer(&dials, ln.Addr().String()),
+	)
+	_ = policy
+	cfg := baseConfig(srv.url)
+	m := startManager(t, cfg, policy)
+	t.Cleanup(m.Shutdown)
+
+	first := recvMux(t, ctrl)
+	dstCh := acceptOne(ln)
+	pipe, peer := openPipe(t, first, sign(t, "jti-rotate"))
+	dst := <-dstCh
+	t.Cleanup(func() { _ = dst.Close() })
+
+	first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	second := recvMux(t, ctrl)
+	waitFor(t, 2*time.Second, func() bool {
+		active, draining := m.snapshot()
+		return active == 1 && draining == 1
+	})
+	if _, err := first.Open(
+		sign(t, "jti-late"), testHost, testPort,
+		pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+	); !errors.Is(err, rawtunnel.ErrDraining) {
+		t.Fatalf("open on draining tunnel: %v", err)
+	}
+	if _, err := peer.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	_ = dst.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(dst, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("rotation cut the pipe: %v %q", err, buf)
+	}
+	select {
+	case <-pipe.Done():
+		t.Fatal("rotation closed the pipe")
+	default:
+	}
+	if second == nil {
+		t.Fatal("replacement tunnel missing")
+	}
+}
+
 func TestIdleRotationReplacesWithoutBackoff(t *testing.T) {
 	ctrl := newMuxCtrl()
 	srv := serveH2C(t, ctrl)
@@ -340,4 +401,93 @@ func (c *stickyDrainCtrl) Tunnel(
 			return nil
 		}
 	}
+}
+
+func TestDrainKeepsHalfClosedSlowAndSilentPipes(t *testing.T) {
+	ctrl := newMuxCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	policy := directPolicy(t,
+		func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{checkedAddr()}, nil
+		},
+		func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, ln.Addr().String())
+		},
+	)
+	cfg := baseConfig(srv.url)
+	m := startManager(t, cfg, policy)
+	t.Cleanup(m.Shutdown)
+	mux := recvMux(t, ctrl)
+	halfPipe, halfPeer, halfDst := holdPipe(t, mux, ln, "jti-half")
+	if err := halfPeer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = halfDst.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := halfDst.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("half-close before drain: %v", err)
+	}
+	silentPipe, _, _ := holdPipe(t, mux, ln, "jti-silent")
+	slowPipe, _, slowDst := holdPipe(t, mux, ln, "jti-slow")
+	go func() { _, _ = slowDst.Write(bytes.Repeat([]byte("x"), 300<<10)) }()
+
+	mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	replacement := recvMux(t, ctrl)
+	waitFor(t, 2*time.Second, func() bool {
+		active, draining := m.snapshot()
+		return active == 1 && draining == 1
+	})
+	next := acceptOne(ln)
+	opened, err := replacement.Open(
+		sign(t, "jti-new"), testHost, testPort,
+		pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := opened.WaitOpened(ctx); err != nil {
+		t.Fatalf("replacement open: %v", err)
+	}
+	<-next
+	for _, pipe := range []*rawtunnel.Pipe{halfPipe, silentPipe, slowPipe} {
+		select {
+		case <-pipe.Done():
+			t.Fatal("drain closed a live pipe")
+		default:
+		}
+	}
+}
+
+func holdPipe(
+	t *testing.T, mux *rawtunnel.Mux, ln net.Listener, jti string,
+) (*rawtunnel.Pipe, *net.TCPConn, *net.TCPConn) {
+	t.Helper()
+	dstCh := acceptOne(ln)
+	pipe, peer := openPipe(t, mux, sign(t, jti))
+	dst := (<-dstCh).(*net.TCPConn)
+	t.Cleanup(func() {
+		_ = peer.Close()
+		_ = dst.Close()
+	})
+	return pipe, peer, dst
+}
+
+func acceptOne(ln net.Listener) <-chan net.Conn {
+	ch := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		ch <- conn
+	}()
+	return ch
 }

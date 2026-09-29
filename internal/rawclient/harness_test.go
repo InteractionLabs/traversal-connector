@@ -6,10 +6,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,7 +23,9 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawtunnel"
@@ -30,6 +36,8 @@ const (
 	testIssuer  = "traversal-raw-tunnel/test"
 	testSubject = "signer"
 	testKid     = "k1"
+	testHost    = "db.internal"
+	testPort    = 5432
 )
 
 type respKey struct{}
@@ -44,6 +52,36 @@ func publicPEM(key *ecdsa.PrivateKey) string {
 		panic(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+func testClaims(jti string) capability.Claims {
+	now := time.Now().Add(-time.Second)
+	return capability.Claims{
+		Issuer:         testIssuer,
+		Audience:       capability.Audience,
+		Subject:        testSubject,
+		OrganizationID: "org-1",
+		IntegrationID:  "integration-1",
+		ConnectorID:    "connector-1",
+		Host:           testHost,
+		Port:           testPort,
+		Mode:           capability.ModePassthrough,
+		ConsumerID:     "consumer-1",
+		TrafficClass:   "standard",
+		SessionID:      "session-1",
+		JTI:            jti,
+		IssuedAt:       now.Unix(),
+		ExpiresAt:      now.Add(2 * time.Minute).Unix(),
+	}
+}
+
+func sign(t *testing.T, jti string) string {
+	t.Helper()
+	token, err := capabilitytest.Sign(testKey(), testKid, testClaims(jti))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 func baseConfig(controllerURL string) *config.Config {
@@ -73,6 +111,25 @@ func baseConfig(controllerURL string) *config.Config {
 			CurrentPublicKeyPEM: publicPEM(testKey()),
 		},
 	}
+}
+
+func directPolicy(
+	t *testing.T,
+	lookup func(context.Context, string, string) ([]netip.Addr, error),
+	dial func(context.Context, string, string) (net.Conn, error),
+) *dialpolicy.Policy {
+	t.Helper()
+	policy, err := dialpolicy.New(dialpolicy.Config{
+		LookupNetIP: lookup,
+		DialContext: dial,
+		Proxy: func(string, uint16) (*url.URL, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return policy
 }
 
 type h2Server struct {
@@ -208,6 +265,46 @@ func (m *Manager) snapshot() (active, draining, sessions, connecting int) {
 	return m.active, m.draining, len(m.sessions), m.connecting
 }
 
+func tcpPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	left, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return left.(*net.TCPConn), right.(*net.TCPConn)
+}
+
+func openPipe(
+	t *testing.T, mux *rawtunnel.Mux, token string,
+) (*rawtunnel.Pipe, *net.TCPConn) {
+	t.Helper()
+	pipe, err := mux.Open(
+		token, testHost, testPort, pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := pipe.WaitOpened(ctx); err != nil {
+		t.Fatal(err)
+	}
+	local, peer := tcpPair(t)
+	if err := pipe.Start(local); err != nil {
+		t.Fatal(err)
+	}
+	return pipe, peer
+}
+
 func discardLogs() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -304,4 +401,51 @@ func rejectHello(
 	}
 	_ = resp.Body.Close()
 	return nil
+}
+
+func jsonLogger() (*slog.Logger, *logBuf) {
+	buf := &logBuf{}
+	return slog.New(slog.NewJSONHandler(buf, nil)), buf
+}
+
+// logBuf is the test logger's buffer. slog writes it from tunnel goroutines
+// while the test reads it.
+type logBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// checkedAddr is the address dial tests pretend DNS returned. It is not a
+// forbidden range, and the dialer redirects it at a local listener.
+func checkedAddr() netip.Addr { return netip.MustParseAddr("192.0.2.10") }
+
+func countDialer(n *int, target string) func(context.Context, string, string) (net.Conn, error) {
+	var mu sync.Mutex
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		mu.Lock()
+		*n++
+		mu.Unlock()
+		var d net.Dialer
+		return d.DialContext(ctx, network, target)
+	}
+}
+
+func neverDial(t *testing.T) func(context.Context, string, string) (net.Conn, error) {
+	t.Helper()
+	return func(context.Context, string, string) (net.Conn, error) {
+		t.Error("dialed")
+		return nil, errors.New("dialed")
+	}
 }
