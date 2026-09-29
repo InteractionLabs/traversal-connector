@@ -186,6 +186,7 @@ func TestProxyResponseForms(t *testing.T) {
 		"HTTP/1.1 204 No Content\r\n\r\n",
 		"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+		"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 Connection established\r\n\r\n",
 	} {
 		t.Run(strings.SplitN(response, "\r\n", 2)[0], func(t *testing.T) {
 			proxy := httptest.NewServer(&connectProxy{

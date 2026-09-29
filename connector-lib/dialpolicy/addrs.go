@@ -33,16 +33,26 @@ var builtinForbidden = []netip.Prefix{
 	netip.MustParsePrefix("fd00:ec2::254/128"),
 }
 
-// nat64 is the well-known NAT64 prefix, whose addresses reach the IPv4
-// address in their last 32 bits.
-var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+// nat64Prefixes embed an IPv4 address in their last 32 bits. 64:ff9b::/96 is
+// the well-known prefix; 64:ff9b:1::/48 is the local-use prefix. Either one
+// reaches the IPv4 address a pipe would reach directly.
+var nat64Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+}
 
 // forbiddenNames always reach the local host or a cloud metadata service,
 // wherever they are resolved. They matter for proxied dials, where the proxy
 // resolves the name and the connector never sees the address.
 func forbiddenName(host string) bool {
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") ||
-		host == "metadata.google.internal" || host == "metadata.goog"
+	switch host {
+	case "localhost", "ip6-localhost", "ip6-loopback",
+		"metadata.google.internal", "metadata.goog",
+		"instance-data.ec2.internal":
+		return true
+	default:
+		return strings.HasSuffix(host, ".localhost")
+	}
 }
 
 // interfacePrefixes returns a single-address prefix for each of the host's
@@ -87,7 +97,10 @@ func normalizePrefix(prefix netip.Prefix) (netip.Prefix, error) {
 
 func (p *Policy) forbidden(addr netip.Addr) bool {
 	addr = addr.Unmap().WithZone("")
-	if nat64.Contains(addr) {
+	for _, prefix := range nat64Prefixes {
+		if !prefix.Contains(addr) {
+			continue
+		}
 		embedded := addr.As16()
 		if p.forbidden(netip.AddrFrom4([4]byte(embedded[12:]))) {
 			return true

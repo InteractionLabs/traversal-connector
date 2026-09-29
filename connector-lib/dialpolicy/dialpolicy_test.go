@@ -88,6 +88,7 @@ type fakeNet struct {
 	mu      sync.Mutex
 	lookups []string
 	dials   []string
+	block   map[string]bool
 }
 
 func (f *fakeNet) lookup(_ context.Context, network, host string) ([]netip.Addr, error) {
@@ -115,7 +116,12 @@ func (f *fakeNet) dial(ctx context.Context, network, address string) (net.Conn, 
 	f.mu.Lock()
 	f.dials = append(f.dials, address)
 	real, ok := f.listen[address]
+	block := f.block[address]
 	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if !ok {
 		return nil, errors.New("unreachable")
 	}
@@ -247,9 +253,42 @@ func TestDialFallsBackToNextCheckedAddress(t *testing.T) {
 		t.Fatalf("route = %+v", route)
 	}
 	roundTrip(t, c, "hello")
-	if f.dials[0] != "192.0.2.10:5432" || len(f.dials) != 2 {
+	if len(f.dials) != 2 || !dialed(f.dials, "192.0.2.10:5432") ||
+		!dialed(f.dials, "192.0.2.11:5432") {
 		t.Fatalf("dials = %v", f.dials)
 	}
+}
+
+func dialed(dials []string, address string) bool {
+	for _, d := range dials {
+		if d == address {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDialDoesNotWaitOnAnAddressThatNeverAnswers(t *testing.T) {
+	echo := echoServer(t)
+	f := &fakeNet{t: t,
+		addrs:  map[string][]string{"db.internal": {"192.0.2.10", "192.0.2.11"}},
+		listen: map[string]string{"192.0.2.11:5432": echo},
+		block:  map[string]bool{"192.0.2.10:5432": true},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	c, route, err := newPolicy(t, f, Config{}).Dial(ctx, "db.internal", 5432)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("dial took %v; the unreachable address held it", elapsed)
+	}
+	if route.Addr != netip.MustParseAddrPort("192.0.2.11:5432") {
+		t.Fatalf("route = %+v", route)
+	}
+	roundTrip(t, c, "hello")
 }
 
 func TestDialRefusals(t *testing.T) {
@@ -279,6 +318,12 @@ func TestDialRefusals(t *testing.T) {
 			CodeForbiddenAddress, true},
 		{"nat64 metadata answer", "db.internal", 5432, []string{"64:ff9b::a9fe:a9fe"},
 			CodeForbiddenAddress, true},
+		{"local nat64 metadata answer", "db.internal", 5432, []string{"64:ff9b:1::a9fe:a9fe"},
+			CodeForbiddenAddress, true},
+		{"instance data name", "instance-data.ec2.internal", 80, []string{"192.0.2.10"},
+			CodeForbiddenAddress, false},
+		{"ip6 localhost", "ip6-localhost", 80, []string{"192.0.2.10"},
+			CodeForbiddenAddress, false},
 		{"unresolvable", "missing.internal", 5432, nil, CodeResolveFailed, true},
 		{"no answers", "db.internal", 5432, []string{}, CodeResolveFailed, true},
 		{"unreachable", "db.internal", 5432, []string{"192.0.2.10"}, CodeDialFailed, true},

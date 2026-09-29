@@ -3,9 +3,9 @@
 //
 // A direct dial resolves the host once, as an absolute name so a search list
 // cannot rewrite it, refuses the pipe if any returned address is forbidden,
-// and connects only to those checked addresses, so the answer that was checked
-// is the one that is dialed. The authorized host is never replaced by the
-// dialed address: callers keep it for audit, and a proxied dial sends the
+// and dials the checked addresses at once. One that never answers cannot use
+// up the deadline and hide another. The authorized host is never replaced by
+// the dialed address: callers keep it for audit, and a proxied dial sends the
 // absolute name to the proxy.
 //
 // A proxied dial sends CONNECT host:port to the customer's forward proxy, which
@@ -238,19 +238,67 @@ func (p *Policy) Dial(ctx context.Context, host string, port uint16) (Conn, Rout
 			return nil, Route{}, refuse(CodeForbiddenAddress, nil)
 		}
 	}
-	var errs []error
-	for _, addr := range addrs {
-		target := netip.AddrPortFrom(addr.Unmap().WithZone(""), port)
-		conn, err := p.dialConn(ctx, target.String())
-		if err == nil {
-			return conn, Route{Addr: target}, nil
-		}
-		errs = append(errs, err)
-		if ctx.Err() != nil {
-			break
-		}
+	conn, addr, err := p.dialChecked(ctx, addrs, port)
+	if err != nil {
+		return nil, Route{}, refuse(CodeDialFailed, err)
 	}
-	return nil, Route{}, refuse(CodeDialFailed, errors.Join(errs...))
+	return conn, Route{Addr: addr}, nil
+}
+
+// dialChecked dials every allowed address at once and returns the first
+// connection. One address that never answers must not consume the whole
+// deadline and hide an address that would have worked.
+func (p *Policy) dialChecked(
+	ctx context.Context, addrs []netip.Addr, port uint16,
+) (Conn, netip.AddrPort, error) {
+	targets := make([]netip.AddrPort, len(addrs))
+	for i, addr := range addrs {
+		targets[i] = netip.AddrPortFrom(addr.Unmap().WithZone(""), port)
+	}
+	if len(targets) == 1 {
+		conn, err := p.dialConn(ctx, targets[0].String())
+		if err != nil {
+			return nil, netip.AddrPort{}, err
+		}
+		return conn, targets[0], nil
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type dialResult struct {
+		conn Conn
+		addr netip.AddrPort
+		err  error
+	}
+	results := make(chan dialResult, len(targets))
+	for _, target := range targets {
+		go func() {
+			conn, err := p.dialConn(ctx, target.String())
+			results <- dialResult{conn: conn, addr: target, err: err}
+		}()
+	}
+	var (
+		errs       []error
+		winner     Conn
+		winnerAddr netip.AddrPort
+	)
+	for range targets {
+		result := <-results
+		if result.err != nil {
+			errs = append(errs, result.err)
+			continue
+		}
+		if winner != nil {
+			_ = result.conn.Close()
+			continue
+		}
+		winner, winnerAddr = result.conn, result.addr
+		cancel()
+	}
+	if winner == nil {
+		return nil, netip.AddrPort{}, errors.Join(errs...)
+	}
+	return winner, winnerAddr, nil
 }
 
 func (p *Policy) dialConn(ctx context.Context, address string) (Conn, error) {

@@ -75,7 +75,7 @@ func (p *Policy) handshake(ctx context.Context, conn Conn, proxy *url.URL,
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, fmt.Errorf("forward proxy TLS: %w", err)
 		}
-		conn = tlsConn
+		conn = &tlsTunnel{Conn: tlsConn, raw: conn}
 	}
 	req := &http.Request{
 		Method: http.MethodConnect,
@@ -92,9 +92,18 @@ func (p *Policy) handshake(ctx context.Context, conn Conn, proxy *url.URL,
 		return nil, fmt.Errorf("send CONNECT: %w", err)
 	}
 	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, req)
-	if err != nil {
-		return nil, fmt.Errorf("read CONNECT response: %w", err)
+	var resp *http.Response
+	var err error
+	for {
+		resp, err = http.ReadResponse(br, req)
+		if err != nil {
+			return nil, fmt.Errorf("read CONNECT response: %w", err)
+		}
+		if resp.StatusCode/100 != 1 {
+			break
+		}
+		// An interim reply has no tunnel body. Keep reading for the final one.
+		_ = resp.Body.Close()
 	}
 	if resp.StatusCode/100 != 2 {
 		// Only a refusal has a body. A 2xx must not be read as one: RFC 9110
@@ -107,6 +116,22 @@ func (p *Policy) handshake(ctx context.Context, conn Conn, proxy *url.URL,
 		return &bufferedConn{Conn: conn, r: br}, nil
 	}
 	return conn, nil
+}
+
+// tlsTunnel half-closes the TCP connection as well as the TLS one. CloseWrite
+// on a tls.Conn only sends close_notify, and a proxy that does not treat that
+// as the end of the CONNECT upload will not half-close the target.
+type tlsTunnel struct {
+	*tls.Conn
+	raw Conn
+}
+
+func (t *tlsTunnel) CloseWrite() error {
+	err := t.Conn.CloseWrite()
+	if rawErr := t.raw.CloseWrite(); rawErr != nil {
+		err = errors.Join(err, rawErr)
+	}
+	return err
 }
 
 // bufferedConn returns bytes the proxy sent right after its CONNECT response
