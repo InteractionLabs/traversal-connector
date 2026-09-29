@@ -151,9 +151,8 @@ type Config struct {
 	UpstreamTLSVerify bool
 	// UpstreamTLSCA is the optional CA certificate PEM content for validating
 	// upstream observability platform certificates. Read from UPSTREAM_TLS_CA_BASE64
-	// (raw PEM or base64-encoded PEM) or from the file at UPSTREAM_TLS_CA_FILE;
-	// setting both is an error. Additional roots are appended to the system
-	// trust store.
+	// (raw or base64-encoded PEM) or UPSTREAM_TLS_CA_FILE. Additional roots are
+	// appended to the system trust store.
 	UpstreamTLSCA *string
 	// RedactionRulesFile is the optional path to a TOML file containing redaction
 	// rules applied to all upstream response bodies before they leave the customer
@@ -542,10 +541,7 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// loadUpstreamTLSCA resolves the upstream CA from exactly one of
-// UPSTREAM_TLS_CA_BASE64 or UPSTREAM_TLS_CA_FILE. Both set is rejected rather
-// than resolved by precedence, since a silently ignored CA surfaces only as an
-// opaque x509 error at the first upstream request.
+// Both set is rejected rather than resolved by precedence, so no CA is silently ignored.
 func loadUpstreamTLSCA() (*string, error) {
 	inline := env.GetEnvOptionalString("UPSTREAM_TLS_CA_BASE64")
 	path := env.GetEnvOptionalString("UPSTREAM_TLS_CA_FILE")
