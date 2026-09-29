@@ -491,12 +491,15 @@ func TestCapacityIsReleasedByClose(t *testing.T) {
 
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	accept := func(*Pipe, *pb.RawOpen) {}
+	abort := func() {}
 	for _, cfg := range []Config{
 		{MaxPipes: 1},
 		{Role: RoleController},
 		{Role: RoleConnector, MaxPipes: 1},
 		{Role: RoleController, MaxPipes: 1, Accept: accept},
 		{Role: RoleController, MaxPipes: 1, IdleTimeout: -1},
+		{Role: RoleController, MaxPipes: 1, Abort: abort, PingInterval: -1},
+		{Role: RoleController, MaxPipes: 1, Abort: abort, PingTimeout: -1},
 		{Role: RoleController, MaxPipes: 1},
 	} {
 		if _, err := New(cfg, nil); err == nil {

@@ -12,6 +12,15 @@
 // accepted. Control frames are sent before data frames, and data frames from
 // different pipes are sent round-robin, so one stalled pipe cannot delay
 // another pipe or the tunnel's control traffic.
+//
+// A stalled pipe stops only its own sends. A slow destination fills the
+// connection window the same way a frozen peer does, and a bulk transfer is
+// allowed to pause, so a blocked write does not end the tunnel. The Mux pings
+// on its own instead. A ping that was written and not acknowledged ends the
+// tunnel; a ping that is still waiting behind a blocked write does not. A
+// peer that has stopped running is detected by the HTTP/2 connection.
+// ConfigureHTTP2 sets those timeouts. When they close the connection, Send
+// and Receive return and the tunnel ends.
 package rawtunnel
 
 import (
@@ -40,6 +49,14 @@ const (
 	DefaultIdleTimeout = 15 * time.Minute
 	// DefaultMaxLifetime ends a pipe this long after it opened.
 	DefaultMaxLifetime = 4 * time.Hour
+	// DefaultPingInterval is how often a tunnel pings its peer.
+	DefaultPingInterval = 30 * time.Second
+	// DefaultPingTimeout is how long a written ping may go unanswered.
+	DefaultPingTimeout = 10 * time.Second
+	// DefaultWriteByteTimeout is how long an HTTP/2 connection write may make
+	// no progress before the connection is closed. Flow control does not start
+	// this clock: a slow destination does not look like a dead connection.
+	DefaultWriteByteTimeout = 30 * time.Second
 )
 
 // grantThreshold is how many consumed bytes a pipe accumulates before it
@@ -57,6 +74,9 @@ var (
 	ErrCapacity = errors.New("rawtunnel: tunnel at pipe capacity")
 	// ErrPipeClosed reports that a pipe ended before it could be started.
 	ErrPipeClosed = errors.New("rawtunnel: pipe closed")
+	// errPingUnsent means the ping frame was still queued behind a write when
+	// its deadline passed. That is backpressure, not a dead peer.
+	errPingUnsent = errors.New("rawtunnel: ping was not written")
 )
 
 // ProtocolError reports a peer frame that violates the tunnel protocol. It
@@ -101,27 +121,39 @@ type Config struct {
 	IdleTimeout time.Duration
 	// MaxLifetime defaults to DefaultMaxLifetime.
 	MaxLifetime time.Duration
+	// PingInterval is how often the tunnel pings its peer. Zero uses
+	// DefaultPingInterval.
+	PingInterval time.Duration
+	// PingTimeout is how long a ping may go unanswered. Zero uses
+	// DefaultPingTimeout.
+	PingTimeout time.Duration
 	// Accept is required for RoleConnector and invalid for RoleController. The
 	// Mux calls it on a new goroutine for every admitted open, and it must
 	// eventually call exactly one of Pipe.Start or Pipe.Refuse. The pipe's
 	// Context is cancelled if the pipe ends first, so Accept can abandon a dial.
 	Accept func(p *Pipe, open *pb.RawOpen)
 	// Abort releases a Send or Receive blocked on the stream. The Mux calls it
-	// once when the tunnel ends. It must not block and must not use the Mux.
-	// Without it a peer that stops reading would hold the tunnel open, and
-	// with it Run can still wait until the stream is no longer in use.
+	// once, when the tunnel ends, and Run waits until both have returned. It
+	// must not block and must not use the Mux.
+	//
+	// For a Connect server, set the handler response's read and write deadlines
+	// to the past. For a Connect client, cancel the call context. Call
+	// ConfigureHTTP2 on that client and server as well: a stream write deadline
+	// cannot unblock a connection write that has stopped making progress,
+	// because the reset it queues is stuck behind that write.
 	Abort func()
 }
 
 // Mux runs one raw tunnel. Create it with New, then call Run.
 type Mux struct {
-	cfg                      Config
-	stream                   Stream
-	kick                     chan struct{}
-	done                     chan struct{}
-	sendStopped, recvStopped chan struct{}
-	abortOnce                sync.Once
-	pingMu                   sync.Mutex
+	cfg                                        Config
+	stream                                     Stream
+	kick                                       chan struct{}
+	done                                       chan struct{}
+	sendStopped, recvStopped, keepaliveStopped chan struct{}
+	abortStopped                               chan struct{}
+	abortOnce                                  sync.Once
+	pingMu                                     sync.Mutex
 
 	mu      sync.Mutex
 	running bool
@@ -149,6 +181,7 @@ type Mux struct {
 
 	pingSeq, pingNonce uint64
 	pingPending        bool
+	pingWritten        bool // the current ping's Send has returned
 	pingWaiter         chan struct{}
 	pingAckPending     bool
 	pingAckNonce       uint64
@@ -166,7 +199,7 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 		return nil, errors.New("rawtunnel: RoleConnector requires Accept")
 	case cfg.Role == RoleController && cfg.Accept != nil:
 		return nil, errors.New("rawtunnel: RoleController does not accept pipes")
-	case cfg.IdleTimeout < 0 || cfg.MaxLifetime < 0:
+	case cfg.IdleTimeout < 0 || cfg.MaxLifetime < 0 || cfg.PingInterval < 0 || cfg.PingTimeout < 0:
 		return nil, errors.New("rawtunnel: timeouts must not be negative")
 	case cfg.Abort == nil:
 		return nil, errors.New("rawtunnel: Abort is required")
@@ -177,16 +210,24 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 	if cfg.MaxLifetime == 0 {
 		cfg.MaxLifetime = DefaultMaxLifetime
 	}
+	if cfg.PingInterval == 0 {
+		cfg.PingInterval = DefaultPingInterval
+	}
+	if cfg.PingTimeout == 0 {
+		cfg.PingTimeout = DefaultPingTimeout
+	}
 	return &Mux{
-		cfg:         cfg,
-		stream:      stream,
-		kick:        make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		sendStopped: make(chan struct{}),
-		recvStopped: make(chan struct{}),
-		pipes:       make(map[uint64]*Pipe),
-		draining:    make(chan struct{}),
-		drained:     make(chan struct{}),
+		cfg:              cfg,
+		stream:           stream,
+		kick:             make(chan struct{}, 1),
+		done:             make(chan struct{}),
+		sendStopped:      make(chan struct{}),
+		recvStopped:      make(chan struct{}),
+		keepaliveStopped: make(chan struct{}),
+		abortStopped:     make(chan struct{}),
+		pipes:            make(map[uint64]*Pipe),
+		draining:         make(chan struct{}),
+		drained:          make(chan struct{}),
 	}, nil
 }
 
@@ -210,9 +251,15 @@ func (m *Mux) Run(ctx context.Context) error {
 	defer stop()
 	go m.receiveLoop()
 	go m.sendLoop()
+	go m.keepalive(ctx)
 	<-m.done
 	<-m.sendStopped
 	<-m.recvStopped
+	<-m.keepaliveStopped
+	// Abort runs on whichever goroutine ended the tunnel, which may not be
+	// this one. Wait for it before returning: the handler must not return,
+	// and net/http must not tear the response down, while Abort still uses it.
+	<-m.abortStopped
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.err
@@ -244,10 +291,45 @@ func (m *Mux) sendLoop() {
 			m.end(fmt.Errorf("rawtunnel: send: %w", err))
 			return
 		}
-		if sent != nil {
-			m.mu.Lock()
-			sent()
+		m.mu.Lock()
+		if ping := f.GetPing(); ping != nil && !ping.GetAck() {
+			m.pingWritten = true
+		}
+		if m.err != nil {
 			m.mu.Unlock()
+			return
+		}
+		if sent != nil {
+			sent()
+		}
+		m.mu.Unlock()
+	}
+}
+
+// keepalive ends the tunnel when a written ping goes unanswered. A ping still
+// queued behind a data write is backpressure from a slow pipe, so it is retried
+// rather than taken as the peer being gone.
+func (m *Mux) keepalive(ctx context.Context) {
+	defer close(m.keepaliveStopped)
+	ticker := time.NewTicker(m.cfg.PingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.done:
+			return
+		case <-ticker.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, m.cfg.PingTimeout)
+		err := m.Ping(pctx)
+		cancel()
+		if errors.Is(err, errPingUnsent) {
+			continue
+		}
+		if err != nil && ctx.Err() == nil && !errors.Is(err, ErrClosed) {
+			m.end(fmt.Errorf("rawtunnel: keepalive: %w", err))
+			return
 		}
 	}
 }
@@ -350,6 +432,7 @@ func (m *Mux) Ping(ctx context.Context) error {
 	m.pingSeq++
 	m.pingNonce = m.pingSeq
 	m.pingPending = true
+	m.pingWritten = false
 	acked := make(chan struct{})
 	m.pingWaiter = acked
 	m.wakeLocked()
@@ -362,8 +445,12 @@ func (m *Mux) Ping(ctx context.Context) error {
 		return ErrClosed
 	case <-ctx.Done():
 		m.mu.Lock()
+		written := m.pingWritten
 		m.pingWaiter = nil
 		m.mu.Unlock()
+		if !written {
+			return errPingUnsent
+		}
 		return ctx.Err()
 	}
 }
@@ -415,7 +502,10 @@ func (m *Mux) endLocked(err error) bool {
 // releaseStream unblocks Send and Receive. It runs outside the mux lock, since
 // Abort may end the call context and re-enter the mux.
 func (m *Mux) releaseStream() {
-	m.abortOnce.Do(m.cfg.Abort)
+	m.abortOnce.Do(func() {
+		m.cfg.Abort()
+		close(m.abortStopped)
+	})
 }
 
 // teardownLocked ends every remaining pipe once the tunnel has ended. Nothing

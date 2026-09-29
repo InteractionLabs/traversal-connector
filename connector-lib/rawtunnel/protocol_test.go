@@ -601,6 +601,77 @@ func blockedMux(t *testing.T) (m *Mux, peer, stream *chanStream, pipe *Pipe,
 	return m, ours, theirs, pipe, cancel, errs
 }
 
+func TestBlockedWriteDoesNotFailKeepalive(t *testing.T) {
+	ours, theirs := streamPair(0)
+	pipes := make(chan *Pipe, 1)
+	m, err := New(Config{
+		Role: RoleConnector, MaxPipes: 4, Abort: theirs.abort,
+		PingInterval: 20 * time.Millisecond, PingTimeout: 30 * time.Millisecond,
+		Accept: func(p *Pipe, _ *pb.RawOpen) {
+			_ = p.Start(newMemLocal(true))
+			pipes <- p
+		},
+	}, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- m.Run(ctx) }()
+	if err := ours.Send(open(1)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		f, err := ours.Receive()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.GetOpened() != nil {
+			break
+		}
+	}
+	pipe := <-pipes
+	eventually(t, "the writer to block", func() bool { return pipe.Result().BytesSent > 0 })
+	// Several ping deadlines pass while Send is blocked. That is a slow pipe,
+	// and the other pipes on a real tunnel would still be waiting with it.
+	select {
+	case err := <-runErr:
+		t.Fatalf("Run = %v while the write was only blocked", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-runErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(waitTimeout):
+		t.Fatal("Run did not return")
+	}
+	wantReason(t, waitDone(t, pipe), pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST)
+}
+
+func TestUnansweredPingEndsTunnel(t *testing.T) {
+	p := newPeer(t, Config{
+		Role:         RoleController,
+		MaxPipes:     4,
+		PingInterval: 20 * time.Millisecond,
+		PingTimeout:  40 * time.Millisecond,
+	}, 8)
+	go func() {
+		for {
+			if _, err := p.s.Receive(); err != nil {
+				return
+			}
+		}
+	}()
+	waitClosed(t, p.m.Done(), "tunnel ended by keepalive")
+	if err := <-p.runErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run = %v, want the ping deadline", err)
+	}
+}
+
 func TestTunnelEndsWhileSendIsBlocked(t *testing.T) {
 	waitRun := func(t *testing.T, runErr <-chan error, stream *chanStream) error {
 		t.Helper()
