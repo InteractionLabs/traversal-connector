@@ -67,6 +67,8 @@ upstreamTLS:
   verify: true             # UPSTREAM_TLS_VERIFY
   caPEM: ""                # → UPSTREAM_TLS_CA_BASE64
   existingSecret: ""       # name of pre-existing Secret with key ca.crt
+  caFile: ""               # → UPSTREAM_TLS_CA_FILE: in-container path to a PEM CA file
+                           # (e.g. Vault Agent / CSI-injected); excludes caPEM and existingSecret
 
 # ─── Telemetry (OTLP) ────────────────────────────────────────────────────────
 # Telemetry is the only view Traversal has into a connector running inside your
