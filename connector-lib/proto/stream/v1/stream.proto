@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package stream.v1;
+
+import "buf/validate/validate.proto";
+import "connector/v1/raw_tunnel.proto";
+
+option go_package = "github.com/InteractionLabs/traversal-connector/connector-lib/gen/stream/v1;stream";
+
+// StreamService is the controller's private, cluster-internal API for opening
+// one raw pipe per RPC. It is never exposed through the external edge gateway.
+service StreamService {
+  // Opens one pipe to the destination authorized by a connector capability and
+  // relays bytes in both directions.
+  //
+  // The first request must be `open`. The controller verifies the capability,
+  // routes to the controller pod that owns a raw tunnel for the capability's
+  // connector, and replies `opened` once the destination socket is connected.
+  // Afterwards both sides exchange `data` until each has sent `half_close`, and
+  // the controller ends the stream with `closed`. Either side may abort with
+  // `stream_reset`. Nothing is retried after `opened`.
+  //
+  // A failure before `opened` ends the RPC with a gRPC status and an
+  // OpenStreamError detail naming the reason. Callers must branch on that
+  // reason, never on the status message.
+  rpc OpenStream(stream OpenStreamRequest) returns (stream OpenStreamResponse);
+}
+
+// OpenStreamRequest is one message from the caller.
+message OpenStreamRequest {
+  // The message being sent.
+  oneof message {
+    option (buf.validate.oneof).required = true;
+
+    // Opens the pipe. Sent first and exactly once.
+    Open open = 1;
+    // Bytes for the destination.
+    Data data = 2;
+    // The caller will send no more data.
+    HalfClose half_close = 3;
+    // Aborts the pipe.
+    Reset stream_reset = 4;
+  }
+}
+
+// OpenStreamResponse is one message from the controller.
+message OpenStreamResponse {
+  // The message being sent.
+  oneof message {
+    option (buf.validate.oneof).required = true;
+
+    // The destination socket is connected. Sent exactly once, before any data.
+    Opened opened = 1;
+    // Bytes from the destination.
+    Data data = 2;
+    // The destination will send no more data.
+    HalfClose half_close = 3;
+    // The pipe was aborted. The last message on the stream.
+    Reset stream_reset = 4;
+    // The pipe ended normally. The last message on the stream.
+    Closed closed = 5;
+  }
+}
+
+// Open requests a pipe.
+message Open {
+  // The signed connector capability authorizing exactly one destination. Its
+  // claims supply the organization, connector, destination, and session; the
+  // request carries no destination of its own.
+  string capability = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 4096
+  }];
+  // A caller-chosen identifier for this open, recorded with the pipe's audit
+  // records.
+  string client_request_id = 2 [(buf.validate.field).string.max_len = 128];
+  // How long to wait for the destination to connect before failing with
+  // OPEN_TIMEOUT. Zero selects the controller's default.
+  uint32 open_timeout_ms = 3 [(buf.validate.field).uint32.lte = 60000];
+  // Set by a controller pod relaying the open to the pod that owns the raw
+  // tunnel. Callers leave it zero. A pod refuses an open with a hop count
+  // above one, which prevents routing loops.
+  uint32 hop_count = 4 [(buf.validate.field).uint32.lte = 1];
+}
+
+// Opened describes the pipe that was opened.
+message Opened {
+  // The connector the pipe runs through.
+  string connector_id = 1;
+  // The raw tunnel carrying the pipe.
+  string tunnel_id = 2;
+  // The pipe's identifier within the tunnel.
+  uint64 pipe_id = 3;
+  // The controller pod that owns the raw tunnel.
+  string controller_pod = 4;
+}
+
+// Data carries pipe bytes.
+message Data {
+  // The bytes, in order. Never empty and at most 32 KiB.
+  bytes payload = 1 [(buf.validate.field).bytes = {
+    min_len: 1
+    max_len: 32768
+  }];
+}
+
+// HalfClose ends the sender's direction of the pipe, like a TCP FIN.
+message HalfClose {}
+
+// Reset aborts the pipe in both directions.
+message Reset {
+  // Why the pipe was aborted.
+  connector.v1.RawCloseReason reason = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
+}
+
+// Closed reports how the pipe ended and how many bytes it carried.
+message Closed {
+  // How the pipe ended.
+  connector.v1.RawCloseReason reason = 1;
+  // Bytes delivered from the caller toward the destination.
+  uint64 bytes_sent = 2;
+  // Bytes delivered from the destination to the caller.
+  uint64 bytes_received = 3;
+}
+
+// OpenStreamError is attached as a gRPC error detail when OpenStream fails
+// before the pipe opens. The status code is fixed by the reason:
+//
+//   UNAUTHENTICATED     INVALID_CAPABILITY, CAPABILITY_EXPIRED, WRONG_AUDIENCE,
+//                       UNKNOWN_KEY
+//   PERMISSION_DENIED   FORBIDDEN, WRONG_CONNECTOR, WRONG_DESTINATION,
+//                       UNSUPPORTED_MODE, INSPECTION_REQUIRED
+//   RESOURCE_EXHAUSTED  CAPABILITY_EXHAUSTED, CAPACITY
+//   UNAVAILABLE         NO_RAW_TUNNEL, CONNECTOR_DRAINING
+//   FAILED_PRECONDITION FORBIDDEN_ADDRESS, DNS_FAILED, DIAL_FAILED
+//   DEADLINE_EXCEEDED   OPEN_TIMEOUT
+//   INVALID_ARGUMENT    PROTOCOL_ERROR
+message OpenStreamError {
+  // Why the pipe could not be opened.
+  connector.v1.RawOpenFailureReason reason = 1;
+}

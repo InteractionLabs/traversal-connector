@@ -338,6 +338,7 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 }
 
 type fixedBodyController struct {
+	connectorconnect.UnimplementedConnectorServiceHandler
 	bodySize int
 }
 

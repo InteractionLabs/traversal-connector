@@ -15,6 +15,10 @@ tunnels against upstream services on the local network.
 
 The wire protocol is defined in
 [`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
+[`raw_tunnel.proto`](connector-lib/proto/connector/v1/raw_tunnel.proto) defines the
+`RawTunnel` frames, which multiplex opaque byte pipes over their own tunnels, and
+[`connector-lib/proto/stream/v1/stream.proto`](connector-lib/proto/stream/v1/stream.proto)
+defines the controller's private, cluster-internal `OpenStream` API for those pipes.
 
 ## Setup
 
@@ -69,10 +73,12 @@ The protobuf definitions are managed with [`buf`](https://buf.build):
 ```bash
 cd connector-lib && buf lint
 cd connector-lib && buf format -w
+cd connector-lib && buf generate
 ```
 
 Generated code lives under [`connector-lib/gen/`](connector-lib/gen/) and is
-checked in.
+checked in. `buf.gen.yaml` pins each plugin to the version of its runtime library
+in `go.mod`, so regenerating an unchanged proto produces no diff.
 
 ### Prerelease test images
 

@@ -3,6 +3,7 @@ syntax = "proto3";
 package connector.v1;
 
 import "buf/validate/validate.proto";
+import "connector/v1/raw_tunnel.proto";
 
 option go_package = "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connector";
 
@@ -136,4 +137,12 @@ service ConnectorService {
   // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc Tunnel(stream ConnectorMessage) returns (stream ControllerMessage);
+
+  // Bidirectional streaming RPC that multiplexes raw byte pipes between the
+  // connector and controller. It runs on its own connections, independent of
+  // Tunnel, and is only established when the connector enables it.
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  rpc RawTunnel(stream RawTunnelFrame) returns (stream RawTunnelFrame);
 }
