@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,6 +101,10 @@ func serveH2C(t *testing.T, h connectorconnect.ConnectorServiceHandler) *h2Serve
 		Handler:           mux,
 		Protocols:         &protocols,
 		ReadHeaderTimeout: time.Second,
+		// net/http arms ReadHeaderTimeout on the connection before h2c takes
+		// over, and clears it only when ReadTimeout is set. Without that, every
+		// tunnel dies one second after accept.
+		ReadTimeout: time.Hour,
 	}
 	go func() { _ = srv.Serve(ln) }()
 	return &h2Server{
@@ -206,13 +211,15 @@ func (c *badVersionCtrl) Tunnel(
 
 type pingCtrl struct {
 	connectorconnect.UnimplementedConnectorServiceHandler
-	pings chan struct{}
+	pings   chan struct{}
+	tunnels atomic.Int32
 }
 
 func (c *pingCtrl) RawTunnel(
 	ctx context.Context,
 	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
 ) error {
+	c.tunnels.Add(1)
 	if _, err := stream.Receive(); err != nil {
 		return err
 	}

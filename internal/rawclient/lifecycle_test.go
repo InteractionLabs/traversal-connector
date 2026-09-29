@@ -124,6 +124,7 @@ func TestIsolatedClientSpeaksTLS(t *testing.T) {
 	}
 	srv := &http.Server{
 		Handler: mux, Protocols: &protocols, ReadHeaderTimeout: time.Second,
+		ReadTimeout: time.Hour,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{pair},
 			MinVersion:   tls.VersionTLS12,
@@ -183,15 +184,20 @@ func TestUnansweredPingDoesNotDropTheTunnel(t *testing.T) {
 	cfg.RawTunnel.PingInterval = 20 * time.Millisecond
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
-	for range 2 {
-		select {
-		case <-ctrl.pings:
-		case <-time.After(2 * time.Second):
-			t.Fatal("tunnel ended before two unanswered pings")
-		}
+	select {
+	case <-ctrl.pings:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tunnel sent no ping")
 	}
+	// Past the test server's old one-second header deadline, and long enough
+	// that an unanswered ping would already have dropped the tunnel if it were
+	// treated as a failure. A second hello would mean the slot reconnected.
+	time.Sleep(1500 * time.Millisecond)
 	if active, _ := m.snapshot(); active != 1 {
-		t.Fatalf("active tunnels = %d after unanswered pings", active)
+		t.Fatalf("active tunnels = %d after an unanswered ping", active)
+	}
+	if got := ctrl.tunnels.Load(); got != 1 {
+		t.Fatalf("raw tunnels opened = %d, want 1", got)
 	}
 }
 
