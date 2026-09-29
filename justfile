@@ -173,8 +173,11 @@ release version:
 deadcode:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Lists functions never called transitively from any main package.
-    out=$(deadcode ./...)
+    module=github.com/InteractionLabs/traversal-connector
+    # Lists binary code never called transitively from a main package, and
+    # connector-lib code, which other modules import, that no test exercises.
+    out=$(deadcode -filter "^$module/(cmd|internal)/" ./...)
+    out+=$(deadcode -test -filter "^$module/connector-lib/" ./...)
     if [ -n "$out" ]; then
         echo "Dead code detected:"
         echo "$out"
