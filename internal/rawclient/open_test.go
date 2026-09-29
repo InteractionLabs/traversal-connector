@@ -444,3 +444,49 @@ func gauge(t *testing.T, rm metricdata.ResourceMetrics, name string) int64 {
 	}
 	return points[0].Value
 }
+
+func TestTCPPortDoesNotTruncate(t *testing.T) {
+	if _, ok := tcpPort(&pb.RawOpen{Port: 70_000}); ok {
+		t.Fatal("accepted a port that does not fit in 16 bits")
+	}
+	if _, ok := tcpPort(&pb.RawOpen{Port: 0}); ok {
+		t.Fatal("accepted port 0")
+	}
+	got, ok := tcpPort(&pb.RawOpen{Port: 443})
+	if !ok || got != 443 {
+		t.Fatalf("port = %d, ok = %v", got, ok)
+	}
+}
+
+func TestCapacityRefusalRecordsTheVerifiedPipe(t *testing.T) {
+	logger, buf := jsonLogger()
+	ln := listen(t)
+	ctrl := newMuxCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	cfg := baseConfig(srv.url)
+	cfg.RawTunnel.MaxPipesPerPod = 1
+	m := startLogged(t, cfg, countingPolicy(t, ln, new(atomic.Int32)), logger)
+	var once sync.Once
+	stop := func() { once.Do(m.Shutdown) }
+	t.Cleanup(stop)
+	mux := recvMux(t, ctrl)
+	if _, err := openHeld(t, mux, sign(t, "jti-held")); err != nil {
+		t.Fatal(err)
+	}
+	token := sign(t, "jti-capacity")
+	if reason := openRefusal(t, mux, token); reason !=
+		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY {
+		t.Fatalf("reason %s", reason)
+	}
+	stop()
+	text := buf.String()
+	if strings.Contains(text, token) {
+		t.Fatal("audit log contains the capability")
+	}
+	for _, want := range []string{"jti-capacity", "org-1", "session-1", testHost} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audit log missing %s: %s", want, text)
+		}
+	}
+}

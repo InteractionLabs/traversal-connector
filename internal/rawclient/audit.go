@@ -3,8 +3,6 @@ package rawclient
 import (
 	"log/slog"
 	"time"
-
-	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 )
 
 // pipeAudit is the one metadata record written for a pipe. It never carries a
@@ -56,7 +54,3 @@ func (a pipeAudit) log(logger *slog.Logger) {
 		"reason", a.Reason,
 	)
 }
-
-func closeReasonName(reason pb.RawCloseReason) string { return reason.String() }
-
-func openReasonName(reason pb.RawOpenFailureReason) string { return reason.String() }

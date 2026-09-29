@@ -59,7 +59,7 @@ func newRawMetrics() (*rawMetrics, error) {
 	}
 	m.opens, err = meter.Int64Counter(
 		telemetry.MetricRawOpensTotal,
-		metric.WithDescription("Raw pipe opens admitted or refused before dial"),
+		metric.WithDescription("Raw pipe opens admitted or refused"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("raw opens: %w", err)

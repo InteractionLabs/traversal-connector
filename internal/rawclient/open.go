@@ -152,33 +152,42 @@ type opener struct {
 
 func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 	if !o.enter() {
-		o.refuse(tunnelID, open, p,
+		o.refuse(tunnelID, open, p, nil,
 			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING,
 			"connector draining")
 		return
 	}
 	defer o.leave()
 	if o.shuttingDown() {
-		o.refuse(tunnelID, open, p,
+		o.refuse(tunnelID, open, p, nil,
 			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING,
 			"connector draining")
+		return
+	}
+	// A TCP port does not fit this frame. Refuse before Verify so a malformed
+	// open cannot consume a jti.
+	port, ok := tcpPort(open)
+	if !ok {
+		o.refuse(tunnelID, open, p, nil,
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR,
+			"port is invalid")
 		return
 	}
 	verified, err := o.verifier.Verify(open.GetCapability(), capability.Expected{
 		ConnectorID: o.cfg.ConnectorID,
 		Host:        open.GetHost(),
-		Port:        portOf(open),
+		Port:        port,
 		Mode:        open.GetMode(),
 	})
 	if err != nil {
-		o.refuse(tunnelID, open, p, openFailure(err), failureDetail(err))
+		o.refuse(tunnelID, open, p, nil, openFailure(err), failureDetail(err))
 		return
 	}
 	o.metrics.skew(verified.ClockSkew)
 	// Count the pipe, including ones still running on a draining tunnel,
 	// before dialing so a full pod never opens another socket.
 	if !o.pipes.tryAcquire() {
-		o.refuse(tunnelID, open, p,
+		o.refuse(tunnelID, open, p, &verified.Claims,
 			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY,
 			"connector pipe capacity reached")
 		return
@@ -188,7 +197,7 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 	)
 	if err != nil {
 		o.pipes.release()
-		o.refuse(tunnelID, open, p, openFailure(err), failureDetail(err))
+		o.refuse(tunnelID, open, p, &verified.Claims, openFailure(err), failureDetail(err))
 		return
 	}
 	counted := &countingConn{Conn: conn, onHalf: o.metrics.halfClose}
@@ -256,18 +265,18 @@ func (o *opener) closed(
 		BytesSent:    result.BytesSent,
 		BytesRecv:    result.BytesReceived,
 		Outcome:      "closed",
-		Reason:       closeReasonName(result.Reason),
+		Reason:       result.Reason.String(),
 	}.log(o.log)
 }
 
 func (o *opener) refuse(
-	tunnelID string, open *pb.RawOpen, p *rawtunnel.Pipe,
+	tunnelID string, open *pb.RawOpen, p *rawtunnel.Pipe, claims *capability.Claims,
 	reason pb.RawOpenFailureReason, detail string,
 ) {
 	_ = p.Refuse(reason, detail)
 	o.metrics.refused(reason)
 	now := time.Now()
-	pipeAudit{
+	record := pipeAudit{
 		ConnectorID: o.cfg.ConnectorID,
 		TunnelID:    tunnelID,
 		PipeID:      p.ID(),
@@ -277,16 +286,29 @@ func (o *opener) refuse(
 		Opened:      now,
 		Closed:      now,
 		Outcome:     "refused",
-		Reason:      openReasonName(reason),
-	}.log(o.log)
+		Reason:      reason.String(),
+	}
+	// The token is untrusted until Verify succeeds, so a refusal before that
+	// records only the frame. After that, the audit uses the canonical claims.
+	if claims != nil {
+		record.Organization = claims.OrganizationID
+		record.Integration = claims.IntegrationID
+		record.JTI = claims.JTI
+		record.SessionID = claims.SessionID
+		record.ConsumerID = claims.ConsumerID
+		record.TrafficClass = claims.TrafficClass
+		record.Host = claims.Host
+		record.Port = uint32(claims.Port)
+	}
+	record.log(o.log)
 }
 
-func portOf(open *pb.RawOpen) uint16 {
+func tcpPort(open *pb.RawOpen) (uint16, bool) {
 	port := open.GetPort()
-	if port > 65535 {
-		return 0
+	if port == 0 || port > 65535 {
+		return 0, false
 	}
-	return uint16(port) //nolint:gosec // G115: port is at most 65535
+	return uint16(port), true //nolint:gosec // G115: port is at most 65535
 }
 
 func openFailure(err error) pb.RawOpenFailureReason {
