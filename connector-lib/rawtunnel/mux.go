@@ -124,8 +124,8 @@ type Config struct {
 	// PingInterval is how often the tunnel pings its peer. Zero uses
 	// DefaultPingInterval.
 	PingInterval time.Duration
-	// PingTimeout is how long a ping may go unanswered. Zero uses
-	// DefaultPingTimeout.
+	// PingTimeout is how long a written ping may go unanswered. A ping that is
+	// still queued does not count. Zero uses DefaultPingTimeout.
 	PingTimeout time.Duration
 	// Accept is required for RoleConnector and invalid for RoleController. The
 	// Mux calls it on a new goroutine for every admitted open, and it must
@@ -181,10 +181,13 @@ type Mux struct {
 
 	pingSeq, pingNonce uint64
 	pingPending        bool
-	pingWritten        bool // the current ping's Send has returned
-	pingWaiter         chan struct{}
-	pingAckPending     bool
-	pingAckNonce       uint64
+	// pingWrittenNonce is the nonce of the last ping whose Send returned.
+	// A later ping does not inherit it: a write that completes after that
+	// ping was abandoned is not evidence the new one was written.
+	pingWrittenNonce uint64
+	pingWaiter       chan struct{}
+	pingAckPending   bool
+	pingAckNonce     uint64
 }
 
 // New validates cfg and returns a Mux for stream. The caller performs the hello
@@ -235,9 +238,9 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 // returns why: ErrClosed after Close, ctx's error when ctx is done, a
 // *ProtocolError when the peer broke the protocol, or the stream's error.
 //
-// When the tunnel ends, Run calls Abort so a peer that stops reading cannot
-// hold it open, then waits until Send and Receive have returned. The stream
-// is unused when Run returns, so a server handler can return immediately.
+// When the tunnel ends, Run calls Abort and does not return until Abort, Send,
+// and Receive have all finished. The stream is unused when Run returns, so a
+// server handler can return immediately.
 func (m *Mux) Run(ctx context.Context) error {
 	m.mu.Lock()
 	if m.running {
@@ -293,7 +296,7 @@ func (m *Mux) sendLoop() {
 		}
 		m.mu.Lock()
 		if ping := f.GetPing(); ping != nil && !ping.GetAck() {
-			m.pingWritten = true
+			m.pingWrittenNonce = ping.GetNonce()
 		}
 		if m.err != nil {
 			m.mu.Unlock()
@@ -432,7 +435,6 @@ func (m *Mux) Ping(ctx context.Context) error {
 	m.pingSeq++
 	m.pingNonce = m.pingSeq
 	m.pingPending = true
-	m.pingWritten = false
 	acked := make(chan struct{})
 	m.pingWaiter = acked
 	m.wakeLocked()
@@ -445,7 +447,7 @@ func (m *Mux) Ping(ctx context.Context) error {
 		return ErrClosed
 	case <-ctx.Done():
 		m.mu.Lock()
-		written := m.pingWritten
+		written := m.pingWrittenNonce == m.pingNonce
 		m.pingWaiter = nil
 		m.mu.Unlock()
 		if !written {
