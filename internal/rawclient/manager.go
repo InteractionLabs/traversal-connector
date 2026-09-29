@@ -423,9 +423,10 @@ func (m *Manager) removeLocked(sess *session) {
 	}
 }
 
-// Shutdown stops the raw tunnels. When they are disabled it returns
-// immediately, so process exit timing is unchanged. It is safe to call more
-// than once; the second call waits for the first.
+// Shutdown stops admitting pipes, waits the grace period, then closes whatever
+// is still open with connector_terminating. When raw tunnels are disabled it
+// returns immediately, so process exit timing is unchanged. It is safe to call
+// more than once; the second call waits for the first.
 func (m *Manager) Shutdown() {
 	m.shutdownOnce.Do(m.shutdown)
 }
@@ -437,7 +438,9 @@ func (m *Manager) shutdown() {
 	}
 	m.mu.Lock()
 	m.shuttingDown = true
+	sessions := append([]*session(nil), m.sessions...)
 	cancel := m.cancel
+	grace := m.cfg.RawTunnel.ShutdownGrace
 	opener := m.opener
 	m.mu.Unlock()
 	if opener != nil {
@@ -445,12 +448,53 @@ func (m *Manager) shutdown() {
 		opener.stop = true
 		opener.mu.Unlock()
 	}
+	for _, sess := range sessions {
+		sess.mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_SHUTDOWN)
+	}
+	m.waitGrace(sessions, grace)
+	m.mu.Lock()
+	sessions = append([]*session(nil), m.sessions...)
+	m.mu.Unlock()
+	for _, sess := range sessions {
+		sess.mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+	}
+	// A healthy peer reads the close frames and the tunnel ends. A peer that
+	// has stopped reading cannot; cancelling the call unblocks Send, and the
+	// pipes already carry connector_terminating from Close.
+	m.waitDone(sessions, closeFlushTimeout)
 	if cancel != nil {
 		cancel()
 	}
 	m.wg.Wait()
 	if opener != nil {
 		opener.live.Wait()
+	}
+}
+
+const closeFlushTimeout = time.Second
+
+func (m *Manager) waitDone(sessions []*session, limit time.Duration) {
+	deadline := time.NewTimer(limit)
+	defer deadline.Stop()
+	for _, sess := range sessions {
+		select {
+		case <-sess.mux.Done():
+		case <-deadline.C:
+			return
+		}
+	}
+}
+
+func (m *Manager) waitGrace(sessions []*session, grace time.Duration) {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	for _, sess := range sessions {
+		select {
+		case <-sess.mux.Drained():
+		case <-sess.mux.Done():
+		case <-deadline.C:
+			return
+		}
 	}
 }
 

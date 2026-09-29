@@ -289,6 +289,28 @@ func TestCapabilityExhaustedDoesNotDial(t *testing.T) {
 	}
 }
 
+func TestShutdownClosesPipesWithConnectorTerminating(t *testing.T) {
+	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
+		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+	})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(m.Shutdown) })
+	dstCh := acceptOne(ln)
+	pipe, _ := openPipe(t, recvMux(t, ctrl), sign(t, "jti-shutdown"))
+	dst := <-dstCh
+	t.Cleanup(func() { _ = dst.Close() })
+	once.Do(m.Shutdown)
+	select {
+	case <-pipe.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown left the pipe open")
+	}
+	if got := pipe.Result().Reason; got !=
+		pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING {
+		t.Fatalf("reason %s", got)
+	}
+}
+
 func TestAuditOmitsTheCapability(t *testing.T) {
 	logger, buf := jsonLogger()
 	ctrl := newMuxCtrl()
