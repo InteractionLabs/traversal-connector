@@ -745,16 +745,28 @@ func (r RawTunnelConfig) validate() error {
 		r.MaxPipesPerPod > 1_000_000 {
 		return errors.New("raw tunnel limits are too large")
 	}
+	if r.MaxPipesPerPod < r.MaxPipesPerTunnel {
+		return errors.New(
+			"RAW_TUNNEL_MAX_PIPES_PER_POD must be at least " +
+				"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL",
+		)
+	}
 	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.OpenTimeout <= 0 ||
 		r.ShutdownGrace <= 0 || r.PingInterval <= 0 || r.RotationDeadline <= 0 {
 		return errors.New("raw tunnel timeouts must be positive")
 	}
-	if r.RotationDeadline < time.Second {
+	if r.PingInterval < time.Second || r.IdleTimeout < time.Second ||
+		r.MaxLifetime < time.Second || r.RotationDeadline < time.Second {
 		return errors.New("raw tunnel timeouts must be at least 1s")
 	}
 	if r.RotationDeadline > r.MaxLifetime {
 		return errors.New(
 			"RAW_TUNNEL_ROTATION_DEADLINE must not exceed RAW_TUNNEL_MAX_LIFETIME",
+		)
+	}
+	if r.IdleTimeout > r.MaxLifetime {
+		return errors.New(
+			"RAW_TUNNEL_IDLE_TIMEOUT must not exceed RAW_TUNNEL_MAX_LIFETIME",
 		)
 	}
 	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||
@@ -768,6 +780,11 @@ func (r RawTunnelConfig) validate() error {
 	if (r.NextKeyID == "") != (r.NextPublicKeyPEM == "") {
 		return errors.New(
 			"RAW_TUNNEL_NEXT_KEY_ID and RAW_TUNNEL_NEXT_PUBLIC_KEY must be set together",
+		)
+	}
+	if r.NextKeyID != "" && r.NextKeyID == r.CurrentKeyID {
+		return errors.New(
+			"RAW_TUNNEL_NEXT_KEY_ID must differ from RAW_TUNNEL_CURRENT_KEY_ID",
 		)
 	}
 	if !rawWindowOK(r.StreamWindow) || !rawWindowOK(r.OuterWindow) {

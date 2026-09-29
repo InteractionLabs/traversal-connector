@@ -144,6 +144,22 @@ assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 
 assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
 assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
 assert_render_fails raw-no-issuer 'rawTunnel.issuer is required' "${common[@]}" --set rawTunnel.enabled=true
+assert_render_fails raw-pipe-cap 'maxPipesPerPod must be at least' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set rawTunnel.maxPipesPerTunnel=100 \
+  --set rawTunnel.maxPipesPerPod=10
+assert_render_fails raw-duplicate-key 'nextKeyID must differ' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set-string rawTunnel.nextKeyID=k1 \
+  --set-string rawTunnel.nextPublicKeyPEM=abc
 assert_render_fails raw-grace 'shutdownGraceSeconds must be less' "${common[@]}" \
   --set rawTunnel.enabled=true \
   --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \

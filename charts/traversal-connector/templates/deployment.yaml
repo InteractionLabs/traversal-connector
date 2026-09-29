@@ -40,6 +40,12 @@
 {{- if or (and .Values.rawTunnel.nextKeyID (not .Values.rawTunnel.nextPublicKeyPEM)) (and .Values.rawTunnel.nextPublicKeyPEM (not .Values.rawTunnel.nextKeyID)) }}
 {{- fail "rawTunnel.nextKeyID and rawTunnel.nextPublicKeyPEM must be set together" }}
 {{- end }}
+{{- if and .Values.rawTunnel.nextKeyID (eq .Values.rawTunnel.nextKeyID .Values.rawTunnel.currentKeyID) }}
+{{- fail "rawTunnel.nextKeyID must differ from rawTunnel.currentKeyID" }}
+{{- end }}
+{{- if lt (int .Values.rawTunnel.maxPipesPerPod) (int .Values.rawTunnel.maxPipesPerTunnel) }}
+{{- fail "rawTunnel.maxPipesPerPod must be at least rawTunnel.maxPipesPerTunnel" }}
+{{- end }}
 {{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}

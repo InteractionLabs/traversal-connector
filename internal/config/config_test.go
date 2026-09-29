@@ -1050,6 +1050,7 @@ func TestLoad_RejectsMalformedRawTunnelEnv(t *testing.T) {
 		{key: "RAW_TUNNEL_ENABLED", value: "tru"},
 		{key: "RAW_TUNNEL_MAX_TUNNELS", value: "abc"},
 		{key: "RAW_TUNNEL_IDLE_TIMEOUT", value: "nope"},
+		{key: "RAW_TUNNEL_OPEN_TIMEOUT", value: "soon"},
 		{key: "RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS", value: "30s"},
 	}
 	for _, tc := range cases {
@@ -1066,6 +1067,72 @@ func TestLoad_RejectsMalformedRawTunnelEnv(t *testing.T) {
 				t.Fatalf("Load() = %v, want an error naming %s and not the value", err, tc.key)
 			}
 		})
+	}
+}
+
+func TestLoad_RawTunnelRejectsUnsafeLimits(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "pod cap below tunnel cap",
+			env: map[string]string{
+				"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL": "100",
+				"RAW_TUNNEL_MAX_PIPES_PER_POD":    "10",
+			},
+			want: "MAX_PIPES_PER_POD",
+		},
+		{
+			name: "ping shorter than a second",
+			env:  map[string]string{"RAW_TUNNEL_PING_INTERVAL": "1ms"},
+			want: "at least 1s",
+		},
+		{
+			name: "idle longer than the pipe lifetime",
+			env: map[string]string{
+				"RAW_TUNNEL_IDLE_TIMEOUT": "5h",
+				"RAW_TUNNEL_MAX_LIFETIME": "4h",
+			},
+			want: "IDLE_TIMEOUT",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			t.Cleanup(clearEnv)
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("RAW_TUNNEL_ENABLED", "true")
+			for key, value := range tt.env {
+				_ = os.Setenv(key, value)
+			}
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoad_RawTunnelRejectsDuplicateKeyID(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("RAW_TUNNEL_ENABLED", "true")
+	_ = os.Setenv("RAW_TUNNEL_ISSUER", "traversal-raw-tunnel/test")
+	_ = os.Setenv("RAW_TUNNEL_ALLOWED_SUBJECTS", "signer")
+	_ = os.Setenv("RAW_TUNNEL_CURRENT_KEY_ID", "k1")
+	_ = os.Setenv("RAW_TUNNEL_CURRENT_PUBLIC_KEY", "not-a-key")
+	_ = os.Setenv("RAW_TUNNEL_NEXT_KEY_ID", "k1")
+	_ = os.Setenv("RAW_TUNNEL_NEXT_PUBLIC_KEY", "not-a-key")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("Load() = %v, want duplicate key id", err)
 	}
 }
 
@@ -1103,6 +1170,7 @@ func clearEnv() {
 		"RAW_TUNNEL_MAX_PIPES_PER_POD",
 		"RAW_TUNNEL_IDLE_TIMEOUT",
 		"RAW_TUNNEL_MAX_LIFETIME",
+		"RAW_TUNNEL_OPEN_TIMEOUT",
 		"RAW_TUNNEL_PING_INTERVAL",
 		"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
 		"RAW_TUNNEL_ISSUER",

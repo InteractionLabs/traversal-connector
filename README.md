@@ -296,10 +296,13 @@ proxy for those dials is `HTTPS_PROXY` / `NO_PROXY`, which is separate from
 `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS=true`.
 
 `RAW_TUNNEL_MAX_PIPES_PER_POD` counts pipes on draining tunnels too, so a
-rotation cannot grow memory without a bound. New pipes may be refused with
-`capacity` until the old ones finish. On SIGTERM the connector stops admitting
-pipes, waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains.
-The pod's termination grace must be longer than that wait.
+rotation cannot grow memory without a bound, and it must be at least
+`RAW_TUNNEL_MAX_PIPES_PER_TUNNEL`. New pipes may be refused with `capacity`
+until the old ones finish. Ping, idle, and lifetime must be at least one
+second, and idle must not be longer than the lifetime. The next key id must
+differ from the current one. On SIGTERM the connector stops admitting pipes,
+waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains. The pod's
+termination grace must be longer than that wait.
 
 | Variable | Default | Description |
 |---|---|---|
