@@ -15,6 +15,9 @@
 {{- $sidecarEnabled := include "traversal-connector.sidecarEnabled" . -}}
 {{- $otlp := dict -}}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "controllerConnectTo" "address" .Values.controllerConnectTo) -}}
+{{- if and .Values.upstreamTLS.caFile $hasUpstreamTLS }}
+{{- fail "upstreamTLS.caFile cannot be combined with upstreamTLS.caPEM or upstreamTLS.existingSecret; set only one CA source." }}
+{{- end }}
 {{- if $telemetryEnabled }}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "otel.connectTo" "address" .Values.otel.connectTo) -}}
 {{- end }}
@@ -233,6 +236,10 @@ spec:
                 secretKeyRef:
                   name: {{ $upstreamSecret }}
                   key: ca.crt
+            {{- end }}
+            {{- with .Values.upstreamTLS.caFile }}
+            - name: UPSTREAM_TLS_CA_FILE
+              value: {{ . | quote }}
             {{- end }}
             {{- if $redactionEnabled }}
             - name: REDACTION_RULES_FILE

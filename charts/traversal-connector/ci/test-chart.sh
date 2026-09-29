@@ -68,6 +68,12 @@ assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM
 assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_CA_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: supplied-upstream-ca\n                  key: ca.crt'
 assert_not_contains "$tmp_dir/upstream-existing.yaml" 'name: upstream-existing-traversal-connector-upstream-tls'
 
+render upstream-file "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.caFile=/vault/secrets/upstream-ca.crt
+assert_contains "$tmp_dir/upstream-file.yaml" $'            - name: UPSTREAM_TLS_CA_FILE\n              value: "/vault/secrets/upstream-ca.crt"'
+assert_not_contains "$tmp_dir/upstream-file.yaml" 'UPSTREAM_TLS_CA_BASE64'
+assert_not_contains "$tmp_dir/upstream-file.yaml" 'name: upstream-file-traversal-connector-upstream-tls'
+assert_not_contains "$tmp_dir/direct.yaml" 'UPSTREAM_TLS_CA_FILE'
+
 render sidecar "$fixtures/sidecar-values.yaml"
 assert_contains "$tmp_dir/sidecar.yaml" 'name: telemetry-sidecar'
 assert_contains "$tmp_dir/sidecar.yaml" 'name: sidecar-traversal-connector-telemetry-sidecar'
@@ -124,5 +130,8 @@ assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
 assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
 assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
+
+assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
+assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
 
 echo "All chart tests passed."
