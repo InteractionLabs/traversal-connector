@@ -289,6 +289,28 @@ func TestCapabilityExhaustedDoesNotDial(t *testing.T) {
 	}
 }
 
+func TestRotationDeadlineClosesALivePipe(t *testing.T) {
+	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
+		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+	})
+	t.Cleanup(m.Shutdown)
+	dstCh := acceptOne(ln)
+	mux := recvMux(t, ctrl.ready)
+	pipe, _ := openPipe(t, mux, sign(t, "jti-rotate"))
+	dst := <-dstCh
+	t.Cleanup(func() { _ = dst.Close() })
+	mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	select {
+	case <-pipe.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("rotation left the pipe open")
+	}
+	if got := pipe.Result().Reason; got !=
+		pb.RawCloseReason_RAW_CLOSE_REASON_ROTATION_DEADLINE {
+		t.Fatalf("reason %s", got)
+	}
+}
+
 func TestShutdownClosesPipesWithConnectorTerminating(t *testing.T) {
 	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
 		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond

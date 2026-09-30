@@ -236,8 +236,9 @@ func (m *Manager) watch(sess *session, next chan struct{}) {
 }
 
 // retireDraining closes a drained tunnel once it has no pipes left, or when
-// ShutdownGrace elapses so a drained tunnel with lingering pipes cannot keep
-// its TCP connection forever across rotations.
+// ShutdownGrace elapses. That grace is the rotation deadline as well as the
+// shutdown wait. A rotation that still has pipes is not a pod shutdown, so
+// the close reason is rotation_deadline rather than connector_terminating.
 func (m *Manager) retireDraining(sess *session) {
 	grace := m.cfg.RawTunnel.ShutdownGrace
 	timer := time.NewTimer(grace)
@@ -248,7 +249,13 @@ func (m *Manager) retireDraining(sess *session) {
 	case <-sess.mux.Done():
 		return
 	}
-	sess.mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+	// Shutdown drains too, and this timer is the same grace. A pod that is
+	// exiting must still report connector_terminating.
+	reason := pb.RawCloseReason_RAW_CLOSE_REASON_ROTATION_DEADLINE
+	if m.isShutdown() {
+		reason = pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING
+	}
+	sess.mux.Close(reason)
 }
 
 func (m *Manager) openSession(ctx context.Context) (*session, error) {
