@@ -305,18 +305,23 @@ exhaust the process: at most 64 active raw tunnels, 2048 pipes per tunnel, and
 4096 pipes per pod. New pipes may be refused with `capacity` until the old ones
 finish. Ping, idle, and lifetime must be at least one second, and idle must not
 be longer than the lifetime. The next key id must differ from the current one.
-On SIGTERM the connector stops admitting pipes, waits
-`RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains. The pod's
-termination grace must be longer than that wait.
+`RAW_TUNNEL_OPEN_TIMEOUT` bounds dial and forward-proxy handshake before the
+pipe is OPENED. Pipe lifetime starts at OPENED, not at OPEN. Active,
+connecting, and draining sessions together stay within twice
+`RAW_TUNNEL_MAX_TUNNELS`: each active tunnel may keep one drained predecessor
+while its replacement connects. Empty drained tunnels are closed locally, and
+SIGTERM waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` before closing pipes that
+remain. The pod's termination grace must be longer than that wait.
 
 | Variable | Default | Description |
 |---|---|---|
 | `RAW_TUNNEL_ENABLED` | `false` | Open raw tunnels alongside the legacy ones. |
-| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Draining tunnels are extra. |
+| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Active, connecting, and draining sessions together stay within twice this value. |
 | `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel (hard max 2048). |
 | `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels (hard max 4096). |
 | `RAW_TUNNEL_IDLE_TIMEOUT` | `15m` | Close a pipe that moves no bytes for this long. |
-| `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. |
+| `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. Lifetime starts when the pipe is OPENED, not when OPEN is sent. |
+| `RAW_TUNNEL_OPEN_TIMEOUT` | `30s` | Bound on dial and forward-proxy handshake before the pipe is OPENED. Expiry is reported as `open_timeout`. |
 | `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. An unanswered ping does not close it. |
 | `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` | `30` | How long SIGTERM waits for pipes before closing them. |
 | `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. |

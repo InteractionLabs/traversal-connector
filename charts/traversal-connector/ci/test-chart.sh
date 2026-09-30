@@ -123,6 +123,7 @@ render raw-on "$fixtures/direct-export-values.yaml" \
   --set-string rawTunnel.currentKeyID=k1 \
   --set-string rawTunnel.currentPublicKeyPEM="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
 assert_contains "$tmp_dir/raw-on.yaml" 'name: RAW_TUNNEL_ENABLED'
+assert_contains "$tmp_dir/raw-on.yaml" $'            - name: RAW_TUNNEL_OPEN_TIMEOUT\n              value: "30s"'
 assert_contains "$tmp_dir/raw-on.yaml" 'terminationGracePeriodSeconds: 45'
 assert_contains "$tmp_dir/raw-on.yaml" 'value: "traversal-raw-tunnel/ci"'
 assert_not_contains "$tmp_dir/raw-on.yaml" '-----BEGIN PUBLIC KEY-----'
@@ -138,6 +139,7 @@ render raw-wired "$fixtures/direct-export-values.yaml" \
   --set rawTunnel.maxPipesPerPod=500 \
   --set-string rawTunnel.idleTimeout=45m \
   --set-string rawTunnel.maxLifetime=6h \
+  --set-string rawTunnel.openTimeout=20s \
   --set-string rawTunnel.pingInterval=15s \
   --set rawTunnel.shutdownGraceSeconds=20 \
   --set rawTunnel.terminationGraceSeconds=40 \
@@ -157,6 +159,7 @@ assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_P
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_PIPES_PER_POD\n              value: "500"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_IDLE_TIMEOUT\n              value: "45m"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_LIFETIME\n              value: "6h"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_OPEN_TIMEOUT\n              value: "20s"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_PING_INTERVAL\n              value: "15s"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS\n              value: "20"'
 assert_contains "$tmp_dir/raw-wired.yaml" 'terminationGracePeriodSeconds: 40'

@@ -293,6 +293,8 @@ spec:
               value: {{ .Values.rawTunnel.idleTimeout | quote }}
             - name: RAW_TUNNEL_MAX_LIFETIME
               value: {{ .Values.rawTunnel.maxLifetime | quote }}
+            - name: RAW_TUNNEL_OPEN_TIMEOUT
+              value: {{ .Values.rawTunnel.openTimeout | quote }}
             - name: RAW_TUNNEL_PING_INTERVAL
               value: {{ .Values.rawTunnel.pingInterval | quote }}
             - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS
