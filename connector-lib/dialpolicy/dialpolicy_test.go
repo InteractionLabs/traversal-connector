@@ -291,6 +291,127 @@ func TestDialDoesNotWaitOnAnAddressThatNeverAnswers(t *testing.T) {
 	roundTrip(t, c, "hello")
 }
 
+func TestDialDeduplicatesMappedAndRepeatedAddresses(t *testing.T) {
+	echo := echoServer(t)
+	f := &fakeNet{t: t,
+		addrs: map[string][]string{"db.internal": {
+			"192.0.2.10", "192.0.2.10", "::ffff:192.0.2.10",
+		}},
+		listen: map[string]string{"192.0.2.10:5432": echo},
+	}
+	c, route, err := newPolicy(t, f, Config{}).Dial(context.Background(), "db.internal", 5432)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Addr != netip.MustParseAddrPort("192.0.2.10:5432") {
+		t.Fatalf("route = %+v", route)
+	}
+	roundTrip(t, c, "hello")
+	if len(f.dials) != 1 || f.dials[0] != "192.0.2.10:5432" {
+		t.Fatalf("dials = %v; want one unmapped dial", f.dials)
+	}
+}
+
+func TestDialAcceptsExactlyMaxDialTargets(t *testing.T) {
+	echo := echoServer(t)
+	addrs := make([]string, maxDialTargets)
+	listen := map[string]string{}
+	for i := range addrs {
+		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)}).String()
+	}
+	listen[addrs[len(addrs)-1]+":5432"] = echo
+	f := &fakeNet{t: t,
+		addrs:  map[string][]string{"db.internal": addrs},
+		listen: listen,
+	}
+	c, route, err := newPolicy(t, f, Config{}).Dial(context.Background(), "db.internal", 5432)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := netip.AddrPortFrom(netip.MustParseAddr(addrs[len(addrs)-1]), 5432)
+	if route.Addr != want {
+		t.Fatalf("route = %+v, want %v", route, want)
+	}
+	roundTrip(t, c, "hello")
+	if len(f.dials) != maxDialTargets {
+		t.Fatalf("%d dials, want %d", len(f.dials), maxDialTargets)
+	}
+}
+
+func TestDialRefusesOverMaxDialTargets(t *testing.T) {
+	addrs := make([]string, maxDialTargets+1)
+	for i := range addrs {
+		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)}).String()
+	}
+	f := &fakeNet{t: t,
+		addrs:  map[string][]string{"db.internal": addrs},
+		listen: map[string]string{},
+	}
+	_, _, err := newPolicy(t, f, Config{}).Dial(context.Background(), "db.internal", 5432)
+	wantCode(t, err, CodeResolveFailed)
+	if _, dials := f.counts(); dials != 0 {
+		t.Fatalf("dialed %v after refusing over-cap resolution", f.dials)
+	}
+}
+
+func TestDialActiveAttemptsNeverExceedCap(t *testing.T) {
+	addrs := make([]string, maxDialTargets)
+	for i := range addrs {
+		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)}).String()
+	}
+	var (
+		mu          sync.Mutex
+		inFlight    int
+		maxInFlight int
+		started     = make(chan struct{}, maxDialTargets)
+		release     = make(chan struct{})
+	)
+	f := &fakeNet{t: t, addrs: map[string][]string{"db.internal": addrs}}
+	p := newPolicy(t, f, Config{})
+	p.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil, errors.New("unreachable")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := p.Dial(context.Background(), "db.internal", 5432)
+		done <- err
+	}()
+	for range maxDialTargets {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for dial attempts to start")
+		}
+	}
+	mu.Lock()
+	got := maxInFlight
+	mu.Unlock()
+	close(release)
+	err := <-done
+	wantCode(t, err, CodeDialFailed)
+	if got > maxDialTargets {
+		t.Fatalf("max in-flight dials = %d, want <= %d", got, maxDialTargets)
+	}
+	if got != maxDialTargets {
+		t.Fatalf("max in-flight dials = %d, want %d concurrent attempts at the cap",
+			got, maxDialTargets)
+	}
+}
+
 func TestDialRefusals(t *testing.T) {
 	inspected := func(host string, _ uint16) bool { return host == "pci.internal" }
 	for _, tc := range []struct {

@@ -36,6 +36,13 @@ import (
 // KeepAlive is the TCP keepalive period of connections Dial makes.
 const KeepAlive = 30 * time.Second
 
+// maxDialTargets caps how many unique addresses one pipe may dial at once.
+// LookupNetIP has no small result bound; without a cap, repeated RRs and
+// IPv4-mapped duplicates could fan one admitted pipe into unbounded
+// goroutines and sockets. Eight covers legitimate dual-stack and small
+// multi-homed answers without letting DNS amplify a single admission.
+const maxDialTargets = 8
+
 // Code classifies a refused or failed dial.
 type Code string
 
@@ -233,27 +240,57 @@ func (p *Policy) Dial(ctx context.Context, host string, port uint16) (Conn, Rout
 			return nil, Route{}, refuse(CodeResolveFailed, errors.New("no addresses"))
 		}
 	}
-	for _, addr := range addrs {
-		if p.forbidden(addr) {
+	targets, err := dialTargets(addrs, port)
+	if err != nil {
+		return nil, Route{}, refuse(CodeResolveFailed, err)
+	}
+	for _, target := range targets {
+		if p.forbidden(target.Addr()) {
 			return nil, Route{}, refuse(CodeForbiddenAddress, nil)
 		}
 	}
-	conn, addr, err := p.dialChecked(ctx, addrs, port)
+	conn, addr, err := p.dialChecked(ctx, targets)
 	if err != nil {
 		return nil, Route{}, refuse(CodeDialFailed, err)
 	}
 	return conn, Route{Addr: addr}, nil
 }
 
+// dialTargets unmaps IPv4-mapped addresses, clears zones, and deduplicates
+// before any dial. It refuses when the unique set exceeds maxDialTargets so
+// one pipe cannot fan out unboundedly.
+func dialTargets(addrs []netip.Addr, port uint16) ([]netip.AddrPort, error) {
+	seen := make(map[netip.Addr]struct{}, len(addrs))
+	targets := make([]netip.AddrPort, 0, len(addrs))
+	for _, addr := range addrs {
+		addr = addr.Unmap().WithZone("")
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		targets = append(targets, netip.AddrPortFrom(addr, port))
+	}
+	if len(targets) > maxDialTargets {
+		return nil, fmt.Errorf("resolved %d unique addresses; limit is %d",
+			len(targets), maxDialTargets)
+	}
+	return targets, nil
+}
+
 // dialChecked dials every allowed address at once and returns the first
 // connection. One address that never answers must not consume the whole
-// deadline and hide an address that would have worked.
+// deadline and hide an address that would have worked. targets must already
+// be normalized by dialTargets, so len(targets) never exceeds maxDialTargets.
 func (p *Policy) dialChecked(
-	ctx context.Context, addrs []netip.Addr, port uint16,
+	ctx context.Context, targets []netip.AddrPort,
 ) (Conn, netip.AddrPort, error) {
-	targets := make([]netip.AddrPort, len(addrs))
-	for i, addr := range addrs {
-		targets[i] = netip.AddrPortFrom(addr.Unmap().WithZone(""), port)
+	if len(targets) == 0 {
+		return nil, netip.AddrPort{}, errors.New("no addresses")
+	}
+	if len(targets) > maxDialTargets {
+		return nil, netip.AddrPort{}, fmt.Errorf(
+			"resolved %d unique addresses; limit is %d",
+			len(targets), maxDialTargets)
 	}
 	if len(targets) == 1 {
 		conn, err := p.dialConn(ctx, targets[0].String())
