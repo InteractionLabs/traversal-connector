@@ -190,6 +190,12 @@ chart's `appVersion`, keeping the chart and connector image on the same release.
 An explicit `image.tag` override remains supported when a deployment needs to
 pin another image.
 
+The connector defaults to non-root execution, a read-only root filesystem,
+no privilege escalation, and no Linux capabilities. Pods use the runtime's
+default seccomp profile. `securityContext` configures the connector container;
+`podSecurityContext` configures the pod. The optional telemetry sidecar retains
+its own container security context and writable queue volume.
+
 Historical chart availability is intentionally incomplete: release assets are
 backfilled only where an authentic version-specific chart exists. Historical
 Docker Hub OCI coverage may differ from GitHub Release asset coverage; future

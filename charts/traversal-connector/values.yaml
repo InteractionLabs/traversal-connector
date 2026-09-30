@@ -190,6 +190,20 @@ probes:
     periodSeconds: 10
 
 # ─── Pod / scheduling ────────────────────────────────────────────────────────
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+# The connector runs from a scratch image as UID 65532 and needs no writable
+# filesystem or Linux capabilities. The telemetry sidecar has its own context.
+securityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 serviceAccount:
   create: true
   name: ""

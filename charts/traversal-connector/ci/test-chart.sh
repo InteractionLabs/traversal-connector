@@ -13,7 +13,7 @@ fail() {
 
 assert_contains() {
   local file=$1 expected=$2
-  grep -Fq -- "$expected" "$file" || fail "expected '$expected' in $file"
+  [[ "$(< "$file")" == *"$expected"* ]] || fail "expected '$expected' in $file"
 }
 
 assert_not_contains() {
@@ -95,6 +95,20 @@ assert_contains "$tmp_dir/disabled.yaml" 'name: TRAVERSAL_DISABLE_TELEMETRY'
 assert_contains "$tmp_dir/disabled.yaml" 'value: "true"'
 assert_not_contains "$tmp_dir/disabled.yaml" 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
 assert_not_contains "$tmp_dir/disabled.yaml" 'name: telemetry-sidecar'
+
+# Check the pod and connector contexts in every telemetry mode; a sidecar's
+# context must not accidentally satisfy the connector assertions.
+for mode in direct sidecar disabled; do
+  assert_contains "$tmp_dir/$mode.yaml" $'      securityContext:\n        seccompProfile:\n          type: RuntimeDefault'
+  assert_contains "$tmp_dir/$mode.yaml" $'          securityContext:\n            allowPrivilegeEscalation: false\n            capabilities:\n              drop:\n              - ALL\n            readOnlyRootFilesystem: true\n            runAsNonRoot: true\n          env:'
+done
+
+render security-overrides "$fixtures/direct-export-values.yaml" \
+  --set podSecurityContext.runAsGroup=10001 \
+  --set securityContext.runAsUser=10001
+assert_contains "$tmp_dir/security-overrides.yaml" $'      securityContext:\n        runAsGroup: 10001\n        seccompProfile:\n          type: RuntimeDefault'
+assert_contains "$tmp_dir/security-overrides.yaml" $'            readOnlyRootFilesystem: true\n            runAsNonRoot: true\n            runAsUser: 10001\n          env:'
+
 render disabled-ignored-connect-to "$fixtures/telemetry-disabled-values.yaml" \
   --set-string proxyURL=http://proxy.internal:3128 \
   --set-string otel.connectTo=not-an-address
