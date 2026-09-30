@@ -263,7 +263,10 @@ func TestProxyRefusals(t *testing.T) {
 			h.status = tc.status
 			h.mu.Unlock()
 			before := len(h.got())
-			p := newProxiedPolicy(t, Config{Proxy: tc.proxy, AllowDelegatedProxyChecks: tc.delegated})
+			p := newProxiedPolicy(
+				t,
+				Config{Proxy: tc.proxy, AllowDelegatedProxyChecks: tc.delegated},
+			)
 			_, _, err := p.Dial(context.Background(), tc.host, 5432)
 			wantCode(t, err, tc.code)
 			if strings.Contains(err.Error(), "s3cret") {
