@@ -95,7 +95,10 @@ const (
 	RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_DESTINATION RawOpenFailureReason = 7
 	// The capability's pipe mode is not supported.
 	RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSUPPORTED_MODE RawOpenFailureReason = 8
-	// The capability has opened the maximum number of pipes allowed.
+	// This verifier has accepted as many authorized attempts as the capability
+	// allows. The limit is local to the verifier that checked the token. It is
+	// not a count of pipes that successfully opened, and it is not shared
+	// across verifiers or pods.
 	RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPABILITY_EXHAUSTED RawOpenFailureReason = 9
 	// The destination requires connector-side payload inspection, which raw
 	// pipes cannot provide.
@@ -216,21 +219,26 @@ const (
 	// A peer violated the pipe protocol, for example by exceeding its send
 	// credit.
 	RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR RawCloseReason = 9
+	// A drained tunnel still had pipes when its rotation deadline elapsed.
+	// The connector pod is healthy. This is not CONNECTOR_TERMINATING, which
+	// is reserved for process shutdown.
+	RawCloseReason_RAW_CLOSE_REASON_ROTATION_DEADLINE RawCloseReason = 10
 )
 
 // Enum value maps for RawCloseReason.
 var (
 	RawCloseReason_name = map[int32]string{
-		0: "RAW_CLOSE_REASON_UNSPECIFIED",
-		1: "RAW_CLOSE_REASON_COMPLETED",
-		2: "RAW_CLOSE_REASON_CANCELLED",
-		3: "RAW_CLOSE_REASON_UPSTREAM_ERROR",
-		4: "RAW_CLOSE_REASON_IDLE_TIMEOUT",
-		5: "RAW_CLOSE_REASON_MAX_LIFETIME",
-		6: "RAW_CLOSE_REASON_CONTROLLER_TERMINATING",
-		7: "RAW_CLOSE_REASON_CONNECTOR_TERMINATING",
-		8: "RAW_CLOSE_REASON_TUNNEL_LOST",
-		9: "RAW_CLOSE_REASON_PROTOCOL_ERROR",
+		0:  "RAW_CLOSE_REASON_UNSPECIFIED",
+		1:  "RAW_CLOSE_REASON_COMPLETED",
+		2:  "RAW_CLOSE_REASON_CANCELLED",
+		3:  "RAW_CLOSE_REASON_UPSTREAM_ERROR",
+		4:  "RAW_CLOSE_REASON_IDLE_TIMEOUT",
+		5:  "RAW_CLOSE_REASON_MAX_LIFETIME",
+		6:  "RAW_CLOSE_REASON_CONTROLLER_TERMINATING",
+		7:  "RAW_CLOSE_REASON_CONNECTOR_TERMINATING",
+		8:  "RAW_CLOSE_REASON_TUNNEL_LOST",
+		9:  "RAW_CLOSE_REASON_PROTOCOL_ERROR",
+		10: "RAW_CLOSE_REASON_ROTATION_DEADLINE",
 	}
 	RawCloseReason_value = map[string]int32{
 		"RAW_CLOSE_REASON_UNSPECIFIED":            0,
@@ -243,6 +251,7 @@ var (
 		"RAW_CLOSE_REASON_CONNECTOR_TERMINATING":  7,
 		"RAW_CLOSE_REASON_TUNNEL_LOST":            8,
 		"RAW_CLOSE_REASON_PROTOCOL_ERROR":         9,
+		"RAW_CLOSE_REASON_ROTATION_DEADLINE":      10,
 	}
 )
 
@@ -1405,7 +1414,7 @@ const file_connector_v1_raw_tunnel_proto_rawDesc = "" +
 	"*RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING\x10\x0f\x12)\n" +
 	"%RAW_OPEN_FAILURE_REASON_NO_RAW_TUNNEL\x10\x10\x12(\n" +
 	"$RAW_OPEN_FAILURE_REASON_OPEN_TIMEOUT\x10\x11\x12*\n" +
-	"&RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR\x10\x12*\xfd\x02\n" +
+	"&RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR\x10\x12*\xa5\x03\n" +
 	"\x0eRawCloseReason\x12 \n" +
 	"\x1cRAW_CLOSE_REASON_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aRAW_CLOSE_REASON_COMPLETED\x10\x01\x12\x1e\n" +
@@ -1416,7 +1425,9 @@ const file_connector_v1_raw_tunnel_proto_rawDesc = "" +
 	"'RAW_CLOSE_REASON_CONTROLLER_TERMINATING\x10\x06\x12*\n" +
 	"&RAW_CLOSE_REASON_CONNECTOR_TERMINATING\x10\a\x12 \n" +
 	"\x1cRAW_CLOSE_REASON_TUNNEL_LOST\x10\b\x12#\n" +
-	"\x1fRAW_CLOSE_REASON_PROTOCOL_ERROR\x10\t*p\n" +
+	"\x1fRAW_CLOSE_REASON_PROTOCOL_ERROR\x10\t\x12&\n" +
+	"\"RAW_CLOSE_REASON_ROTATION_DEADLINE\x10\n" +
+	"*p\n" +
 	"\x0eRawDrainReason\x12 \n" +
 	"\x1cRAW_DRAIN_REASON_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19RAW_DRAIN_REASON_ROTATION\x10\x01\x12\x1d\n" +

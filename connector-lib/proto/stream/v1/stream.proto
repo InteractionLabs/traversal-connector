@@ -83,16 +83,23 @@ message Open {
   uint32 hop_count = 4 [(buf.validate.field).uint32.lte = 1];
 }
 
-// Opened describes the pipe that was opened.
+// Opened describes the pipe that was opened. Every field is required: a
+// trusted producer is not a substitute for the wire contract.
 message Opened {
   // The connector the pipe runs through.
-  string connector_id = 1;
+  string connector_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 253
+  }];
   // The raw tunnel carrying the pipe.
-  string tunnel_id = 2;
-  // The pipe's identifier within the tunnel.
-  uint64 pipe_id = 3;
+  string tunnel_id = 2 [(buf.validate.field).string.uuid = true];
+  // The pipe's identifier within the tunnel. Zero is never a pipe.
+  uint64 pipe_id = 3 [(buf.validate.field).uint64.gt = 0];
   // The controller pod that owns the raw tunnel.
-  string controller_pod = 4;
+  string controller_pod = 4 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 253
+  }];
 }
 
 // Data carries pipe bytes.
@@ -108,6 +115,14 @@ message Data {
 message HalfClose {}
 
 // Reset aborts the pipe in both directions.
+//
+// Both directions share this message, so the wire schema accepts every
+// defined nonzero reason. The stream state machine still restricts senders.
+// A caller, on the request, may send only CANCELLED. A controller or
+// connector, on the response, may also send an infrastructure reason:
+// UPSTREAM_ERROR, IDLE_TIMEOUT, MAX_LIFETIME, CONTROLLER_TERMINATING,
+// CONNECTOR_TERMINATING, TUNNEL_LOST, PROTOCOL_ERROR, or ROTATION_DEADLINE.
+// COMPLETED is a close, not a reset.
 message Reset {
   // Why the pipe was aborted.
   connector.v1.RawCloseReason reason = 1 [(buf.validate.field).enum = {
@@ -119,7 +134,10 @@ message Reset {
 // Closed reports how the pipe ended and how many bytes it carried.
 message Closed {
   // How the pipe ended.
-  connector.v1.RawCloseReason reason = 1;
+  connector.v1.RawCloseReason reason = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
   // Bytes delivered from the caller toward the destination.
   uint64 bytes_sent = 2;
   // Bytes delivered from the destination to the caller.
@@ -140,5 +158,8 @@ message Closed {
 //   INVALID_ARGUMENT    PROTOCOL_ERROR
 message OpenStreamError {
   // Why the pipe could not be opened.
-  connector.v1.RawOpenFailureReason reason = 1;
+  connector.v1.RawOpenFailureReason reason = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
 }

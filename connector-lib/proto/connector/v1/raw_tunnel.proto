@@ -253,7 +253,10 @@ enum RawOpenFailureReason {
   RAW_OPEN_FAILURE_REASON_WRONG_DESTINATION = 7;
   // The capability's pipe mode is not supported.
   RAW_OPEN_FAILURE_REASON_UNSUPPORTED_MODE = 8;
-  // The capability has opened the maximum number of pipes allowed.
+  // This verifier has accepted as many authorized attempts as the capability
+  // allows. The limit is local to the verifier that checked the token. It is
+  // not a count of pipes that successfully opened, and it is not shared
+  // across verifiers or pods.
   RAW_OPEN_FAILURE_REASON_CAPABILITY_EXHAUSTED = 9;
   // The destination requires connector-side payload inspection, which raw
   // pipes cannot provide.
@@ -299,6 +302,10 @@ enum RawCloseReason {
   // A peer violated the pipe protocol, for example by exceeding its send
   // credit.
   RAW_CLOSE_REASON_PROTOCOL_ERROR = 9;
+  // A drained tunnel still had pipes when its rotation deadline elapsed.
+  // The connector pod is healthy. This is not CONNECTOR_TERMINATING, which
+  // is reserved for process shutdown.
+  RAW_CLOSE_REASON_ROTATION_DEADLINE = 10;
 }
 
 // RawDrainReason explains why a tunnel stopped accepting new pipes.

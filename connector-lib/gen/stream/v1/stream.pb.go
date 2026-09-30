@@ -361,14 +361,15 @@ func (x *Open) GetHopCount() uint32 {
 	return 0
 }
 
-// Opened describes the pipe that was opened.
+// Opened describes the pipe that was opened. Every field is required: a
+// trusted producer is not a substitute for the wire contract.
 type Opened struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The connector the pipe runs through.
 	ConnectorId string `protobuf:"bytes,1,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`
 	// The raw tunnel carrying the pipe.
 	TunnelId string `protobuf:"bytes,2,opt,name=tunnel_id,json=tunnelId,proto3" json:"tunnel_id,omitempty"`
-	// The pipe's identifier within the tunnel.
+	// The pipe's identifier within the tunnel. Zero is never a pipe.
 	PipeId uint64 `protobuf:"varint,3,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
 	// The controller pod that owns the raw tunnel.
 	ControllerPod string `protobuf:"bytes,4,opt,name=controller_pod,json=controllerPod,proto3" json:"controller_pod,omitempty"`
@@ -518,6 +519,14 @@ func (*HalfClose) Descriptor() ([]byte, []int) {
 }
 
 // Reset aborts the pipe in both directions.
+//
+// Both directions share this message, so the wire schema accepts every
+// defined nonzero reason. The stream state machine still restricts senders.
+// A caller, on the request, may send only CANCELLED. A controller or
+// connector, on the response, may also send an infrastructure reason:
+// UPSTREAM_ERROR, IDLE_TIMEOUT, MAX_LIFETIME, CONTROLLER_TERMINATING,
+// CONNECTOR_TERMINATING, TUNNEL_LOST, PROTOCOL_ERROR, or ROTATION_DEADLINE.
+// COMPLETED is a close, not a reset.
 type Reset struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Why the pipe was aborted.
@@ -711,25 +720,29 @@ const file_stream_v1_stream_proto_rawDesc = "" +
 	"capability\x124\n" +
 	"\x11client_request_id\x18\x02 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x01R\x0fclientRequestId\x121\n" +
 	"\x0fopen_timeout_ms\x18\x03 \x01(\rB\t\xbaH\x06*\x04\x18\xe0\xd4\x03R\ropenTimeoutMs\x12$\n" +
-	"\thop_count\x18\x04 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\bhopCount\"\x88\x01\n" +
-	"\x06Opened\x12!\n" +
-	"\fconnector_id\x18\x01 \x01(\tR\vconnectorId\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\x12\x17\n" +
-	"\apipe_id\x18\x03 \x01(\x04R\x06pipeId\x12%\n" +
-	"\x0econtroller_pod\x18\x04 \x01(\tR\rcontrollerPod\"-\n" +
+	"\thop_count\x18\x04 \x01(\rB\a\xbaH\x04*\x02\x18\x01R\bhopCount\"\xb3\x01\n" +
+	"\x06Opened\x12-\n" +
+	"\fconnector_id\x18\x01 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\x01\x18\xfd\x01R\vconnectorId\x12%\n" +
+	"\ttunnel_id\x18\x02 \x01(\tB\b\xbaH\x05r\x03\xb0\x01\x01R\btunnelId\x12 \n" +
+	"\apipe_id\x18\x03 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x121\n" +
+	"\x0econtroller_pod\x18\x04 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\x01\x18\xfd\x01R\rcontrollerPod\"-\n" +
 	"\x04Data\x12%\n" +
 	"\apayload\x18\x01 \x01(\fB\v\xbaH\bz\x06\x10\x01\x18\x80\x80\x02R\apayload\"\v\n" +
 	"\tHalfClose\"I\n" +
 	"\x05Reset\x12@\n" +
 	"\x06reason\x18\x01 \x01(\x0e2\x1c.connector.v1.RawCloseReasonB\n" +
-	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\"\x84\x01\n" +
-	"\x06Closed\x124\n" +
-	"\x06reason\x18\x01 \x01(\x0e2\x1c.connector.v1.RawCloseReasonR\x06reason\x12\x1d\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\"\x90\x01\n" +
+	"\x06Closed\x12@\n" +
+	"\x06reason\x18\x01 \x01(\x0e2\x1c.connector.v1.RawCloseReasonB\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\x12\x1d\n" +
 	"\n" +
 	"bytes_sent\x18\x02 \x01(\x04R\tbytesSent\x12%\n" +
-	"\x0ebytes_received\x18\x03 \x01(\x04R\rbytesReceived\"M\n" +
-	"\x0fOpenStreamError\x12:\n" +
-	"\x06reason\x18\x01 \x01(\x0e2\".connector.v1.RawOpenFailureReasonR\x06reason2^\n" +
+	"\x0ebytes_received\x18\x03 \x01(\x04R\rbytesReceived\"Y\n" +
+	"\x0fOpenStreamError\x12F\n" +
+	"\x06reason\x18\x01 \x01(\x0e2\".connector.v1.RawOpenFailureReasonB\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason2^\n" +
 	"\rStreamService\x12M\n" +
 	"\n" +
 	"OpenStream\x12\x1c.stream.v1.OpenStreamRequest\x1a\x1d.stream.v1.OpenStreamResponse(\x010\x01BSZQgithub.com/InteractionLabs/traversal-connector/connector-lib/gen/stream/v1;streamb\x06proto3"
