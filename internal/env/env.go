@@ -1,6 +1,7 @@
 package env
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -62,6 +63,49 @@ func GetEnvBool(key string, defaultVal bool) bool {
 		}
 	}
 	return defaultVal
+}
+
+// ParseBool returns defaultVal when key is unset or empty. A non-empty value
+// that is not a bool is an error naming key. The error does not include the
+// value, so a mis-set secret is not written to the startup log.
+func ParseBool(key string, defaultVal bool) (bool, error) {
+	val, ok := os.LookupEnv(key)
+	if !ok || val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.ParseBool(val)
+	if err != nil {
+		return false, fmt.Errorf("%s is not a valid bool", key)
+	}
+	return parsed, nil
+}
+
+// ParseInt returns defaultVal when key is unset or empty. A non-empty value
+// that is not an integer is an error naming key and not the value.
+func ParseInt(key string, defaultVal int) (int, error) {
+	val, ok := os.LookupEnv(key)
+	if !ok || val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid integer", key)
+	}
+	return parsed, nil
+}
+
+// ParseDuration returns defaultVal when key is unset or empty. A non-empty
+// value that is not a Go duration is an error naming key and not the value.
+func ParseDuration(key string, defaultVal time.Duration) (time.Duration, error) {
+	val, ok := os.LookupEnv(key)
+	if !ok || val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := time.ParseDuration(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid duration", key)
+	}
+	return parsed, nil
 }
 
 // GetEnvOptionalString returns a pointer to the value of the environment variable

@@ -176,13 +176,17 @@ type Config struct {
 // RawTunnelConfig is the raw-tunnel feature. Zero values are the defaults
 // applied by Load; Enabled is the only switch that turns the feature on.
 type RawTunnelConfig struct {
-	Enabled                   bool
-	MaxTunnels                int
-	MaxPipesPerTunnel         int
-	MaxPipesPerPod            int
-	IdleTimeout               time.Duration
-	MaxLifetime               time.Duration
-	PingInterval              time.Duration
+	Enabled           bool
+	MaxTunnels        int
+	MaxPipesPerTunnel int
+	MaxPipesPerPod    int
+	IdleTimeout       time.Duration
+	MaxLifetime       time.Duration
+	PingInterval      time.Duration
+	// ShutdownGrace bounds both process shutdown and tunnel rotation. Shutdown
+	// waits this long, then closes remaining pipes with connector_terminating.
+	// A rotation that still has pipes when the grace elapses closes them with
+	// rotation_deadline instead, so a healthy pod is not reported as terminating.
 	ShutdownGrace             time.Duration
 	Issuer                    string
 	AllowedSubjects           []string
@@ -264,6 +268,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rawTunnel, err := loadRawTunnelConfig()
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
@@ -320,7 +328,7 @@ func Load() (Config, error) {
 			"REDACTION_RELOAD_INTERVAL",
 			defaultRedactionReloadInterval,
 		),
-		RawTunnel: loadRawTunnelConfig(),
+		RawTunnel: rawTunnel,
 	}
 
 	if err := cfg.RawTunnel.validate(); err != nil {
@@ -621,51 +629,71 @@ func decodeCertificate(encoded *string) *string {
 	return &decodedStr
 }
 
-func loadRawTunnelConfig() RawTunnelConfig {
-	cfg := RawTunnelConfig{
-		Enabled: env.GetEnvBool("RAW_TUNNEL_ENABLED", false),
-		MaxTunnels: env.GetEnvInt(
-			"RAW_TUNNEL_MAX_TUNNELS", defaultRawMaxTunnels,
-		),
-		MaxPipesPerTunnel: env.GetEnvInt(
-			"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL", defaultRawMaxPipesPerTunnel,
-		),
-		MaxPipesPerPod: env.GetEnvInt(
-			"RAW_TUNNEL_MAX_PIPES_PER_POD", defaultRawMaxPipesPerPod,
-		),
-		IdleTimeout: env.GetEnvDuration(
-			"RAW_TUNNEL_IDLE_TIMEOUT", defaultRawIdleTimeout,
-		),
-		MaxLifetime: env.GetEnvDuration(
-			"RAW_TUNNEL_MAX_LIFETIME", defaultRawMaxLifetime,
-		),
-		PingInterval: env.GetEnvDuration(
-			"RAW_TUNNEL_PING_INTERVAL", defaultRawPingInterval,
-		),
-		ShutdownGrace: time.Duration(env.GetEnvInt(
-			"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
-			int(defaultRawShutdownGrace/time.Second),
-		)) * time.Second,
-		Issuer: env.GetEnvString("RAW_TUNNEL_ISSUER", ""),
-		AllowedSubjects: splitList(env.GetEnvString(
-			"RAW_TUNNEL_ALLOWED_SUBJECTS", "",
-		)),
-		CurrentKeyID: env.GetEnvString("RAW_TUNNEL_CURRENT_KEY_ID", ""),
-		CurrentPublicKeyPEM: decodedPEM(env.GetEnvString(
-			"RAW_TUNNEL_CURRENT_PUBLIC_KEY", "",
-		)),
-		NextKeyID: env.GetEnvString("RAW_TUNNEL_NEXT_KEY_ID", ""),
-		NextPublicKeyPEM: decodedPEM(env.GetEnvString(
-			"RAW_TUNNEL_NEXT_PUBLIC_KEY", "",
-		)),
-		ForbiddenCIDRs: splitList(env.GetEnvString(
-			"RAW_TUNNEL_FORBIDDEN_CIDRS", "",
-		)),
-		AllowDelegatedProxyChecks: env.GetEnvBool(
-			"RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS", false,
-		),
+func loadRawTunnelConfig() (RawTunnelConfig, error) {
+	var err error
+	cfg := RawTunnelConfig{}
+	if cfg.Enabled, err = env.ParseBool("RAW_TUNNEL_ENABLED", false); err != nil {
+		return RawTunnelConfig{}, err
 	}
-	return cfg
+	if cfg.MaxTunnels, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_TUNNELS", defaultRawMaxTunnels,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxPipesPerTunnel, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL", defaultRawMaxPipesPerTunnel,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxPipesPerPod, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_PIPES_PER_POD", defaultRawMaxPipesPerPod,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.IdleTimeout, err = env.ParseDuration(
+		"RAW_TUNNEL_IDLE_TIMEOUT", defaultRawIdleTimeout,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxLifetime, err = env.ParseDuration(
+		"RAW_TUNNEL_MAX_LIFETIME", defaultRawMaxLifetime,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.PingInterval, err = env.ParseDuration(
+		"RAW_TUNNEL_PING_INTERVAL", defaultRawPingInterval,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	graceSeconds, err := env.ParseInt(
+		"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
+		int(defaultRawShutdownGrace/time.Second),
+	)
+	if err != nil {
+		return RawTunnelConfig{}, err
+	}
+	cfg.ShutdownGrace = time.Duration(graceSeconds) * time.Second
+	cfg.Issuer = env.GetEnvString("RAW_TUNNEL_ISSUER", "")
+	cfg.AllowedSubjects = splitList(env.GetEnvString(
+		"RAW_TUNNEL_ALLOWED_SUBJECTS", "",
+	))
+	cfg.CurrentKeyID = env.GetEnvString("RAW_TUNNEL_CURRENT_KEY_ID", "")
+	cfg.CurrentPublicKeyPEM = decodedPEM(env.GetEnvString(
+		"RAW_TUNNEL_CURRENT_PUBLIC_KEY", "",
+	))
+	cfg.NextKeyID = env.GetEnvString("RAW_TUNNEL_NEXT_KEY_ID", "")
+	cfg.NextPublicKeyPEM = decodedPEM(env.GetEnvString(
+		"RAW_TUNNEL_NEXT_PUBLIC_KEY", "",
+	))
+	cfg.ForbiddenCIDRs = splitList(env.GetEnvString(
+		"RAW_TUNNEL_FORBIDDEN_CIDRS", "",
+	))
+	if cfg.AllowDelegatedProxyChecks, err = env.ParseBool(
+		"RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS", false,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	return cfg, nil
 }
 
 // validate reports configuration that would admit raw pipes without the

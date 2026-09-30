@@ -1040,6 +1040,33 @@ func TestLoad_RawTunnelDisabledDoesNotRequireIssuer(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsMalformedRawTunnelEnv(t *testing.T) {
+	cases := []struct {
+		key   string
+		value string
+	}{
+		{key: "RAW_TUNNEL_ENABLED", value: "tru"},
+		{key: "RAW_TUNNEL_MAX_TUNNELS", value: "abc"},
+		{key: "RAW_TUNNEL_IDLE_TIMEOUT", value: "nope"},
+		{key: "RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS", value: "30s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			clearEnv()
+			t.Cleanup(clearEnv)
+			t.Setenv("ENV_NAME", "test")
+			t.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			t.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			t.Setenv(tc.key, tc.value)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.key) ||
+				strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("Load() = %v, want an error naming %s and not the value", err, tc.key)
+			}
+		})
+	}
+}
+
 func TestLoad_RawTunnelEnabledRequiresIssuer(t *testing.T) {
 	clearEnv()
 	defer clearEnv()
