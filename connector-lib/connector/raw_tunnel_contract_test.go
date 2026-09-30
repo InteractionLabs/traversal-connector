@@ -36,11 +36,16 @@ func TestRawTunnelUsesExistingGatewayRoute(t *testing.T) {
 	}
 }
 
-func TestOpenStreamIsNotReachableThroughGatewayRoute(t *testing.T) {
-	if strings.HasPrefix(streamconnect.StreamServiceOpenStreamProcedure, gatewayConnectorPrefix) {
+// TestOpenStreamProcedureIsNotUnderConnectorPrefix checks only the generated
+// procedure name. It does not prove OpenStream is unreachable on a deployed
+// gateway: that requires a rendered Gateway and Service test once controller
+// ingress is wired.
+func TestOpenStreamProcedureIsNotUnderConnectorPrefix(t *testing.T) {
+	procedure := streamconnect.StreamServiceOpenStreamProcedure
+	if strings.HasPrefix(procedure, gatewayConnectorPrefix) {
 		t.Fatalf(
-			"%s must not match the external gateway route prefix %s",
-			streamconnect.StreamServiceOpenStreamProcedure,
+			"%s shares the connector service prefix %s; this only checks the generated name",
+			procedure,
 			gatewayConnectorPrefix,
 		)
 	}
@@ -159,6 +164,141 @@ func TestRawTunnelFrameValidation(t *testing.T) {
 			}},
 			wantErr: true,
 		},
+		{
+			name: "controller hello with protocol version zero",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
+				ControllerHello: &pb.RawControllerHello{
+					TunnelId: "123e4567-e89b-12d3-a456-426614174000",
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "controller hello",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
+				ControllerHello: &pb.RawControllerHello{
+					ProtocolVersion: 1,
+					TunnelId:        "123e4567-e89b-12d3-a456-426614174000",
+				},
+			}},
+		},
+		{
+			name: "connector hello without a protocol version",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
+				ConnectorHello: &pb.RawConnectorHello{
+					MaxPipes:       1,
+					SupportedModes: []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "connector hello with an unspecified mode",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
+				ConnectorHello: &pb.RawConnectorHello{
+					SupportedProtocolVersions: []uint32{1},
+					MaxPipes:                  1,
+					SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED},
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "connector hello with an unknown mode",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
+				ConnectorHello: &pb.RawConnectorHello{
+					SupportedProtocolVersions: []uint32{1},
+					MaxPipes:                  1,
+					SupportedModes:            []pb.RawPipeMode{99},
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "connector hello with max pipes zero",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
+				ConnectorHello: &pb.RawConnectorHello{
+					SupportedProtocolVersions: []uint32{1},
+					SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+				},
+			}},
+			wantErr: true,
+		},
+		{
+			name:    "open error with an unspecified reason",
+			frame:   openErrorFrame(1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED, ""),
+			wantErr: true,
+		},
+		{
+			name:    "open error with an unknown reason",
+			frame:   openErrorFrame(1, 99, ""),
+			wantErr: true,
+		},
+		{
+			name:    "open error without a pipe id",
+			frame:   openErrorFrame(0, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, ""),
+			wantErr: true,
+		},
+		{
+			name: "open error detail at the cap",
+			frame: openErrorFrame(
+				1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 256),
+			),
+		},
+		{
+			name: "open error detail over the cap",
+			frame: openErrorFrame(
+				1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 257),
+			),
+			wantErr: true,
+		},
+		{
+			name: "close with an unspecified reason",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
+				Close: &pb.RawClose{PipeId: 1},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "close with an unknown reason",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
+				Close: &pb.RawClose{PipeId: 1, Reason: 99},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "close without a pipe id",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
+				Close: &pb.RawClose{Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "close",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
+				Close: &pb.RawClose{PipeId: 1, Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED},
+			}},
+		},
+		{
+			name: "drain with an unspecified reason",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
+				Drain: &pb.RawDrain{},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "drain with an unknown reason",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
+				Drain: &pb.RawDrain{Reason: 99},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "drain",
+			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
+				Drain: &pb.RawDrain{Reason: pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION},
+			}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -218,6 +358,12 @@ func dataFrame(pipeID uint64, size int) *pb.RawTunnelFrame {
 
 func openFrame(open *pb.RawOpen) *pb.RawTunnelFrame {
 	return &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Open{Open: open}}
+}
+
+func openErrorFrame(id uint64, reason pb.RawOpenFailureReason, detail string) *pb.RawTunnelFrame {
+	return &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_OpenError{
+		OpenError: &pb.RawOpenError{PipeId: id, Reason: reason, Detail: detail},
+	}}
 }
 
 func openStreamData(size int) *streampb.OpenStreamRequest {
