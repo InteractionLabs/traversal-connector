@@ -284,7 +284,7 @@ func TestLegacyServesWithRawDisabled(t *testing.T) {
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
 	time.Sleep(100 * time.Millisecond)
-	if active, draining := m.snapshot(); active != 0 || draining != 0 {
+	if active, draining, _, _ := m.snapshot(); active != 0 || draining != 0 {
 		t.Fatalf("disabled raw manager opened tunnels: active=%d draining=%d", active, draining)
 	}
 	assertLegacyProbe(t, ctrl, "raw-off", 5)
@@ -318,7 +318,8 @@ func TestLegacyServesWhileRawTunnelDraining(t *testing.T) {
 	go func() { _ = cm.Run(ctx) }()
 	waitFor(t, 3*time.Second, func() bool { return cm.ActiveCount() == 1 })
 
-	m := startManager(t, cfg, nil)
+	ln := listen(t)
+	m := startManager(t, cfg, dialLocal(t, ln))
 	t.Cleanup(m.Shutdown)
 	var first *rawtunnel.Mux
 	select {
@@ -326,6 +327,9 @@ func TestLegacyServesWhileRawTunnelDraining(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for a raw tunnel")
 	}
+	// An empty drained tunnel is closed locally. A live pipe is what keeps
+	// the session draining while the legacy tunnel continues to serve.
+	pipe, _, _ := holdPipe(t, first, ln, "jti-hold-drain")
 	first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
 	select {
 	case <-ctrl.rawReady:
@@ -333,7 +337,7 @@ func TestLegacyServesWhileRawTunnelDraining(t *testing.T) {
 		t.Fatal("timed out waiting for replacement raw tunnel")
 	}
 	waitFor(t, 2*time.Second, func() bool {
-		active, draining := m.snapshot()
+		active, draining, _, _ := m.snapshot()
 		return active == 1 && draining == 1
 	})
 	if got := cm.ActiveCount(); got != 1 {
@@ -342,6 +346,11 @@ func TestLegacyServesWhileRawTunnelDraining(t *testing.T) {
 	close(probe)
 	assertLegacyProbe(t, ctrl, "while-draining", 4)
 	assertReady(t, cm, 1)
+	select {
+	case <-pipe.Done():
+		t.Fatal("drain closed the live pipe")
+	default:
+	}
 }
 
 func assertLegacyProbe(
