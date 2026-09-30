@@ -1,10 +1,16 @@
 # Connector chart
 
-The connector and optional telemetry sidecar run as UID/GID 65532, drop all
+By default, the connector and optional telemetry sidecar run as UID/GID 65532, drop all
 Linux capabilities, disable privilege escalation, use `RuntimeDefault`
 seccomp, and have read-only root filesystems. Each container has a separate
 writable `/tmp` volume. The telemetry sidecar's existing queue volume stays
 writable through the pod's `fsGroup: 65532`.
+
+`securityContext` configures the connector container, and `podSecurityContext`
+configures the pod, including its default seccomp profile and volume group.
+The telemetry sidecar retains its own container security context. When
+overriding user or group IDs, keep the writable volumes accessible to both
+containers.
 
 ## TLS failures after restarting a connector
 

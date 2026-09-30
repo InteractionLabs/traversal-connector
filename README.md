@@ -190,6 +190,11 @@ chart's `appVersion`, keeping the chart and connector image on the same release.
 An explicit `image.tag` override remains supported when a deployment needs to
 pin another image.
 
+The chart defaults to non-root containers, read-only root filesystems, no
+privilege escalation, no Linux capabilities, and runtime-default seccomp.
+See the [chart security settings](charts/traversal-connector/README.md) for
+container and pod overrides and writable-volume behavior.
+
 Historical chart availability is intentionally incomplete: release assets are
 backfilled only where an authentic version-specific chart exists. Historical
 Docker Hub OCI coverage may differ from GitHub Release asset coverage; future

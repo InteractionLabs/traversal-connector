@@ -109,22 +109,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        fsGroup: 65532
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: connector
           image: "{{ .Values.image.repository }}:{{ include "traversal-connector.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: ENV_NAME
               value: {{ required "envName is required" .Values.envName | quote }}
