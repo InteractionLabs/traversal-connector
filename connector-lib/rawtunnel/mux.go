@@ -268,10 +268,18 @@ func (m *Mux) sendLoop() {
 	for {
 		m.mu.Lock()
 		f, sent := m.nextFrameLocked()
+		var closeSend func() error
 		ended := false
 		if f == nil && m.err == nil && m.closing && len(m.control) == 0 &&
 			(m.cfg.Role == RoleController || m.slots == 0) {
-			ended = m.endLocked(ErrClosed)
+			// Half-close a client stream so the peer reads the close frames
+			// before the RPC ends. Ending here aborts the call, and the peer
+			// can record tunnel_lost instead of the typed reason.
+			if closer, ok := m.stream.(interface{ CloseRequest() error }); ok {
+				closeSend = closer.CloseRequest
+			} else {
+				ended = m.endLocked(ErrClosed)
+			}
 		}
 		if m.err != nil {
 			m.mu.Unlock()
@@ -281,6 +289,12 @@ func (m *Mux) sendLoop() {
 			return
 		}
 		m.mu.Unlock()
+		if closeSend != nil {
+			if err := closeSend(); err != nil {
+				m.end(fmt.Errorf("rawtunnel: close send: %w", err))
+			}
+			return
+		}
 		if f == nil {
 			<-m.kick
 			continue
@@ -324,9 +338,10 @@ func (m *Mux) keepalive(ctx context.Context) {
 	}
 }
 
-// Close ends every pipe with reason, sends the resulting resets and closes,
-// and then ends the tunnel. Use it for shutdown after draining. If the peer
-// stops reading, the flush waits until Run's ctx is done.
+// Close ends every pipe with reason and sends the resulting resets and
+// closes. A client stream then half-closes so the peer can read those frames
+// before the RPC ends. A stream that cannot half-close ends locally. If the
+// peer stops reading, Run stays blocked until its context is cancelled.
 func (m *Mux) Close(reason pb.RawCloseReason) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

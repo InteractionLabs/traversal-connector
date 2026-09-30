@@ -2,6 +2,7 @@ package rawtunnel
 
 import (
 	"encoding/binary"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,12 +54,19 @@ func FuzzPeerFrames(f *testing.F) {
 
 		ours, theirs := streamPair(len(frames) + 8)
 		cfg := Config{Role: role, MaxPipes: 3, IdleTimeout: time.Minute}
-		var locals []*memLocal
-		localCh := make(chan *memLocal, 64)
+		var (
+			mu     sync.Mutex
+			locals []*memLocal
+		)
 		if role == RoleConnector {
 			cfg.Accept = func(p *Pipe, _ *pb.RawOpen) {
 				l := newMemLocal(true)
-				localCh <- l
+				// Accept runs on the mux. Buffering accepted locals on a
+				// channel that nothing drains until Run returns blocks the
+				// tunnel once the input accepts more streams than the buffer.
+				mu.Lock()
+				locals = append(locals, l)
+				mu.Unlock()
 				_ = p.Start(l)
 			}
 		}
@@ -83,7 +91,9 @@ func FuzzPeerFrames(f *testing.F) {
 					t.Fatal(err)
 				}
 				l := newMemLocal(true)
+				mu.Lock()
 				locals = append(locals, l)
+				mu.Unlock()
 				go func() {
 					if p.WaitOpened(t.Context()) == nil {
 						_ = p.Start(l)
@@ -112,10 +122,10 @@ func FuzzPeerFrames(f *testing.F) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		for len(localCh) > 0 {
-			locals = append(locals, <-localCh)
-		}
-		for _, l := range locals {
+		mu.Lock()
+		closed := append([]*memLocal(nil), locals...)
+		mu.Unlock()
+		for _, l := range closed {
 			l.waitClosed(t)
 		}
 	})
