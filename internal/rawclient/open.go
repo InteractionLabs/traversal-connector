@@ -3,9 +3,6 @@ package rawclient
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +28,7 @@ func newOpener(
 	host string,
 	shuttingDown func() bool,
 ) (*opener, error) {
-	verifier, err := newVerifier(cfg)
+	verifier, err := newVerifier(cfg, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -53,42 +50,33 @@ func newOpener(
 	}, nil
 }
 
-func newVerifier(cfg *config.Config) (*capability.Verifier, error) {
+func newVerifier(cfg *config.Config, metrics *rawMetrics) (*capability.Verifier, error) {
+	raw := cfg.RawTunnel
 	keys := map[string]*ecdsa.PublicKey{}
-	current, err := parsePublicKey(cfg.RawTunnel.CurrentPublicKeyPEM)
+	current, err := loadKey(metrics, keySlotCurrent, raw.CurrentPublicKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("RAW_TUNNEL_CURRENT_PUBLIC_KEY: %w", err)
 	}
-	keys[cfg.RawTunnel.CurrentKeyID] = current
-	if cfg.RawTunnel.NextKeyID != "" {
-		next, err := parsePublicKey(cfg.RawTunnel.NextPublicKeyPEM)
+	keys[raw.CurrentKeyID] = current
+	if raw.NextKeyID != "" {
+		next, err := loadKey(metrics, keySlotNext, raw.NextPublicKeyPEM)
 		if err != nil {
 			return nil, fmt.Errorf("RAW_TUNNEL_NEXT_PUBLIC_KEY: %w", err)
 		}
-		keys[cfg.RawTunnel.NextKeyID] = next
+		keys[raw.NextKeyID] = next
 	}
 	return capability.NewVerifier(capability.VerifierConfig{
 		Keys:               keys,
-		Issuer:             cfg.RawTunnel.Issuer,
-		AllowedSubjects:    cfg.RawTunnel.AllowedSubjects,
+		Issuer:             raw.Issuer,
+		AllowedSubjects:    raw.AllowedSubjects,
 		AllowUnknownClaims: true,
 	})
 }
 
-func parsePublicKey(pemText string) (*ecdsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemText))
-	if block == nil {
-		return nil, errors.New("public key is not PEM")
-	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	key, ok := parsed.(*ecdsa.PublicKey)
-	if !ok || key.Curve != elliptic.P256() {
-		return nil, errors.New("public key is not P-256")
-	}
-	return key, nil
+func loadKey(metrics *rawMetrics, slot keySlot, pemText string) (*ecdsa.PublicKey, error) {
+	key, err := capability.ParsePublicKeyPEM([]byte(pemText))
+	metrics.keyLoad(slot, err == nil)
+	return key, err
 }
 
 func newPolicy(cfg *config.Config, redactor *redact.Redactor) (*dialpolicy.Policy, error) {
@@ -203,6 +191,10 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 	if err != nil {
 		o.pipes.release()
 		o.logDial(err)
+		var capErr *capability.Error
+		if errors.As(err, &capErr) {
+			o.metrics.rejected(capErr.Code)
+		}
 		o.refuse(tunnelID, open, p, nil, openFailure(err), failureDetail(err))
 		return
 	}

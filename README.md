@@ -324,7 +324,7 @@ remain. The pod's termination grace must be longer than that wait.
 | `RAW_TUNNEL_OPEN_TIMEOUT` | `30s` | Bound on dial and forward-proxy handshake before the pipe is OPENED. Expiry is reported as `open_timeout`. |
 | `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. An unanswered ping does not close it. |
 | `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` | `30` | How long SIGTERM waits for pipes before closing them. |
-| `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. |
+| `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. The chart sets it from `rawTunnel.environment`. |
 | `RAW_TUNNEL_ALLOWED_SUBJECTS` | **required when enabled** | Comma-separated `sub` claims allowed to open pipes. |
 | `RAW_TUNNEL_CURRENT_KEY_ID` | **required when enabled** | `kid` of the current ES256 public key. |
 | `RAW_TUNNEL_CURRENT_PUBLIC_KEY` | **required when enabled** | PKIX P-256 public key, PEM or base64-encoded PEM. |
@@ -332,6 +332,38 @@ remain. The pod's termination grace must be longer than that wait.
 | `RAW_TUNNEL_NEXT_PUBLIC_KEY` | (none) | Next PKIX P-256 public key, PEM or base64-encoded PEM. |
 | `RAW_TUNNEL_FORBIDDEN_CIDRS` | (none) | Extra comma-separated CIDRs a pipe must never dial. |
 | `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS` | `false` | Allow proxied dials to hostnames. Leave false unless the customer's forward proxy enforces the full direct-dial safety floor itself: connector-local interface addresses, configured `RAW_TUNNEL_FORBIDDEN_CIDRS`, loopback, link-local (including cloud metadata), multicast, unspecified/reserved ranges, NAT64-embedded forbidden IPv4, and the well-known metadata/localhost hostnames. Proxy mode is not production-canary eligible until those delegated behaviors are verified. |
+
+#### Raw tunnel signing keys
+
+Each Traversal environment signs capabilities with its own AWS KMS key. The
+Helm chart packages every environment's public keys, exported with KMS
+`GetPublicKey`, under `rawTunnel.trustedKeys.<environment>`, and
+`rawTunnel.environment` selects one set. The chart derives the issuer,
+`traversal-raw-tunnel/<environment>`, and fills the `RAW_TUNNEL_*_KEY_ID` and
+`RAW_TUNNEL_*_PUBLIC_KEY` variables. The connector refuses capabilities from
+any other issuer or key id with `unknown_key` or `invalid_capability`. The
+chart refuses to render when the selected environment has no current key.
+
+A rotation needs chart upgrades only, never a new connector binary:
+
+1. Create the next KMS key and ship its public key as `next` in a chart
+   release, and add it as `next` on the Controller. Both now trust both keys.
+2. Once connectors run that release, switch the signer to the next key.
+3. After the longest capability lifetime, ship a chart release that promotes
+   the next key to `current` and drops the old one. Do the same on the
+   Controller.
+
+Removing a key from connectors takes effect only as each customer rolls out
+the new chart, so the connector side is slow to revoke. The Controller checks
+the same keys before it forwards an open, so removing a key there blocks new
+pipes immediately. To revoke a compromised key, remove it from the Controller
+and stop the signer first. Then ship the connector chart.
+
+`connector.raw_key_loads_total` counts the trusted keys loaded at startup by
+`slot` (`current` or `next`) and `result` (`loaded` or `failed`); a failed load
+stops the connector. `connector.raw_capability_rejections_total` counts
+capabilities that failed verification by `code`, such as `unknown_key`,
+`wrong_issuer`, or `expired`. Both use closed label sets, never a kid or token.
 
 ### mTLS to the control plane
 

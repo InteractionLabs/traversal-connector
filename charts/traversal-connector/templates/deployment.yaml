@@ -28,20 +28,22 @@
 {{- if ge (int .Values.rawTunnel.shutdownGraceSeconds) (int .Values.rawTunnel.terminationGraceSeconds) }}
 {{- fail "rawTunnel.shutdownGraceSeconds must be less than rawTunnel.terminationGraceSeconds so the connector can close pipes before Kubernetes sends SIGKILL" }}
 {{- end }}
-{{- if not .Values.rawTunnel.issuer }}
-{{- fail "rawTunnel.issuer is required when rawTunnel.enabled is true" }}
+{{- $rawEnv := .Values.rawTunnel.environment | default "" }}
+{{- if not (regexMatch `^[a-z0-9][a-z0-9-]{0,31}$` $rawEnv) }}
+{{- fail "rawTunnel.environment is required when rawTunnel.enabled is true and must be a lowercase environment name such as prod" }}
 {{- end }}
 {{- if not .Values.rawTunnel.allowedSubjects }}
 {{- fail "rawTunnel.allowedSubjects is required when rawTunnel.enabled is true" }}
 {{- end }}
-{{- if or (not .Values.rawTunnel.currentKeyID) (not .Values.rawTunnel.currentPublicKeyPEM) }}
-{{- fail "rawTunnel.currentKeyID and rawTunnel.currentPublicKeyPEM are required when rawTunnel.enabled is true" }}
+{{- $rawKeys := include "traversal-connector.rawTunnelKeys" . | fromYaml }}
+{{- if or (not (dig "current" "kid" "" $rawKeys)) (not (dig "current" "publicKeyPEM" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.current needs a kid and publicKeyPEM; this chart packages no signing key for that environment yet" $rawEnv) }}
 {{- end }}
-{{- if or (and .Values.rawTunnel.nextKeyID (not .Values.rawTunnel.nextPublicKeyPEM)) (and .Values.rawTunnel.nextPublicKeyPEM (not .Values.rawTunnel.nextKeyID)) }}
-{{- fail "rawTunnel.nextKeyID and rawTunnel.nextPublicKeyPEM must be set together" }}
+{{- if ne (not (dig "next" "kid" "" $rawKeys)) (not (dig "next" "publicKeyPEM" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.next needs both kid and publicKeyPEM, or neither" $rawEnv) }}
 {{- end }}
-{{- if and .Values.rawTunnel.nextKeyID (eq .Values.rawTunnel.nextKeyID .Values.rawTunnel.currentKeyID) }}
-{{- fail "rawTunnel.nextKeyID must differ from rawTunnel.currentKeyID" }}
+{{- if and (dig "next" "kid" "" $rawKeys) (eq (dig "next" "kid" "" $rawKeys) (dig "current" "kid" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.next.kid must differ from current.kid" $rawEnv) }}
 {{- end }}
 {{- if lt (int .Values.rawTunnel.maxPipesPerPod) (int .Values.rawTunnel.maxPipesPerTunnel) }}
 {{- fail "rawTunnel.maxPipesPerPod must be at least rawTunnel.maxPipesPerTunnel" }}
@@ -337,21 +339,20 @@ spec:
               value: {{ .Values.rawTunnel.streamWindowBytes | quote }}
             - name: RAW_TUNNEL_OUTER_WINDOW
               value: {{ .Values.rawTunnel.outerWindowBytes | quote }}
+            {{- $rawKeys := include "traversal-connector.rawTunnelKeys" . | fromYaml }}
             - name: RAW_TUNNEL_ISSUER
-              value: {{ .Values.rawTunnel.issuer | quote }}
+              value: {{ printf "traversal-raw-tunnel/%s" .Values.rawTunnel.environment | quote }}
             - name: RAW_TUNNEL_ALLOWED_SUBJECTS
               value: {{ join "," .Values.rawTunnel.allowedSubjects | quote }}
             - name: RAW_TUNNEL_CURRENT_KEY_ID
-              value: {{ .Values.rawTunnel.currentKeyID | quote }}
+              value: {{ $rawKeys.current.kid | quote }}
             - name: RAW_TUNNEL_CURRENT_PUBLIC_KEY
-              value: {{ .Values.rawTunnel.currentPublicKeyPEM | b64enc | quote }}
-            {{- with .Values.rawTunnel.nextKeyID }}
+              value: {{ $rawKeys.current.publicKeyPEM | b64enc | quote }}
+            {{- with (dig "next" "kid" "" $rawKeys) }}
             - name: RAW_TUNNEL_NEXT_KEY_ID
               value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.rawTunnel.nextPublicKeyPEM }}
             - name: RAW_TUNNEL_NEXT_PUBLIC_KEY
-              value: {{ . | b64enc | quote }}
+              value: {{ $rawKeys.next.publicKeyPEM | b64enc | quote }}
             {{- end }}
             {{- with .Values.rawTunnel.forbiddenCIDRs }}
             - name: RAW_TUNNEL_FORBIDDEN_CIDRS

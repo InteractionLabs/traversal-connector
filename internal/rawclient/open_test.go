@@ -2,6 +2,7 @@ package rawclient
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"io"
 	"net"
@@ -16,11 +17,13 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"log/slog"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
@@ -437,9 +440,57 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 	if !refused {
 		t.Fatal("refused open was not counted")
 	}
+	if !hasPoint(sumPoints(t, rm, telemetry.MetricRawCapabilityRejectionsTotal),
+		attribute.String("code", string(capability.CodeMalformed))) {
+		t.Fatal("capability rejection was not counted by code")
+	}
+	if !hasPoint(sumPoints(t, rm, telemetry.MetricRawKeyLoadsTotal),
+		attribute.String("slot", "current"), attribute.String("result", "loaded")) {
+		t.Fatal("current key load was not counted")
+	}
 	if active := gauge(t, rm, telemetry.MetricRawTunnelsActive); active != 1 {
 		t.Fatalf("active tunnels = %d, want 1", active)
 	}
+}
+
+// TestKeyRotation walks a signing-key rotation through configuration alone:
+// the next key is trusted alongside the current one, then the current key is
+// retired and its capabilities stop opening pipes.
+func TestKeyRotation(t *testing.T) {
+	const nextKid = "k2"
+	nextKey := capabilitytest.Key("raw-connector-test: next")
+	signWith := func(key *ecdsa.PrivateKey, kid, jti string) string {
+		token, err := capabilitytest.Sign(key, kid, testClaims(jti))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	admit := func(mux *rawtunnel.Mux, token string) {
+		_, peer := openPipe(t, mux, token)
+		_ = peer.Close()
+	}
+
+	ctrl, m, _ := running(t, nil, func(cfg *config.Config) {
+		cfg.RawTunnel.NextKeyID = nextKid
+		cfg.RawTunnel.NextPublicKeyPEM = publicPEM(nextKey)
+	})
+	mux := recvMux(t, ctrl.ready)
+	admit(mux, sign(t, "overlap-current"))
+	admit(mux, signWith(nextKey, nextKid, "overlap-next"))
+	m.Shutdown()
+
+	ctrl, m, _ = running(t, nil, func(cfg *config.Config) {
+		cfg.RawTunnel.CurrentKeyID = nextKid
+		cfg.RawTunnel.CurrentPublicKeyPEM = publicPEM(nextKey)
+	})
+	t.Cleanup(m.Shutdown)
+	mux = recvMux(t, ctrl.ready)
+	if reason := openRefusal(t, mux, sign(t, "retired-current")); reason !=
+		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNKNOWN_KEY {
+		t.Fatalf("retired key reason %s, want unknown_key", reason)
+	}
+	admit(mux, signWith(nextKey, nextKid, "retired-next"))
 }
 
 func refuseOpen(t *testing.T, token string, policy *dialpolicy.Policy) pb.RawOpenFailureReason {
@@ -655,6 +706,21 @@ func sumPoints(
 		}
 	}
 	return nil
+}
+
+func hasPoint(points []metricdata.DataPoint[int64], want ...attribute.KeyValue) bool {
+	for _, point := range points {
+		matched := true
+		for _, kv := range want {
+			if got, ok := point.Attributes.Value(kv.Key); !ok || got != kv.Value {
+				matched = false
+			}
+		}
+		if matched && point.Value > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func gauge(t *testing.T, rm metricdata.ResourceMetrics, name string) int64 {

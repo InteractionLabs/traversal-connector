@@ -238,12 +238,28 @@ rawTunnel:
   # and 1MiB on the outer gRPC stream. Set only to raise a window.
   streamWindowBytes: 0
   outerWindowBytes: 0
-  issuer: ""
+  # The Traversal environment whose capability signer this connector trusts.
+  # It selects the issuer, traversal-raw-tunnel/<environment>, and that
+  # environment's entry in trustedKeys.
+  environment: ""
   allowedSubjects: []
-  currentKeyID: ""
-  currentPublicKeyPEM: ""
-  nextKeyID: ""
-  nextPublicKeyPEM: ""
+  # Each environment's capability-signer public keys, exported from AWS KMS
+  # with GetPublicKey and identified by kid. Rotation is a chart upgrade, never
+  # a connector binary change: ship the new key as next, let the signer switch
+  # to it, then promote it to current and drop the old key. Capabilities signed
+  # by a dropped key are refused only once this chart is rolled out, so revoke
+  # a compromised key on the controller first. See "Raw tunnel signing keys"
+  # in the README.
+  trustedKeys:
+    dev:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    staging:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    prod:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
   forbiddenCIDRs: []
   allowDelegatedProxyChecks: false
   # Forward proxy for raw destinations. Rendered as HTTPS_PROXY and NO_PROXY

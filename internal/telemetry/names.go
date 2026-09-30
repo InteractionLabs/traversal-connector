@@ -35,4 +35,6 @@ const (
 	MetricRawReconnectsTotal               = "connector.raw_reconnects_total"
 	MetricRawClockSkew                     = "connector.raw_clock_skew"
 	MetricRawResetsTotal                   = "connector.raw_resets_total"
+	MetricRawKeyLoadsTotal                 = "connector.raw_key_loads_total"
+	MetricRawCapabilityRejectionsTotal     = "connector.raw_capability_rejections_total"
 )

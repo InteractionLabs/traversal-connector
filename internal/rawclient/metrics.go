@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -29,7 +30,18 @@ type rawMetrics struct {
 	reconnects      metric.Int64Counter
 	resets          metric.Int64Counter
 	clockSkew       metric.Float64Histogram
+	keyLoads        metric.Int64Counter
+	rejections      metric.Int64Counter
 }
+
+// keySlot names a trusted-key configuration slot, never a kid, so key-load
+// series stay bounded across rotations.
+type keySlot string
+
+const (
+	keySlotCurrent keySlot = "current"
+	keySlotNext    keySlot = "next"
+)
 
 func newRawMetrics() (*rawMetrics, error) {
 	meter := otel.Meter("traversal-connector/raw")
@@ -144,6 +156,22 @@ func newRawMetrics() (*rawMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("raw clock skew: %w", err)
 	}
+	m.keyLoads, err = meter.Int64Counter(
+		telemetry.MetricRawKeyLoadsTotal,
+		metric.WithDescription(
+			"Trusted capability public keys loaded at startup, by slot and result",
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("raw key loads: %w", err)
+	}
+	m.rejections, err = meter.Int64Counter(
+		telemetry.MetricRawCapabilityRejectionsTotal,
+		metric.WithDescription("Capabilities that failed verification, by code"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("raw capability rejections: %w", err)
+	}
 	return m, nil
 }
 
@@ -174,6 +202,23 @@ func (m *rawMetrics) refused(reason pb.RawOpenFailureReason) {
 			attribute.String("result", "refused"),
 			attribute.String("reason", reason.String()),
 		))
+}
+
+func (m *rawMetrics) keyLoad(slot keySlot, loaded bool) {
+	result := "failed"
+	if loaded {
+		result = "loaded"
+	}
+	m.keyLoads.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("slot", string(slot)),
+			attribute.String("result", result),
+		))
+}
+
+func (m *rawMetrics) rejected(code capability.Code) {
+	m.rejections.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("code", string(code))))
 }
 
 func (m *rawMetrics) closed(

@@ -1,0 +1,29 @@
+{
+  "description": "Capabilities signed by the Traversal capability signer (traversal/connector_capability) through its KMS path, which converts ECDSA DER signatures to JOSE r||s. kms_der_short_integer has an r or s shorter than 32 bytes, so the conversion must left-pad it. Keys, issuer, subjects, and now are those of vectors.json.",
+  "tokens": [
+    {
+      "name": "kms_der",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imttcy1kZXIiLCJpYXQiOjE3ODk5OTk5OTAsImV4cCI6MTc5MDAwMDExMH0.oou0bS9foqHZ5bUSBMqhY68oNWcqdf2hSMfnuf8vx5mGSF0JhiaelOMnWoSjisIQ1WG2KaPJK50RAU4Lj8OcAQ",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "ok"
+    },
+    {
+      "name": "kms_der_short_integer",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imttcy1kZXItc2hvcnQtNDYiLCJpYXQiOjE3ODk5OTk5OTAsImV4cCI6MTc5MDAwMDExMH0.AICrW0rtVX0O8Qiw9etsHA1q-PbT2jfB3GDJgBu7vWLD89U5h4mA0wyKOV8grRKdSrbelAZQfpoQh1ZE-mfwvQ",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "ok"
+    }
+  ]
+}

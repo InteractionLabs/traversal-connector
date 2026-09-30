@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,7 +22,13 @@ import (
 
 var update = flag.Bool("update", false, "regenerate testdata/vectors.json")
 
-const vectorsPath = "testdata/vectors.json"
+const (
+	vectorsPath = "testdata/vectors.json"
+	// signerVectorsPath holds capabilities produced by the Traversal signer's
+	// KMS path. They are verified against vectors.json and never regenerated
+	// here.
+	signerVectorsPath = "testdata/signer_vectors.json"
+)
 
 // vectorFile is the interoperability contract for capability signers and
 // validators in other languages. A signer must canonicalize every host as
@@ -34,6 +41,11 @@ type vectorFile struct {
 	Keys            []vectorKey   `json:"keys"`
 	Hosts           []hostVector  `json:"hosts"`
 	Tokens          []tokenVector `json:"tokens"`
+}
+
+type signerVectorFile struct {
+	Description string        `json:"description"`
+	Tokens      []tokenVector `json:"tokens"`
 }
 
 type vectorKey struct {
@@ -295,14 +307,8 @@ func TestVectors(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	raw, err := os.ReadFile(vectorsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var file vectorFile
-	if err := json.Unmarshal(raw, &file); err != nil {
-		t.Fatal(err)
-	}
+	readJSON(t, vectorsPath, &file)
 
 	want := generateVectors(t)
 	stripTokens := func(f vectorFile) vectorFile {
@@ -318,6 +324,41 @@ func TestVectors(t *testing.T) {
 		t.Fatal("testdata/vectors.json is stale; rerun with -update")
 	}
 
+	for _, h := range file.Hosts {
+		got, err := capability.CanonicalHost(h.Input)
+		if (err == nil) != h.Valid || got != h.Canonical {
+			t.Errorf("host %q: got %q, %v", h.Input, got, err)
+		}
+	}
+	verifyTokens(t, file, file.Tokens)
+}
+
+func TestSignerVectors(t *testing.T) {
+	var file vectorFile
+	var signed signerVectorFile
+	readJSON(t, vectorsPath, &file)
+	readJSON(t, signerVectorsPath, &signed)
+	if len(signed.Tokens) == 0 {
+		t.Fatal("no signer vectors")
+	}
+	verifyTokens(t, file, signed.Tokens)
+}
+
+func readJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// verifyTokens checks that each token reaches its result under file's keys,
+// issuer, subjects, and time.
+func verifyTokens(t *testing.T, file vectorFile, tokens []tokenVector) {
+	t.Helper()
 	keys := map[string]*ecdsa.PublicKey{}
 	for _, k := range file.Keys {
 		key, err := capability.ParsePublicKeyPEM([]byte(k.PublicKeyPEM))
@@ -329,13 +370,7 @@ func TestVectors(t *testing.T) {
 		}
 		keys[k.KID] = key
 	}
-	for _, h := range file.Hosts {
-		got, err := capability.CanonicalHost(h.Input)
-		if (err == nil) != h.Valid || got != h.Canonical {
-			t.Errorf("host %q: got %q, %v", h.Input, got, err)
-		}
-	}
-	for _, tv := range file.Tokens {
+	for _, tv := range tokens {
 		v, err := capability.NewVerifier(capability.VerifierConfig{
 			Issuer:          file.Issuer,
 			Keys:            keys,
