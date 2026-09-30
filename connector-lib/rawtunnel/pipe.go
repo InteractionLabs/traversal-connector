@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"buf.build/go/protovalidate"
+
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 )
 
@@ -113,14 +115,16 @@ type Pipe struct {
 	wasOpened      bool
 	remoteReleased bool // controller: the connector sent close or open_error
 
-	sendCredit     int // bytes this side may still send
-	recvCredit     int // bytes the peer may still send
-	unacked        int // consumed bytes not yet returned as credit
-	recv           recvBuffer
-	chunk          []byte // read from the Local, waiting to be sent
-	sentHalfClose  bool
-	peerHalfClosed bool
-	downDone       bool // the Local's outbound direction is closed
+	sendCredit      int // bytes this side may still send
+	recvCredit      int // bytes the peer may still send
+	unacked         int // consumed bytes not yet returned as credit
+	recv            recvBuffer
+	chunk           []byte // read from the Local, waiting to be sent
+	sentHalfClose   bool
+	peerHalfClosed  bool
+	downDone        bool // the Local's outbound direction is closed
+	remoteReason    pb.RawCloseReason
+	remoteReasonSet bool // controller: a close frame named how the pipe ended
 
 	result       Result
 	lastActivity time.Time
@@ -280,6 +284,7 @@ func (p *Pipe) finishLocked(reason pb.RawCloseReason, notifyPeer bool) {
 	m := p.m
 	p.state = pipeEnded
 	p.result.Reason = reason
+	p.applyRemoteReasonLocked()
 	p.cancel()
 	if p.idleTimer != nil {
 		p.idleTimer.Stop()
@@ -482,6 +487,13 @@ func (p *Pipe) receiveOpenedLocked() {
 
 func (p *Pipe) receiveOpenErrorLocked(e *pb.RawOpenError) {
 	p.remoteReleased = true
+	if err := protovalidate.Validate(e); err != nil {
+		if p.state != pipeEnded {
+			p.finishLocked(pb.RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR, false)
+		}
+		p.releaseIfRemoteDoneLocked()
+		return
+	}
 	switch p.state {
 	case pipeEnded:
 	case pipeOpening:
@@ -493,15 +505,58 @@ func (p *Pipe) receiveOpenErrorLocked(e *pb.RawOpenError) {
 	p.releaseIfRemoteDoneLocked()
 }
 
-// receiveCloseLocked records that the connector released the pipe. A close is
-// valid once the pipe ended here, or once both sides half-closed, when the
-// connector may finish before this side drains the last bytes to its Local.
-func (p *Pipe) receiveCloseLocked() {
+// receiveCloseLocked records that the connector released the pipe and why.
+// RawClose.reason is how the pipe ended. A close is valid once the pipe ended
+// here, or once both sides half-closed. An unspecified or unknown reason is a
+// protocol error. A close that arrives before both directions finish is a
+// protocol error whatever reason the frame claims.
+func (p *Pipe) receiveCloseLocked(c *pb.RawClose) {
+	p.remoteReason = closeReasonOrProtocolError(c.GetReason())
+	p.remoteReasonSet = true
 	p.remoteReleased = true
-	if p.state != pipeEnded && (!p.peerHalfClosed || !p.sentHalfClose) {
+	switch {
+	case p.state == pipeEnded:
+		p.applyRemoteReasonLocked()
+	case !p.peerHalfClosed || !p.sentHalfClose:
+		// A close before both directions finish is a protocol error. Do not
+		// discard bytes still queued for the Local when the close is valid:
+		// the receive loop delivers them and then applies this reason.
 		p.finishLocked(pb.RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR, false)
 	}
 	p.releaseIfRemoteDoneLocked()
+}
+
+// applyRemoteReasonLocked keeps the connector's close reason when this side
+// only knows that both directions half-closed, and turns a malformed reason
+// into a protocol error. A pipe that already ended another way is left alone.
+func (p *Pipe) applyRemoteReasonLocked() {
+	if !p.remoteReasonSet {
+		return
+	}
+	if p.remoteReason == pb.RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR ||
+		p.result.Reason == pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED ||
+		p.result.Reason == pb.RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED {
+		p.result.Reason = p.remoteReason
+	}
+}
+
+// writeFull writes every byte of p. A short write is retried. (0, nil) fails
+// instead of spinning, and the returned count is only bytes the Writer accepted.
+func writeFull(w io.Writer, p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		n, err := w.Write(p[written:])
+		if n > 0 {
+			written += n
+		}
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrNoProgress
+		}
+	}
+	return written, nil
 }
 
 func (p *Pipe) armTimersLocked() {
@@ -613,24 +668,26 @@ func (p *Pipe) receiveLoop() {
 		chunk := p.recv.peek()
 		m.mu.Unlock()
 
-		_, err := p.local.Write(chunk)
+		// A short write is not delivery of the whole chunk. Crediting bytes
+		// that never reached the Local would inflate the peer's send window.
+		written, err := writeFull(p.local, chunk)
 
 		m.mu.Lock()
-		if p.state == pipeEnded {
+		if p.state != pipeEnded && written > 0 {
+			p.recv.consume(written)
+			p.result.BytesReceived += int64(written)
+			p.lastActivity = time.Now()
+			p.unacked += written
+			if p.unacked >= grantThreshold && !p.peerHalfClosed {
+				m.queueLocked(p, sendWindow)
+			}
+		}
+		if p.state == pipeEnded || err != nil {
+			if p.state != pipeEnded {
+				p.localFailedLocked()
+			}
 			m.mu.Unlock()
 			return
-		}
-		if err != nil {
-			p.localFailedLocked()
-			m.mu.Unlock()
-			return
-		}
-		p.recv.consume(len(chunk))
-		p.result.BytesReceived += int64(len(chunk))
-		p.lastActivity = time.Now()
-		p.unacked += len(chunk)
-		if p.unacked >= grantThreshold && !p.peerHalfClosed {
-			m.queueLocked(p, sendWindow)
 		}
 		m.mu.Unlock()
 	}

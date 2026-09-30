@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -974,3 +975,189 @@ type eofReader struct{ *memLocal }
 func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 func eofLocal() Local { return eofReader{newMemLocal(true)} }
+
+func TestControllerKeepsConnectorCloseReason(t *testing.T) {
+	p := controllerPeer(t)
+	pipe := openOnController(t, p)
+	p.send(opened(1))
+	if err := pipe.WaitOpened(testContext(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipe.Start(eofLocal()); err != nil {
+		t.Fatal(err)
+	}
+	p.expect(halfClose(1))
+	p.send(halfClose(1), closeFrame(1, pb.RawCloseReason_RAW_CLOSE_REASON_UPSTREAM_ERROR))
+	wantReason(t, waitDone(t, pipe), pb.RawCloseReason_RAW_CLOSE_REASON_UPSTREAM_ERROR)
+	eventually(t, "release", func() bool { return slots(p.m) == 0 })
+}
+
+func TestMalformedTerminalFrames(t *testing.T) {
+	t.Run("unspecified open error", func(t *testing.T) {
+		p := controllerPeer(t)
+		pipe := openOnController(t, p)
+		p.send(openError(1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED, "dial failed"))
+		var closed *ClosedError
+		if err := pipe.WaitOpened(testContext(t)); !errors.As(err, &closed) ||
+			closed.Reason != protocolError {
+			t.Fatalf("WaitOpened = %v", err)
+		}
+		p.expectAlive()
+	})
+	t.Run("unknown open error", func(t *testing.T) {
+		p := controllerPeer(t)
+		pipe := openOnController(t, p)
+		p.send(openError(1, 99, ""))
+		var closed *ClosedError
+		if err := pipe.WaitOpened(testContext(t)); !errors.As(err, &closed) ||
+			closed.Reason != protocolError {
+			t.Fatalf("WaitOpened = %v", err)
+		}
+		p.expectAlive()
+	})
+	t.Run("oversized open error detail", func(t *testing.T) {
+		p := controllerPeer(t)
+		pipe := openOnController(t, p)
+		p.send(openError(
+			1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 257),
+		))
+		var closed *ClosedError
+		if err := pipe.WaitOpened(testContext(t)); !errors.As(err, &closed) ||
+			closed.Reason != protocolError {
+			t.Fatalf("WaitOpened = %v", err)
+		}
+		p.expectAlive()
+	})
+	t.Run("unspecified close reason", func(t *testing.T) {
+		p := controllerPeer(t)
+		pipe := openOnController(t, p)
+		p.send(opened(1))
+		if err := pipe.WaitOpened(testContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		if err := pipe.Start(eofLocal()); err != nil {
+			t.Fatal(err)
+		}
+		p.expect(halfClose(1))
+		p.send(halfClose(1), closeFrame(1, pb.RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED))
+		wantReason(t, waitDone(t, pipe), protocolError)
+	})
+	t.Run("unknown close reason", func(t *testing.T) {
+		p := controllerPeer(t)
+		pipe := openOnController(t, p)
+		p.send(opened(1))
+		if err := pipe.WaitOpened(testContext(t)); err != nil {
+			t.Fatal(err)
+		}
+		if err := pipe.Start(eofLocal()); err != nil {
+			t.Fatal(err)
+		}
+		p.expect(halfClose(1))
+		p.send(halfClose(1), closeFrame(1, 99))
+		wantReason(t, waitDone(t, pipe), protocolError)
+	})
+	t.Run("unspecified drain", func(t *testing.T) {
+		p := connectorPeer(t, 4, func() Local { return newSilentLocal() })
+		p.send(drain(pb.RawDrainReason_RAW_DRAIN_REASON_UNSPECIFIED))
+		p.expectFatal()
+	})
+	t.Run("unknown drain", func(t *testing.T) {
+		p := connectorPeer(t, 4, func() Local { return newSilentLocal() })
+		p.send(drain(99))
+		p.expectFatal()
+	})
+}
+
+type scriptedWrite struct {
+	n   int
+	err error
+}
+
+// scriptedWriteLocal returns scripted short writes, then accepts the rest.
+type scriptedWriteLocal struct {
+	*silentLocal
+	mu     sync.Mutex
+	writes []scriptedWrite
+	buf    []byte
+}
+
+func (l *scriptedWriteLocal) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(p)
+	var err error
+	if len(l.writes) > 0 {
+		w := l.writes[0]
+		l.writes = l.writes[1:]
+		n = w.n
+		err = w.err
+		if n > len(p) {
+			n = len(p)
+		}
+		if n < 0 {
+			n = 0
+		}
+	}
+	if n > 0 {
+		l.buf = append(l.buf, p[:n]...)
+	}
+	return n, err
+}
+
+func (l *scriptedWriteLocal) bytes() []byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]byte(nil), l.buf...)
+}
+
+func TestShortLocalWriteDoesNotInflateCredit(t *testing.T) {
+	payload := []byte("abcdef")
+	upstream := pb.RawCloseReason_RAW_CLOSE_REASON_UPSTREAM_ERROR
+	start := func(t *testing.T, local *scriptedWriteLocal) (*peer, *Pipe) {
+		t.Helper()
+		pipes := make(chan *Pipe, 1)
+		p := newPeer(t, Config{
+			Role: RoleConnector, MaxPipes: 4,
+			Accept: func(pipe *Pipe, _ *pb.RawOpen) {
+				_ = pipe.Start(local)
+				pipes <- pipe
+			},
+		}, 0)
+		p.send(open(1))
+		p.expect(opened(1))
+		return p, <-pipes
+	}
+	t.Run("partial write then success", func(t *testing.T) {
+		local := &scriptedWriteLocal{silentLocal: newSilentLocal(), writes: []scriptedWrite{{n: 1}}}
+		p, pipe := start(t, local)
+		p.send(frame(&pb.RawData{PipeId: 1, Payload: payload}))
+		eventually(t, "full delivery", func() bool {
+			return bytes.Equal(local.bytes(), payload) &&
+				pipe.Result().BytesReceived == int64(len(payload))
+		})
+		p.expectAlive()
+	})
+	t.Run("partial write plus error", func(t *testing.T) {
+		local := &scriptedWriteLocal{
+			silentLocal: newSilentLocal(),
+			writes:      []scriptedWrite{{n: 1, err: io.ErrClosedPipe}},
+		}
+		p, pipe := start(t, local)
+		p.send(frame(&pb.RawData{PipeId: 1, Payload: payload}))
+		p.expect(reset(1, upstream))
+		r := waitDone(t, pipe)
+		if r.BytesReceived != 1 || !bytes.Equal(local.bytes(), payload[:1]) {
+			t.Fatalf("delivered %+v buf %q", r, local.bytes())
+		}
+	})
+	t.Run("zero progress", func(t *testing.T) {
+		local := &scriptedWriteLocal{silentLocal: newSilentLocal(), writes: []scriptedWrite{{n: 0}}}
+		p, pipe := start(t, local)
+		p.send(frame(&pb.RawData{PipeId: 1, Payload: payload}))
+		p.expect(reset(1, upstream))
+		r := waitDone(t, pipe)
+		if r.BytesReceived != 0 || len(local.bytes()) != 0 {
+			t.Fatalf("delivered %+v buf %q", r, local.bytes())
+		}
+	})
+}

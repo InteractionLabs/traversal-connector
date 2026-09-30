@@ -42,6 +42,24 @@ jobs:
 
       - run: just ${{ matrix.recipe }}
 
+  rawtunnel-race:
+    name: raw tunnel race and fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Ordinary go test runs fuzz seeds only. Race and a bounded fuzz job
+      # are required before raw transport is enabled.
+      - name: Race and bounded fuzz
+        run: |
+          go test -race -count=1 ./connector-lib/rawtunnel/
+          go test -fuzz=FuzzPeerFrames -fuzztime=20s ./connector-lib/rawtunnel/
+
   chart:
     name: Helm chart
     runs-on: ubuntu-latest

@@ -664,8 +664,13 @@ func (m *Mux) handleLocked(f *pb.RawTunnelFrame) error {
 		if !controller {
 			return protocolErrorf("connector received close")
 		}
-		return m.withPipeLocked(fr.Close.GetPipeId(), (*Pipe).receiveCloseLocked)
+		return m.withPipeLocked(fr.Close.GetPipeId(), func(p *Pipe) {
+			p.receiveCloseLocked(fr.Close)
+		})
 	case *pb.RawTunnelFrame_Drain:
+		if err := protovalidate.Validate(fr.Drain); err != nil {
+			return protocolErrorf("malformed drain")
+		}
 		if !m.peerDrain {
 			m.peerDrain = true
 			m.startDrainLocked()
