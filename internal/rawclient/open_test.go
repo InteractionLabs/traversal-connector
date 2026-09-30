@@ -296,7 +296,7 @@ func TestShutdownClosesPipesWithConnectorTerminating(t *testing.T) {
 	var once sync.Once
 	t.Cleanup(func() { once.Do(m.Shutdown) })
 	dstCh := acceptOne(ln)
-	pipe, _ := openPipe(t, recvMux(t, ctrl), sign(t, "jti-shutdown"))
+	pipe, _ := openPipe(t, recvMux(t, ctrl.ready), sign(t, "jti-shutdown"))
 	dst := <-dstCh
 	t.Cleanup(func() { _ = dst.Close() })
 	once.Do(m.Shutdown)
