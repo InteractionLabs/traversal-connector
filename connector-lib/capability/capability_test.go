@@ -36,9 +36,24 @@ func expected() capability.Expected {
 	return capability.Expected{
 		ConnectorID:    "connector-1",
 		OrganizationID: "org-1",
+		IntegrationID:  "integration-1",
+		ConsumerID:     "platform-conformance",
+		SessionID:      "session-1",
+		TrafficClass:   "standard",
 		Host:           "db.internal",
 		Port:           5432,
 		Mode:           pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+	}
+}
+
+// connectorExpected is what a connector verifier can bind: its own id and the
+// requested destination/mode. Optional caller/tenant claims stay empty.
+func connectorExpected() capability.Expected {
+	return capability.Expected{
+		ConnectorID: "connector-1",
+		Host:        "db.internal",
+		Port:        5432,
+		Mode:        pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
 	}
 }
 
@@ -210,18 +225,45 @@ func TestOpenCountsExpireWithTheCapability(t *testing.T) {
 	}
 }
 
-func TestOrganizationCheckIsOptional(t *testing.T) {
-	v := newVerifier(t, func() time.Time { return testNow })
-	c := validClaims(testNow)
-	c.OrganizationID = "org-2"
-	token := sign(t, c)
-	if _, err := v.Verify(token, expected()); codeOf(err) != capability.CodeWrongTenant {
-		t.Fatalf("Verify with organization = %v", err)
-	}
-	connectorSide := expected()
-	connectorSide.OrganizationID = ""
-	if _, err := v.Verify(token, connectorSide); err != nil {
-		t.Fatalf("Verify without organization = %v", err)
+func TestOptionalExpectedClaims(t *testing.T) {
+	token := sign(t, validClaims(testNow))
+	base := connectorExpected()
+
+	t.Run("empty optional does not constrain", func(t *testing.T) {
+		if _, err := newVerifier(t, func() time.Time { return testNow }).Verify(token, base); err != nil {
+			t.Fatalf("Verify = %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		set  func(*capability.Expected)
+		want capability.Code
+	}{
+		{"organization mismatch", func(e *capability.Expected) { e.OrganizationID = "org-2" },
+			capability.CodeWrongTenant},
+		{"organization match", func(e *capability.Expected) { e.OrganizationID = "org-1" }, ""},
+		{"integration mismatch", func(e *capability.Expected) { e.IntegrationID = "other" },
+			capability.CodeForbidden},
+		{"integration match", func(e *capability.Expected) { e.IntegrationID = "integration-1" }, ""},
+		{"consumer mismatch", func(e *capability.Expected) { e.ConsumerID = "other" },
+			capability.CodeForbidden},
+		{"consumer match", func(e *capability.Expected) { e.ConsumerID = "platform-conformance" }, ""},
+		{"session mismatch", func(e *capability.Expected) { e.SessionID = "other" },
+			capability.CodeForbidden},
+		{"session match", func(e *capability.Expected) { e.SessionID = "session-1" }, ""},
+		{"traffic class mismatch", func(e *capability.Expected) { e.TrafficClass = "other" },
+			capability.CodeForbidden},
+		{"traffic class match", func(e *capability.Expected) { e.TrafficClass = "standard" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := base
+			tc.set(&want)
+			_, err := newVerifier(t, func() time.Time { return testNow }).Verify(token, want)
+			if got := codeOf(err); got != tc.want {
+				t.Fatalf("Verify = %v, want code %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -308,6 +350,7 @@ func TestOpenFailureReasons(t *testing.T) {
 		capability.CodeExpired:          pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPABILITY_EXPIRED,
 		capability.CodeForbiddenSubject: pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_FORBIDDEN,
 		capability.CodeWrongTenant:      pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_FORBIDDEN,
+		capability.CodeForbidden:        pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_FORBIDDEN,
 		capability.CodeWrongConnector:   pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_CONNECTOR,
 		capability.CodeWrongDestination: pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_DESTINATION,
 		capability.CodeUnsupportedMode:  pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSUPPORTED_MODE,

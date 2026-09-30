@@ -44,7 +44,11 @@ const (
 	MaxClockSkew = 30 * time.Second
 	// MaxLifetime is the longest exp - iat a validator accepts.
 	MaxLifetime = 5 * time.Minute
-	// MaxOpensPerToken is how many pipes one capability may open per validator.
+	// MaxOpensPerToken is how many times one Verifier may accept the same
+	// capability (by jti). It is a local authorized-attempt limit on that
+	// Verifier, not a global count of pipes successfully opened and not
+	// complete replay protection. A hard distributed limit belongs in shared
+	// admission or issuer state.
 	MaxOpensPerToken = 64
 	// maxClaimBytes bounds every string claim except host.
 	maxClaimBytes = 256
@@ -96,6 +100,9 @@ const (
 	CodeLifetimeTooLong  Code = "lifetime_too_long"
 	CodeForbiddenSubject Code = "forbidden_subject"
 	CodeWrongTenant      Code = "wrong_organization"
+	// CodeForbidden is a mismatch on an Expected claim the verifier knew from
+	// its authenticated context (integration, consumer, session, or traffic).
+	CodeForbidden        Code = "forbidden"
 	CodeWrongConnector   Code = "wrong_connector"
 	CodeWrongDestination Code = "wrong_destination"
 	CodeUnsupportedMode  Code = "unsupported_mode"
@@ -121,7 +128,7 @@ func (e *Error) OpenFailureReason() pb.RawOpenFailureReason {
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_AUDIENCE
 	case CodeNotYetValid, CodeExpired:
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPABILITY_EXPIRED
-	case CodeForbiddenSubject, CodeWrongTenant:
+	case CodeForbiddenSubject, CodeWrongTenant, CodeForbidden:
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_FORBIDDEN
 	case CodeWrongConnector:
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_CONNECTOR
@@ -162,8 +169,8 @@ type VerifierConfig struct {
 	Now func() time.Time
 }
 
-// Verifier checks capabilities and counts opens per capability. It is safe for
-// concurrent use.
+// Verifier checks capabilities and counts authorized attempts per capability
+// on this instance. It is safe for concurrent use.
 type Verifier struct {
 	issuer   string
 	keys     map[string]*ecdsa.PublicKey
@@ -207,18 +214,37 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	}, nil
 }
 
-// Expected is what the validator already knows about the open being
-// authorized. Host must be the requested host as received; a non-canonical
-// request never matches.
+// Expected is what the verifier already knows about the open being authorized
+// from its authenticated context. A non-empty string field must match the
+// claim; an empty string means this verifier does not know that claim and does
+// not constrain it. Host must be the requested host as received; a
+// non-canonical request never matches.
+//
+// Connector verifiers know their own connector id and the requested
+// host/port/mode. They leave OrganizationID empty because the connector
+// credential already binds one tenant. They leave IntegrationID, ConsumerID,
+// SessionID, and TrafficClass empty because the open frame does not
+// independently authenticate the caller.
+//
+// Controller and future Integration Proxy verifiers must set every claim their
+// authenticated context knows. Optional fields on Expected are enough; do not
+// invent a second code path per role.
 type Expected struct {
 	ConnectorID string
-	// OrganizationID is the tenant that owns ConnectorID. Leave it empty only
-	// where the validator cannot know its tenant, as on the connector, whose
-	// identity is already bound to one tenant by its credentials.
+	// OrganizationID, when set, must equal the claim. Leave empty on the
+	// connector, whose credentials already bind one tenant.
 	OrganizationID string
-	Host           string
-	Port           uint16
-	Mode           pb.RawPipeMode
+	// IntegrationID, ConsumerID, SessionID, and TrafficClass, when set, must
+	// equal the matching claim. Leave them empty on the connector: the open
+	// frame does not independently authenticate the caller. Controller and
+	// Integration Proxy verifiers must set each one they know.
+	IntegrationID string
+	ConsumerID    string
+	SessionID     string
+	TrafficClass  string
+	Host          string
+	Port          uint16
+	Mode          pb.RawPipeMode
 }
 
 // Verified is an accepted capability.
@@ -230,8 +256,11 @@ type Verified struct {
 	ClockSkew time.Duration
 }
 
-// Verify checks token against want and, if it is valid, counts one open
-// against the capability. Opens are counted only for tokens that pass every
+// Verify checks token against want and, if it is valid, counts one authorized
+// attempt against the capability on this Verifier. The counter is local to
+// this Verifier and is consumed after successful verification, before
+// admission/DNS/dial. It is not a global successful-pipe count or complete
+// replay protection. Attempts are counted only for tokens that pass every
 // other check, so rejected attempts cannot exhaust a capability.
 func (v *Verifier) Verify(token string, want Expected) (*Verified, error) {
 	claims, err := v.parse(token)
@@ -309,6 +338,14 @@ func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
 		return fail(CodeForbiddenSubject, "sub may not open pipes")
 	case want.OrganizationID != "" && c.OrganizationID != want.OrganizationID:
 		return fail(CodeWrongTenant, "organization_id does not own the connector")
+	case want.IntegrationID != "" && c.IntegrationID != want.IntegrationID:
+		return fail(CodeForbidden, "integration_id does not match")
+	case want.ConsumerID != "" && c.ConsumerID != want.ConsumerID:
+		return fail(CodeForbidden, "consumer_id does not match")
+	case want.SessionID != "" && c.SessionID != want.SessionID:
+		return fail(CodeForbidden, "session_id does not match")
+	case want.TrafficClass != "" && c.TrafficClass != want.TrafficClass:
+		return fail(CodeForbidden, "traffic_class does not match")
 	case c.ConnectorID != want.ConnectorID:
 		return fail(CodeWrongConnector, "connector_id names another connector")
 	case c.Host != want.Host || c.Port != want.Port:
@@ -445,7 +482,8 @@ func ParsePublicKeyPEM(data []byte) (*ecdsa.PublicKey, error) {
 	return key, nil
 }
 
-// openCounter enforces MaxOpensPerToken per jti until the capability expires.
+// openCounter enforces MaxOpensPerToken authorized attempts per jti on one
+// Verifier until the capability expires.
 type openCounter struct {
 	mu        sync.Mutex
 	entries   map[string]*openCount

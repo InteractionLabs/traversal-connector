@@ -148,19 +148,19 @@ var tokenCases = []tokenCase{
 		c.IssuedAt, c.ExpiresAt = c.IssuedAt-200, c.IssuedAt-80
 	}), capability.CodeExpired},
 	{"expired at the skew boundary", mutated(func(c *capability.Claims) {
-		c.IssuedAt, c.ExpiresAt = testNow.Unix() - 150, testNow.Unix() - 30
+		c.IssuedAt, c.ExpiresAt = testNow.Unix()-150, testNow.Unix()-30
 	}), capability.CodeExpired},
 	{"valid inside the skew", mutated(func(c *capability.Claims) {
-		c.IssuedAt, c.ExpiresAt = testNow.Unix() - 149, testNow.Unix() - 29
+		c.IssuedAt, c.ExpiresAt = testNow.Unix()-149, testNow.Unix()-29
 	}), ""},
 	{"not yet valid", mutated(func(c *capability.Claims) {
 		c.IssuedAt, c.ExpiresAt = c.IssuedAt+100, c.ExpiresAt+100
 	}), capability.CodeNotYetValid},
 	{"issued at the skew boundary", mutated(func(c *capability.Claims) {
-		c.IssuedAt, c.ExpiresAt = testNow.Unix() + 30, testNow.Unix() + 150
+		c.IssuedAt, c.ExpiresAt = testNow.Unix()+30, testNow.Unix()+150
 	}), ""},
 	{"issued past the skew boundary", mutated(func(c *capability.Claims) {
-		c.IssuedAt, c.ExpiresAt = testNow.Unix() + 31, testNow.Unix() + 151
+		c.IssuedAt, c.ExpiresAt = testNow.Unix()+31, testNow.Unix()+151
 	}), capability.CodeNotYetValid},
 	{"maximum lifetime", mutated(func(c *capability.Claims) {
 		c.ExpiresAt = c.IssuedAt + 300

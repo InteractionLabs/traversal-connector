@@ -1,6 +1,7 @@
 // Package capabilitytest signs connector capabilities for tests. Production
-// capabilities are signed by the capability signer service with a KMS key;
-// nothing outside tests may use this package.
+// capabilities are issued by the Integration Proxy behind a CapabilityIssuer;
+// extraction to a key-isolated signer remains optional. Nothing outside tests
+// may use this package.
 package capabilitytest
 
 import (
