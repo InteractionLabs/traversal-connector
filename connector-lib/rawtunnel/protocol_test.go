@@ -103,6 +103,21 @@ func (p *peer) expectAlive() {
 	p.expect(ping(99, true))
 }
 
+// writerBlockedInSend reports that the mux writer is inside Stream.Send.
+// pingAckPending starts clear, so a wait that only checks the flag returns
+// before the ping is processed and lets a later Open race ahead of the ack.
+func (p *peer) writerBlockedInSend() bool {
+	p.t.Helper()
+	p.m.mu.Lock()
+	pending := p.m.pingAckPending
+	p.m.mu.Unlock()
+	stream, ok := p.m.stream.(*chanStream)
+	if !ok {
+		p.t.Fatal("test stream is not a chanStream")
+	}
+	return !pending && stream.sending.Load() > 0
+}
+
 func (p *peer) expectFatal() {
 	p.t.Helper()
 	select {
@@ -725,11 +740,7 @@ func TestTunnelEndsWhileSendIsBlocked(t *testing.T) {
 func TestControllerDrainFollowsQueuedOpen(t *testing.T) {
 	p := controllerPeer(t)
 	p.send(ping(1, false))
-	eventually(t, "the writer to take the ack", func() bool {
-		p.m.mu.Lock()
-		defer p.m.mu.Unlock()
-		return !p.m.pingAckPending
-	})
+	eventually(t, "the writer to block in the ping ack", p.writerBlockedInSend)
 	if _, err := p.m.Open(testCapability, "db.internal", 5432, passthrough); err != nil {
 		t.Fatal(err)
 	}
@@ -740,11 +751,7 @@ func TestControllerDrainFollowsQueuedOpen(t *testing.T) {
 func TestControllerDrainAfterUnsentOpenIsReset(t *testing.T) {
 	p := controllerPeer(t)
 	p.send(ping(1, false))
-	eventually(t, "the writer to take the ack", func() bool {
-		p.m.mu.Lock()
-		defer p.m.mu.Unlock()
-		return !p.m.pingAckPending
-	})
+	eventually(t, "the writer to block in the ping ack", p.writerBlockedInSend)
 	pipe, err := p.m.Open(testCapability, "db.internal", 5432, passthrough)
 	if err != nil {
 		t.Fatal(err)
@@ -761,11 +768,7 @@ func TestControllerDrainAfterUnsentOpenIsReset(t *testing.T) {
 func TestControllerRejectsFramesBeforeOpenIsSent(t *testing.T) {
 	p := controllerPeer(t)
 	p.send(ping(1, false))
-	eventually(t, "the writer to take the ack", func() bool {
-		p.m.mu.Lock()
-		defer p.m.mu.Unlock()
-		return !p.m.pingAckPending
-	})
+	eventually(t, "the writer to block in the ping ack", p.writerBlockedInSend)
 	pipe, err := p.m.Open(testCapability, "db.internal", 5432, passthrough)
 	if err != nil {
 		t.Fatal(err)
@@ -996,7 +999,13 @@ func TestMalformedTerminalFrames(t *testing.T) {
 	t.Run("unspecified open error", func(t *testing.T) {
 		p := controllerPeer(t)
 		pipe := openOnController(t, p)
-		p.send(openError(1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED, "dial failed"))
+		p.send(
+			openError(
+				1,
+				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED,
+				"dial failed",
+			),
+		)
 		var closed *ClosedError
 		if err := pipe.WaitOpened(testContext(t)); !errors.As(err, &closed) ||
 			closed.Reason != protocolError {
@@ -1019,7 +1028,9 @@ func TestMalformedTerminalFrames(t *testing.T) {
 		p := controllerPeer(t)
 		pipe := openOnController(t, p)
 		p.send(openError(
-			1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 257),
+			1,
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
+			strings.Repeat("a", 257),
 		))
 		var closed *ClosedError
 		if err := pipe.WaitOpened(testContext(t)); !errors.As(err, &closed) ||

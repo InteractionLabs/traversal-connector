@@ -504,8 +504,17 @@ func (m *Mux) teardownLocked() {
 	m.control, m.ready = nil, nil
 	m.drainPending, m.pingPending, m.pingAckPending = false, false, false
 	for _, p := range m.pipes {
-		p.finishLocked(reason, false)
-		p.remoteReleased = true
+		// A controller pipe may already have ended locally and be waiting for
+		// the connector's close. The tunnel is gone, so that wait must end and
+		// the slot must be released. remoteReleased is set before finish so a
+		// pipe that ends in this loop does not wait either.
+		if p.state != pipeEnded {
+			p.remoteReleased = true
+			p.finishLocked(reason, false)
+		} else {
+			p.remoteReleased = true
+		}
+		m.maybeFinishLocked(p)
 		if p.finished {
 			m.releaseLocked(p)
 		}

@@ -332,8 +332,22 @@ func (p *Pipe) shutLocal() {
 // maybeFinishLocked completes an ended pipe once nothing local still uses it:
 // it has been started or refused, both copy loops have exited, and the Local
 // is closed. The connector then tells the controller it released the pipe.
+//
+// A controller holds Done open after a normal half-close completion until the
+// connector's close arrives. Both directions can half-close, and the copy
+// loops can finish, while that close is still unread. Closing Done first would
+// freeze Result at COMPLETED and drop a malformed or more specific reason that
+// arrives in the same burst. A reset, timeout, or protocol error already has
+// its reason and must not wait: the peer may never send a close.
 func (m *Mux) maybeFinishLocked(p *Pipe) {
 	if p.finished || p.state != pipeEnded || p.workers > 0 || !p.resolved || !p.localShut {
+		return
+	}
+	// Only a normal half-close completion is provisional. A reset, timeout, or
+	// protocol error already has its reason, and waiting for close there would
+	// stall a peer that will not send one.
+	if m.cfg.Role == RoleController && !p.remoteReleased && m.err == nil &&
+		p.result.Reason == pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED {
 		return
 	}
 	p.finished = true
@@ -523,6 +537,10 @@ func (p *Pipe) receiveCloseLocked(c *pb.RawClose) {
 		// the receive loop delivers them and then applies this reason.
 		p.finishLocked(pb.RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR, false)
 	}
+	// Done stays open until this close is applied when the local result is only
+	// a half-close completion. A pipe that already published Done still needs
+	// this close to release its slot.
+	p.m.maybeFinishLocked(p)
 	p.releaseIfRemoteDoneLocked()
 }
 
