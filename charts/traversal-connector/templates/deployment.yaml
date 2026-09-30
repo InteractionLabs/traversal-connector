@@ -55,6 +55,23 @@
 {{- if or (le (int .Values.rawTunnel.maxPipesPerPod) 0) (gt (int .Values.rawTunnel.maxPipesPerPod) 4096) }}
 {{- fail "rawTunnel.maxPipesPerPod must be from 1 to 4096" }}
 {{- end }}
+{{- if le (int .Values.rawTunnel.shutdownGraceSeconds) 0 }}
+{{- fail "rawTunnel.shutdownGraceSeconds must be positive" }}
+{{- end }}
+{{- $rawIdle := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.idleTimeout" "value" .Values.rawTunnel.idleTimeout) | trim | atoi }}
+{{- $rawLife := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.maxLifetime" "value" .Values.rawTunnel.maxLifetime) | trim | atoi }}
+{{- $rawOpen := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.openTimeout" "value" .Values.rawTunnel.openTimeout) | trim | atoi }}
+{{- $rawPing := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.pingInterval" "value" .Values.rawTunnel.pingInterval) | trim | atoi }}
+{{- if or (le $rawOpen 0) (le $rawPing 0) }}
+{{- fail "rawTunnel.openTimeout and rawTunnel.pingInterval must be at least 1s" }}
+{{- end }}
+{{- if gt $rawIdle $rawLife }}
+{{- fail "rawTunnel.idleTimeout must not exceed rawTunnel.maxLifetime" }}
+{{- end }}
+{{- $rawProxy := .Values.rawTunnel.httpsProxy | default dict }}
+{{- if and $rawProxy.url $rawProxy.existingSecret }}
+{{- fail "rawTunnel.httpsProxy.url and rawTunnel.httpsProxy.existingSecret are mutually exclusive" }}
+{{- end }}
 {{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}
@@ -321,6 +338,22 @@ spec:
             {{- end }}
             - name: RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS
               value: {{ .Values.rawTunnel.allowDelegatedProxyChecks | quote }}
+            {{- $rawProxy := .Values.rawTunnel.httpsProxy | default dict }}
+            {{- if or $rawProxy.url $rawProxy.existingSecret }}
+            - name: HTTPS_PROXY
+              {{- if $rawProxy.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rawProxy.existingSecret | quote }}
+                  key: {{ $rawProxy.secretKey | default "url" | quote }}
+              {{- else }}
+              value: {{ $rawProxy.url | quote }}
+              {{- end }}
+            {{- with $rawProxy.noProxy }}
+            - name: NO_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           ports:
             - name: http

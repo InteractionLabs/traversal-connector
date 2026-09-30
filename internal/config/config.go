@@ -774,8 +774,9 @@ func (r RawTunnelConfig) validate() error {
 		r.ShutdownGrace <= 0 || r.PingInterval <= 0 || r.RotationDeadline <= 0 {
 		return errors.New("raw tunnel timeouts must be positive")
 	}
-	if r.PingInterval < time.Second || r.IdleTimeout < time.Second ||
-		r.MaxLifetime < time.Second || r.RotationDeadline < time.Second {
+	if r.PingInterval < time.Second || r.OpenTimeout < time.Second ||
+		r.IdleTimeout < time.Second || r.MaxLifetime < time.Second ||
+		r.RotationDeadline < time.Second {
 		return errors.New("raw tunnel timeouts must be at least 1s")
 	}
 	if r.RotationDeadline > r.MaxLifetime {

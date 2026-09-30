@@ -127,6 +127,8 @@ assert_contains "$tmp_dir/raw-on.yaml" $'            - name: RAW_TUNNEL_OPEN_TIM
 assert_contains "$tmp_dir/raw-on.yaml" 'terminationGracePeriodSeconds: 45'
 assert_contains "$tmp_dir/raw-on.yaml" 'value: "traversal-raw-tunnel/ci"'
 assert_not_contains "$tmp_dir/raw-on.yaml" '-----BEGIN PUBLIC KEY-----'
+assert_not_contains "$tmp_dir/raw-on.yaml" 'name: HTTPS_PROXY'
+assert_not_contains "$tmp_dir/raw-on.yaml" 'name: NO_PROXY'
 
 current_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
 next_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'next' '-----END PUBLIC KEY-----')"
@@ -236,6 +238,37 @@ assert_render_fails raw-pipes-pod-ceiling 'maxPipesPerPod must be from 1 to 4096
   --set-string rawTunnel.currentPublicKeyPEM=abc \
   --set rawTunnel.maxPipesPerTunnel=100 \
   --set rawTunnel.maxPipesPerPod=4097
+
+raw_required=(
+  --set rawTunnel.enabled=true
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci
+  --set-string 'rawTunnel.allowedSubjects[0]=signer'
+  --set-string rawTunnel.currentKeyID=k1
+  --set-string rawTunnel.currentPublicKeyPEM=abc
+)
+render raw-proxy "$fixtures/direct-export-values.yaml" "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.httpsProxy.existingSecret=raw-proxy \
+  --set-string rawTunnel.httpsProxy.secretKey=url \
+  --set-string rawTunnel.httpsProxy.noProxy=localhost
+assert_contains "$tmp_dir/raw-proxy.yaml" $'            - name: HTTPS_PROXY\n              valueFrom:\n                secretKeyRef:\n                  name: "raw-proxy"\n                  key: "url"'
+assert_contains "$tmp_dir/raw-proxy.yaml" $'            - name: NO_PROXY\n              value: "localhost"'
+assert_not_contains "$tmp_dir/raw-proxy.yaml" 'name: telemetry-sidecar'
+assert_render_fails raw-proxy-both 'rawTunnel.httpsProxy.url and rawTunnel.httpsProxy.existingSecret are mutually exclusive' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.httpsProxy.url=http://proxy.internal:3128 \
+  --set-string rawTunnel.httpsProxy.existingSecret=raw-proxy
+assert_render_fails raw-grace-positive 'shutdownGraceSeconds must be positive' "${common[@]}" "${raw_required[@]}" \
+  --set rawTunnel.shutdownGraceSeconds=0
+assert_render_fails raw-ping-short 'rawTunnel.pingInterval must be at least 1s' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.pingInterval=500ms
+assert_render_fails raw-open-short 'rawTunnel.openTimeout must be at least 1s' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.openTimeout=500ms
+assert_render_fails raw-idle-short 'rawTunnel.idleTimeout must be at least 1s' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.idleTimeout=500ms
+assert_render_fails raw-life-short 'rawTunnel.maxLifetime must be at least 1s' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.maxLifetime=500ms
+assert_render_fails raw-idle-exceeds-life 'idleTimeout must not exceed' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.idleTimeout=5h \
+  --set-string rawTunnel.maxLifetime=1h
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca

@@ -205,9 +205,11 @@ affinity: {}
 # Disabled by default. Enabling does not change the customer hostname, port
 # 443, mTLS identity, or firewall rules, and it does not change legacy tunnel
 # count, readiness, or health. Hosts covered by a redaction rule are refused
-# before dial. A customer forward proxy for raw destinations is HTTPS_PROXY /
-# NO_PROXY, not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
-# allowDelegatedProxyChecks is true. The per-pod pipe cap counts pipes on
+# before dial. A customer forward proxy for raw destinations is
+# rawTunnel.httpsProxy (HTTPS_PROXY and NO_PROXY on the connector container),
+# not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
+# allowDelegatedProxyChecks is true. Prefer existingSecret over url. The
+# per-pod pipe cap counts pipes on
 # draining tunnels, so a rotation cannot grow memory without a bound. Active,
 # connecting, and draining sessions together stay within 2× maxTunnels. The pod
 # cap must be at least the per-tunnel cap. Hard ceilings match the process:
@@ -233,3 +235,11 @@ rawTunnel:
   nextPublicKeyPEM: ""
   forbiddenCIDRs: []
   allowDelegatedProxyChecks: false
+  # Forward proxy for raw destinations. Rendered as HTTPS_PROXY and NO_PROXY
+  # on the connector container only. url and existingSecret are mutually
+  # exclusive; existingSecret is the one to use outside tests.
+  httpsProxy:
+    url: ""
+    existingSecret: ""
+    secretKey: url
+    noProxy: ""
