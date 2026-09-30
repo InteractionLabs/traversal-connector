@@ -243,13 +243,14 @@ rawTunnel:
   # environment's entry in trustedKeys.
   environment: ""
   allowedSubjects: []
-  # Each environment's capability-signer public keys, exported from AWS KMS
-  # with GetPublicKey and identified by kid. Rotation is a chart upgrade, never
-  # a connector binary change: ship the new key as next, let the signer switch
-  # to it, then promote it to current and drop the old key. Capabilities signed
-  # by a dropped key are refused only once this chart is rolled out, so revoke
-  # a compromised key on the controller first. See "Raw tunnel signing keys"
-  # in the README.
+  # Each environment's capability-signer public keys, as PEM PUBLIC KEY
+  # blocks, identified by kid: the bare KMS key ID, not its ARN. Traversal
+  # ships them with each chart release; do not override them, or upgrades stop
+  # delivering rotations. Rotation is a chart upgrade, never a connector binary
+  # change: ship the new key as next, let the signer switch to it, then promote
+  # it to current and drop the old key. Capabilities signed by a dropped key are
+  # refused only once this chart is rolled out, so revoke a compromised key on
+  # the controller first. See "Raw tunnel signing keys" in the README.
   trustedKeys:
     dev:
       current: {kid: "", publicKeyPEM: ""}

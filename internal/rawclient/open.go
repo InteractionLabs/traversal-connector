@@ -32,6 +32,13 @@ func newOpener(
 	if err != nil {
 		return nil, err
 	}
+	// Kids are not secret. Logging them lets an operator confirm the fleet
+	// trusts the next key before the signer switches to it.
+	logger.Info("raw tunnel trusted keys loaded",
+		"issuer", cfg.RawTunnel.Issuer,
+		"current_kid", cfg.RawTunnel.CurrentKeyID,
+		"next_kid", cfg.RawTunnel.NextKeyID,
+	)
 	if policy == nil {
 		policy, err = newPolicy(cfg, redactor)
 		if err != nil {

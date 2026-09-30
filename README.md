@@ -336,9 +336,11 @@ remain. The pod's termination grace must be longer than that wait.
 #### Raw tunnel signing keys
 
 Each Traversal environment signs capabilities with its own AWS KMS key. The
-Helm chart packages every environment's public keys, exported with KMS
-`GetPublicKey`, under `rawTunnel.trustedKeys.<environment>`, and
-`rawTunnel.environment` selects one set. The chart derives the issuer,
+Helm chart packages every environment's public keys under
+`rawTunnel.trustedKeys.<environment>`, and `rawTunnel.environment` selects one
+set. Each key is a PEM `PUBLIC KEY` block, converted from the DER that KMS
+`GetPublicKey` returns, and its kid is the bare KMS key ID, not the key's ARN.
+The chart refuses an ARN or alias as a kid and a key that is not PEM. The chart derives the issuer,
 `traversal-raw-tunnel/<environment>`, and fills the `RAW_TUNNEL_*_KEY_ID` and
 `RAW_TUNNEL_*_PUBLIC_KEY` variables. The connector refuses capabilities from
 any other issuer or key id with `unknown_key` or `invalid_capability`. The
@@ -352,6 +354,13 @@ A rotation needs chart upgrades only, never a new connector binary:
 3. After the longest capability lifetime, ship a chart release that promotes
    the next key to `current` and drops the old one. Do the same on the
    Controller.
+
+Rotations reach a connector only through the chart's own `trustedKeys`, so do
+not override them in your values, and do not upgrade with
+`helm upgrade --reuse-values`, which keeps the previous release's keys. Use
+`--reset-then-reuse-values` to keep your overrides and take the new keys. At
+startup the connector logs the issuer and the kids it trusts, so you can
+confirm the fleet has the next key before the signer switches to it.
 
 Removing a key from connectors takes effect only as each customer rolls out
 the new chart, so the connector side is slow to revoke. The Controller checks

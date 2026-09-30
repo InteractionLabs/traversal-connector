@@ -197,12 +197,13 @@ assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
 assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
 assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
+ci_pem=$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')
 raw_enabled=(
   --set rawTunnel.enabled=true
   --set-string rawTunnel.environment=ci
   --set-string 'rawTunnel.allowedSubjects[0]=signer'
   --set-string rawTunnel.trustedKeys.ci.current.kid=k1
-  --set-string rawTunnel.trustedKeys.ci.current.publicKeyPEM=abc
+  --set-string rawTunnel.trustedKeys.ci.current.publicKeyPEM="$ci_pem"
 )
 assert_render_fails raw-no-environment 'rawTunnel.environment is required' "${common[@]}" --set rawTunnel.enabled=true
 assert_render_fails raw-bad-environment 'rawTunnel.environment is required' "${common[@]}" "${raw_enabled[@]}" --set-string rawTunnel.environment=Prod/x
@@ -214,7 +215,15 @@ assert_render_fails raw-pipe-cap 'maxPipesPerPod must be at least' "${common[@]}
   --set rawTunnel.maxPipesPerPod=10
 assert_render_fails raw-duplicate-key 'next.kid must differ from current.kid' "${common[@]}" "${raw_enabled[@]}" \
   --set-string rawTunnel.trustedKeys.ci.next.kid=k1 \
-  --set-string rawTunnel.trustedKeys.ci.next.publicKeyPEM=abc
+  --set-string rawTunnel.trustedKeys.ci.next.publicKeyPEM="$ci_pem"
+assert_render_fails raw-arn-kid 'current.kid must be the bare KMS key ID' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawTunnel.trustedKeys.ci.current.kid=arn:aws:kms:us-west-2:1:key/k1
+assert_render_fails raw-der-key 'next.publicKeyPEM must be a PEM PUBLIC KEY block' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawTunnel.trustedKeys.ci.next.kid=k2 \
+  --set-string rawTunnel.trustedKeys.ci.next.publicKeyPEM=MFkwEw
+assert_render_fails raw-null-keys 'packages no signing key for that environment yet' "${common[@]}" \
+  --set rawTunnel.enabled=true --set-string rawTunnel.environment=ci --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set rawTunnel.trustedKeys=null
 assert_render_fails raw-grace 'shutdownGraceSeconds must be less' "${common[@]}" "${raw_enabled[@]}" \
   --set rawTunnel.shutdownGraceSeconds=45 \
   --set rawTunnel.terminationGraceSeconds=45

@@ -45,6 +45,15 @@
 {{- if and (dig "next" "kid" "" $rawKeys) (eq (dig "next" "kid" "" $rawKeys) (dig "current" "kid" "" $rawKeys)) }}
 {{- fail (printf "rawTunnel.trustedKeys.%s.next.kid must differ from current.kid" $rawEnv) }}
 {{- end }}
+{{- range $slot := list "current" "next" }}
+{{- $kid := dig $slot "kid" "" $rawKeys }}
+{{- if or (hasPrefix "arn:" $kid) (hasPrefix "alias/" $kid) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.%s.kid must be the bare KMS key ID, not an ARN or alias" $rawEnv $slot) }}
+{{- end }}
+{{- if and $kid (not (contains "-----BEGIN PUBLIC KEY-----" (dig $slot "publicKeyPEM" "" $rawKeys))) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.%s.publicKeyPEM must be a PEM PUBLIC KEY block" $rawEnv $slot) }}
+{{- end }}
+{{- end }}
 {{- if lt (int .Values.rawTunnel.maxPipesPerPod) (int .Values.rawTunnel.maxPipesPerTunnel) }}
 {{- fail "rawTunnel.maxPipesPerPod must be at least rawTunnel.maxPipesPerTunnel" }}
 {{- end }}

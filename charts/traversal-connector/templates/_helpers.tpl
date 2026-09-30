@@ -123,5 +123,5 @@ so the chart rejects them at render.
 {{- /* The trusted keys packaged for rawTunnel.environment, as YAML, or an
        empty map when the chart has none for it. */}}
 {{- define "traversal-connector.rawTunnelKeys" -}}
-{{- get .Values.rawTunnel.trustedKeys (.Values.rawTunnel.environment | default "") | default dict | toYaml -}}
+{{- get (.Values.rawTunnel.trustedKeys | default dict) (.Values.rawTunnel.environment | default "") | default dict | toYaml -}}
 {{- end -}}
