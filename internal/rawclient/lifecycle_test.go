@@ -255,16 +255,16 @@ func TestRotationKeepsThePipeAndOpensAReplacement(t *testing.T) {
 	m := startManager(t, cfg, policy)
 	t.Cleanup(m.Shutdown)
 
-	first := recvMux(t, ctrl)
+	first := recvMux(t, ctrl.ready)
 	dstCh := acceptOne(ln)
 	pipe, peer := openPipe(t, first, sign(t, "jti-rotate"))
 	dst := <-dstCh
 	t.Cleanup(func() { _ = dst.Close() })
 
 	first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
-	second := recvMux(t, ctrl)
+	second := recvMux(t, ctrl.ready)
 	waitFor(t, 2*time.Second, func() bool {
-		active, draining := m.snapshot()
+		active, draining, _, _ := m.snapshot()
 		return active == 1 && draining == 1
 	})
 	if _, err := first.Open(
@@ -424,7 +424,7 @@ func TestDrainKeepsHalfClosedSlowAndSilentPipes(t *testing.T) {
 	cfg := baseConfig(srv.url)
 	m := startManager(t, cfg, policy)
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 	halfPipe, halfPeer, halfDst := holdPipe(t, mux, ln, "jti-half")
 	if err := halfPeer.CloseWrite(); err != nil {
 		t.Fatal(err)
@@ -438,9 +438,9 @@ func TestDrainKeepsHalfClosedSlowAndSilentPipes(t *testing.T) {
 	go func() { _, _ = slowDst.Write(bytes.Repeat([]byte("x"), 300<<10)) }()
 
 	mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
-	replacement := recvMux(t, ctrl)
+	replacement := recvMux(t, ctrl.ready)
 	waitFor(t, 2*time.Second, func() bool {
-		active, draining := m.snapshot()
+		active, draining, _, _ := m.snapshot()
 		return active == 1 && draining == 1
 	})
 	next := acceptOne(ln)

@@ -101,7 +101,7 @@ func TestPipeRelaysBytesAndHalfCloses(t *testing.T) {
 	t.Cleanup(m.Shutdown)
 	dstCh := acceptOne(ln)
 	token := sign(t, "jti-bytes")
-	pipe, peer := openPipe(t, recvMux(t, ctrl), token)
+	pipe, peer := openPipe(t, recvMux(t, ctrl.ready), token)
 	dst := <-dstCh
 	t.Cleanup(func() { _ = dst.Close() })
 
@@ -147,7 +147,7 @@ func TestResetClosesTheTarget(t *testing.T) {
 	ctrl, m, ln := running(t, nil, nil)
 	t.Cleanup(m.Shutdown)
 	dstCh := acceptOne(ln)
-	pipe, _ := openPipe(t, recvMux(t, ctrl), sign(t, "jti-reset"))
+	pipe, _ := openPipe(t, recvMux(t, ctrl.ready), sign(t, "jti-reset"))
 	dst := <-dstCh
 	pipe.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
 	_ = dst.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -165,7 +165,7 @@ func TestPodCapacityRefusesBeforeDial(t *testing.T) {
 		cfg.RawTunnel.MaxPipesPerPod = 1
 	})
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 	dstCh := acceptOne(ln)
 	if _, err := openHeld(t, mux, sign(t, "jti-cap-1")); err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestCapacityRefusalsDoNotConsumeJTI(t *testing.T) {
 		cfg.RawTunnel.MaxPipesPerPod = 1
 	})
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 	token := sign(t, "jti-budget")
 	held, err := openHeld(t, mux, token)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestOpenDialTimeout(t *testing.T) {
 	})
 	t.Cleanup(m.Shutdown)
 	started := time.Now()
-	reason := openRefusal(t, recvMux(t, ctrl), sign(t, "jti-dial-timeout"))
+	reason := openRefusal(t, recvMux(t, ctrl.ready), sign(t, "jti-dial-timeout"))
 	if reason != pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_OPEN_TIMEOUT {
 		t.Fatalf("reason %s", reason)
 	}
@@ -269,7 +269,7 @@ func TestCapabilityExhaustedDoesNotDial(t *testing.T) {
 	policy := countingPolicy(t, ln, &dials)
 	ctrl, m, _ := running(t, policy, nil)
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 	for range capabilityOpens() {
 		pipe, peer := openPipe(t, mux, sign(t, "same-jti"))
 		_ = peer.Close()
@@ -311,7 +311,7 @@ func TestAuditOmitsTheCapability(t *testing.T) {
 	stop := func() { once.Do(m.Shutdown) }
 	t.Cleanup(stop)
 	dstCh := acceptOne(ln)
-	pipe, peer := openPipe(t, recvMux(t, ctrl), token)
+	pipe, peer := openPipe(t, recvMux(t, ctrl.ready), token)
 	dst := <-dstCh
 	_ = dst.Close()
 	_ = peer.Close()
@@ -344,7 +344,7 @@ func TestMetricsUseBoundedLabels(t *testing.T) {
 
 	ctrl, m, _ := running(t, directPolicy(t, nil, neverDial(t)), nil)
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 	if reason := openRefusal(t, mux, "not-a-token"); reason !=
 		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_INVALID_CAPABILITY {
 		t.Fatalf("reason %s", reason)
@@ -382,7 +382,7 @@ func refuseOpen(t *testing.T, token string, policy *dialpolicy.Policy) pb.RawOpe
 	t.Helper()
 	ctrl, m, _ := running(t, policy, nil)
 	t.Cleanup(m.Shutdown)
-	pipe, err := recvMux(t, ctrl).Open(
+	pipe, err := recvMux(t, ctrl.ready).Open(
 		token, testHost, testPort, pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
 	)
 	if err != nil {
@@ -550,7 +550,7 @@ func TestResetMetricsSentAndReceived(t *testing.T) {
 
 	ctrl, m, ln := running(t, nil, nil)
 	t.Cleanup(m.Shutdown)
-	mux := recvMux(t, ctrl)
+	mux := recvMux(t, ctrl.ready)
 
 	dstCh := acceptOne(ln)
 	received, _ := openPipe(t, mux, sign(t, "jti-reset-recv"))
