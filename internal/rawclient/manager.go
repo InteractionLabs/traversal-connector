@@ -163,23 +163,18 @@ func (m *Manager) serve(
 	ctx context.Context, sess *session, opened time.Time, bo *backoff,
 ) bool {
 	next := make(chan struct{})
-	runDone := make(chan struct{})
-	go func() {
-		_ = sess.mux.Run(sess.ctx)
-		close(runDone)
-	}()
 	go m.watch(sess, next)
 	select {
 	case <-next:
 		if !m.spawnSlot(ctx) {
-			<-runDone
+			<-sess.runDone
 			m.finish(sess)
 			return false
 		}
-		<-runDone
+		<-sess.runDone
 		m.finish(sess)
 		return false
-	case <-runDone:
+	case <-sess.runDone:
 		// Drain and tunnel-end can become ready together when the controller
 		// closes an idle tunnel as soon as it drains. Observe the drain here
 		// so that race still opens a replacement instead of backing off.
@@ -258,22 +253,19 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 	}
 	sessCtx, cancel := context.WithCancel(ctx)
 	stream := rpc.RawTunnel(sessCtx)
-	tunnelID, err := exchangeHello(stream, m.hello)
-	if err != nil {
-		cancel()
-		closeClient(cleanup)
-		return nil, err
-	}
-	mux, err := rawtunnel.New(rawtunnel.Config{
+	stop := sync.OnceFunc(func() { closeClient(cleanup) })
+	var mux *rawtunnel.Mux
+	mux, err = rawtunnel.New(rawtunnel.Config{
 		Role:         rawtunnel.RoleConnector,
 		MaxPipes:     m.cfg.RawTunnel.MaxPipesPerTunnel,
 		IdleTimeout:  m.cfg.RawTunnel.IdleTimeout,
 		MaxLifetime:  m.cfg.RawTunnel.MaxLifetime,
 		PingInterval: m.cfg.RawTunnel.PingInterval,
+		Hello:        m.hello.message(),
 		OnSendStall:  m.metrics.stall,
 		Abort: func() {
 			cancel()
-			closeClient(cleanup)
+			stop()
 		},
 		Accept: func(p *rawtunnel.Pipe, _ *pb.RawOpen) {
 			_ = p.Refuse(
@@ -281,20 +273,39 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 				"connector draining",
 			)
 		},
-	}, stream)
+	}, rawtunnel.FromChunks(stream))
 	if err != nil {
 		cancel()
-		closeClient(cleanup)
+		stop()
 		return nil, err
 	}
-	sess := &session{
-		mux: mux, tunnelID: tunnelID, ctx: sessCtx, cleanup: cleanup,
+	runDone := make(chan struct{})
+	go func() {
+		_ = mux.Run(sessCtx)
+		close(runDone)
+	}()
+	select {
+	case <-mux.Established():
+	case <-mux.Done():
+		<-runDone
+		cancel()
+		stop()
+		if err := mux.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("raw tunnel closed before hello")
+	case <-ctx.Done():
+		cancel()
+		stop()
+		<-runDone
+		return nil, ctx.Err()
 	}
+	sess := &session{mux: mux, ctx: sessCtx, cleanup: stop, runDone: runDone}
 	m.mu.Lock()
 	if m.shuttingDown {
 		m.mu.Unlock()
 		cancel()
-		closeClient(cleanup)
+		stop()
 		return nil, errShutdown
 	}
 	m.sessions = append(m.sessions, sess)
@@ -303,7 +314,7 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 	reserved = false
 	m.mu.Unlock()
 	m.metrics.addActive(1)
-	m.log.Info("raw tunnel established", "tunnel_id", tunnelID)
+	m.log.Info("raw tunnel established", "tunnel_id", mux.TunnelID())
 	return sess, nil
 }
 

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/google/uuid"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -181,21 +180,19 @@ func serverCert(t *testing.T) (string, string) {
 }
 
 func TestUnansweredPingDoesNotDropTheTunnel(t *testing.T) {
-	ctrl := &pingCtrl{pings: make(chan struct{}, 4)}
+	ctrl := &pingCtrl{}
 	srv := serveH2C(t, ctrl)
 	t.Cleanup(srv.close)
 	cfg := baseConfig(srv.url)
 	cfg.RawTunnel.PingInterval = 20 * time.Millisecond
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
-	select {
-	case <-ctrl.pings:
-	case <-time.After(2 * time.Second):
-		t.Fatal("tunnel sent no ping")
-	}
-	// Past the test server's old one-second header deadline, and long enough
-	// that an unanswered ping would already have dropped the tunnel if it were
-	// treated as a failure. A second hello would mean the slot reconnected.
+	waitFor(t, 2*time.Second, func() bool {
+		active, _, _, _ := m.snapshot()
+		return active == 1
+	})
+	// The HTTP/2 stack answers the ping. A second tunnel would mean the slot
+	// treated that exchange as a dead peer and reconnected.
 	time.Sleep(1500 * time.Millisecond)
 	if active, _, _, _ := m.snapshot(); active != 1 {
 		t.Fatalf("active tunnels = %d after an unanswered ping", active)
@@ -327,43 +324,11 @@ func newStickyDrainCtrl() *stickyDrainCtrl {
 
 func (c *stickyDrainCtrl) RawTunnel(
 	ctx context.Context,
-	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
 ) error {
 	c.live.Add(1)
 	defer c.live.Add(-1)
-	if _, err := stream.Receive(); err != nil {
-		return err
-	}
-	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-		ControllerHello: &pb.RawControllerHello{
-			ProtocolVersion: rawtunnel.ProtocolVersion,
-			TunnelId:        uuid.NewString(),
-		},
-	}}); err != nil {
-		return err
-	}
-	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
-	mux, err := rawtunnel.New(rawtunnel.Config{
-		Role:         rawtunnel.RoleController,
-		MaxPipes:     128,
-		IdleTimeout:  time.Hour,
-		MaxLifetime:  time.Hour,
-		PingInterval: time.Hour,
-		Abort: func() {
-			now := time.Now()
-			_ = rc.SetReadDeadline(now)
-			_ = rc.SetWriteDeadline(now)
-		},
-	}, stream)
-	if err != nil {
-		return err
-	}
-	select {
-	case c.ready <- mux:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return mux.Run(ctx)
+	return runController(ctx, stream, c.ready, time.Hour)
 }
 
 func (c *stickyDrainCtrl) Tunnel(

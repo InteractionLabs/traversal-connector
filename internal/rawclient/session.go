@@ -2,27 +2,21 @@ package rawclient
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
-
-	"github.com/google/uuid"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawtunnel"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
-var errIncompatible = errors.New("controller raw protocol version is not supported")
-
 // session is one raw tunnel. state moves active → draining → finished, and
 // only the manager mutates it, under the manager lock.
 type session struct {
-	mux      *rawtunnel.Mux
-	tunnelID string
-	ctx      context.Context
-	cleanup  func()
-	state    sessionState
+	mux     *rawtunnel.Mux
+	ctx     context.Context
+	cleanup func()
+	runDone chan struct{}
+	state   sessionState
 	// replace is set when the peer drains this tunnel and the process is not
 	// shutting down, so the slot opens another tunnel without backing off.
 	replace bool
@@ -65,34 +59,14 @@ func helloFrom(cfg *config.Config) connectorHello {
 	}
 }
 
-func exchangeHello(stream rawtunnel.Stream, hello connectorHello) (string, error) {
-	err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
-		ConnectorHello: &pb.RawConnectorHello{
-			SupportedProtocolVersions: []uint32{rawtunnel.ProtocolVersion},
-			Hostname:                  hello.hostname,
-			MaxPipes:                  hello.maxPipes,
-			TrustedKeyIds:             hello.keyIDs,
-			SupportedModes: []pb.RawPipeMode{
-				pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
-			},
+func (h connectorHello) message() *pb.RawConnectorHello {
+	return &pb.RawConnectorHello{
+		SupportedProtocolVersions: []uint32{rawtunnel.ProtocolVersion},
+		Hostname:                  h.hostname,
+		MaxPipes:                  h.maxPipes,
+		TrustedKeyIds:             h.keyIDs,
+		SupportedModes: []pb.RawPipeMode{
+			pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
 		},
-	}})
-	if err != nil {
-		return "", fmt.Errorf("send raw hello: %w", err)
 	}
-	frame, err := stream.Receive()
-	if err != nil {
-		return "", fmt.Errorf("receive raw hello: %w", err)
-	}
-	got := frame.GetControllerHello()
-	if got == nil {
-		return "", errors.New("controller hello missing")
-	}
-	if got.GetProtocolVersion() != rawtunnel.ProtocolVersion {
-		return "", errIncompatible
-	}
-	if _, err := uuid.Parse(got.GetTunnelId()); err != nil {
-		return "", errors.New("controller tunnel id is not a uuid")
-	}
-	return got.GetTunnelId(), nil
 }

@@ -1,6 +1,7 @@
 package rawclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
@@ -15,6 +16,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -126,37 +129,9 @@ func newMuxCtrl() *muxCtrl {
 
 func (c *muxCtrl) RawTunnel(
 	ctx context.Context,
-	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
 ) error {
-	if _, err := stream.Receive(); err != nil {
-		return err
-	}
-	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-		ControllerHello: &pb.RawControllerHello{
-			ProtocolVersion: rawtunnel.ProtocolVersion,
-			TunnelId:        uuid.NewString(),
-		},
-	}}); err != nil {
-		return err
-	}
-	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
-	mux, err := rawtunnel.New(rawtunnel.Config{
-		Role:         rawtunnel.RoleController,
-		MaxPipes:     128,
-		IdleTimeout:  time.Hour,
-		MaxLifetime:  time.Hour,
-		PingInterval: time.Hour,
-		Abort: func() {
-			now := time.Now()
-			_ = rc.SetReadDeadline(now)
-			_ = rc.SetWriteDeadline(now)
-		},
-	}, stream)
-	if err != nil {
-		return err
-	}
-	c.ready <- mux
-	return mux.Run(ctx)
+	return runController(ctx, stream, c.ready, time.Hour)
 }
 
 func (c *muxCtrl) Tunnel(
@@ -176,21 +151,14 @@ type badVersionCtrl struct {
 }
 
 func (c *badVersionCtrl) RawTunnel(
-	_ context.Context,
-	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+	ctx context.Context,
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
 ) error {
-	_, _ = stream.Receive()
-	_ = stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-		ControllerHello: &pb.RawControllerHello{
-			ProtocolVersion: 99,
-			TunnelId:        uuid.NewString(),
-		},
-	}})
 	select {
 	case c.calls <- struct{}{}:
 	default:
 	}
-	return nil
+	return rejectHello(ctx, stream, 99)
 }
 
 func (c *badVersionCtrl) Tunnel(
@@ -217,39 +185,10 @@ type pingCtrl struct {
 
 func (c *pingCtrl) RawTunnel(
 	ctx context.Context,
-	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
 ) error {
 	c.tunnels.Add(1)
-	if _, err := stream.Receive(); err != nil {
-		return err
-	}
-	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-		ControllerHello: &pb.RawControllerHello{
-			ProtocolVersion: rawtunnel.ProtocolVersion,
-			TunnelId:        uuid.NewString(),
-		},
-	}}); err != nil {
-		return err
-	}
-	got := 0
-	for got < 2 {
-		frame, err := stream.Receive()
-		if err != nil {
-			return err
-		}
-		ping := frame.GetPing()
-		if ping == nil || ping.GetAck() {
-			continue
-		}
-		got++
-		select {
-		case c.pings <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	<-ctx.Done()
-	return nil
+	return runController(ctx, stream, nil, 20*time.Millisecond)
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool) {
@@ -272,4 +211,98 @@ func (m *Manager) snapshot() (active, draining, sessions, connecting int) {
 
 func discardLogs() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// runController is the HTTP/2 client on one raw tunnel. ready receives the
+// mux after hello, which is when pipes may open. Nil ready skips that signal.
+func runController(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
+	ready chan *rawtunnel.Mux,
+	ping time.Duration,
+) error {
+	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
+	mux, err := rawtunnel.New(rawtunnel.Config{
+		Role:         rawtunnel.RoleController,
+		TunnelID:     uuid.NewString(),
+		MaxPipes:     128,
+		IdleTimeout:  time.Hour,
+		MaxLifetime:  time.Hour,
+		PingInterval: ping,
+		PingTimeout:  time.Hour,
+		Abort: func() {
+			now := time.Now()
+			_ = rc.SetReadDeadline(now)
+			_ = rc.SetWriteDeadline(now)
+		},
+	}, rawtunnel.FromChunks(stream))
+	if err != nil {
+		return err
+	}
+	// Run returns only after in-flight writes on the gRPC response have finished.
+	// Returning earlier races those writes with the handler ending.
+	runDone := make(chan struct{})
+	go func() {
+		_ = mux.Run(ctx)
+		close(runDone)
+	}()
+	select {
+	case <-mux.Established():
+		if ready != nil {
+			select {
+			case ready <- mux:
+			case <-runDone:
+			case <-ctx.Done():
+			}
+		}
+	case <-runDone:
+	case <-ctx.Done():
+	}
+	<-runDone
+	return mux.Err()
+}
+
+func rejectHello(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
+	version uint32,
+) error {
+	conn := rawtunnel.NewChunkConn(rawtunnel.FromChunks(stream))
+	tr := &http.Transport{DisableCompression: true}
+	h2, err := http2.ConfigureTransports(tr)
+	if err != nil {
+		return err
+	}
+	h2.AllowHTTP = true
+	tr.HTTP2 = &http.HTTP2Config{
+		MaxReceiveBufferPerStream:     rawtunnel.StreamWindow,
+		MaxReceiveBufferPerConnection: rawtunnel.TunnelWindow,
+	}
+	cc, err := h2.NewClientConn(conn)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cc.Close()
+		conn.Close()
+	}()
+	body, err := proto.Marshal(&pb.RawControllerHello{
+		ProtocolVersion: version,
+		TunnelId:        uuid.NewString(),
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, "http://tunnel/raw/v1/hello", bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
