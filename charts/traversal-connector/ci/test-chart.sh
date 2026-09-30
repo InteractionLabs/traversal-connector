@@ -13,7 +13,7 @@ fail() {
 
 assert_contains() {
   local file=$1 expected=$2
-  grep -Fq -- "$expected" "$file" || fail "expected '$expected' in $file"
+  [[ "$(< "$file")" == *"$expected"* ]] || fail "expected '$expected' in $file"
 }
 
 assert_not_contains() {
@@ -133,5 +133,29 @@ assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${commo
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
+
+# Every rendered container must satisfy the same security contract, including
+# the optional telemetry sidecar; its writable queue remains on its own volume.
+for scenario in direct sidecar disabled; do
+  expected=1
+  [[ "$scenario" == sidecar ]] && expected=2
+  for field in 'runAsNonRoot: true' 'runAsUser: 65532' 'runAsGroup: 65532' \
+    'allowPrivilegeEscalation: false' 'readOnlyRootFilesystem: true' 'mountPath: /tmp'; do
+    actual=$(grep -Fc "$field" "$tmp_dir/$scenario.yaml")
+    [[ "$actual" == "$expected" ]] || fail "$scenario: expected $expected occurrences of $field, got $actual"
+  done
+  assert_contains "$tmp_dir/$scenario.yaml" 'fsGroup: 65532'
+  actual=$(grep -Fc 'type: RuntimeDefault' "$tmp_dir/$scenario.yaml")
+  [[ "$actual" == "$((expected + 1))" ]] || fail "$scenario: missing pod or container seccomp profile"
+  assert_contains "$tmp_dir/$scenario.yaml" $'          securityContext:\n            allowPrivilegeEscalation: false\n            capabilities:\n              drop:\n              - ALL\n            readOnlyRootFilesystem: true\n            runAsGroup: 65532\n            runAsNonRoot: true\n            runAsUser: 65532\n            seccompProfile:\n              type: RuntimeDefault\n          env:'
+done
+assert_contains "$tmp_dir/sidecar.yaml" 'mountPath: /var/lib/telemetry-sidecar'
+assert_contains "$tmp_dir/direct.yaml" 'mountPath: /etc/traversal'
+
+render security-overrides "$fixtures/direct-export-values.yaml" \
+  --set podSecurityContext.runAsGroup=10001 \
+  --set securityContext.runAsUser=10001
+assert_contains "$tmp_dir/security-overrides.yaml" $'      securityContext:\n        fsGroup: 65532\n        runAsGroup: 10001\n        seccompProfile:\n          type: RuntimeDefault'
+assert_contains "$tmp_dir/security-overrides.yaml" $'            readOnlyRootFilesystem: true\n            runAsGroup: 65532\n            runAsNonRoot: true\n            runAsUser: 10001\n            seccompProfile:\n              type: RuntimeDefault\n          env:'
 
 echo "All chart tests passed."
