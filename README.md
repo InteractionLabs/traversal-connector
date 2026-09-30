@@ -15,8 +15,9 @@ tunnels against upstream services on the local network.
 
 The wire protocol is defined in
 [`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
-[`raw_tunnel.proto`](connector-lib/proto/connector/v1/raw_tunnel.proto) defines the
-`RawTunnel` frames, which multiplex opaque byte pipes over their own tunnels, and
+[`raw_tunnel.proto`](connector-lib/proto/connector/v1/raw_tunnel.proto) defines
+`RawTunnel`, which carries one HTTP/2 session. Each pipe is a stream inside
+that session, and
 [`connector-lib/proto/stream/v1/stream.proto`](connector-lib/proto/stream/v1/stream.proto)
 defines the controller's private, cluster-internal `OpenStream` API for those pipes.
 
