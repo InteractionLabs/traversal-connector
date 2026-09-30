@@ -6,48 +6,19 @@ import "buf/validate/validate.proto";
 
 option go_package = "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connector";
 
-// RawTunnelFrame is the envelope for every message on ConnectorService.RawTunnel.
-//
-// One raw tunnel is one bidirectional gRPC stream that multiplexes many pipes. A
-// pipe is one outbound TCP connection from the connector to an authorized
-// destination, carrying opaque bytes in both directions. The same envelope is
-// used in both directions because every pipe frame (data, flow control,
-// half-close, reset) is symmetric. Each frame documents which side may send it;
-// a frame arriving from the wrong side is a protocol error that ends the tunnel.
-message RawTunnelFrame {
-  // The frame being sent. An unset or unknown frame is a protocol error that
-  // ends the tunnel.
-  oneof frame {
-    option (buf.validate.oneof).required = true;
-
-    // Connector to controller. The first frame on a new tunnel.
-    RawConnectorHello connector_hello = 1;
-    // Controller to connector. The reply to connector_hello.
-    RawControllerHello controller_hello = 2;
-    // Controller to connector. Requests a new pipe.
-    RawOpen open = 3;
-    // Connector to controller. The pipe's destination socket is connected.
-    RawOpened opened = 4;
-    // Connector to controller. The connector refused an open.
-    RawOpenError open_error = 5;
-    // Either direction. Pipe bytes.
-    RawData data = 6;
-    // Either direction. Grants the peer more send credit on a pipe.
-    RawWindowUpdate window_update = 7;
-    // Either direction. The sender will send no more data on a pipe.
-    RawHalfClose half_close = 8;
-    // Either direction. Aborts a pipe immediately.
-    RawReset pipe_reset = 9;
-    // Connector to controller. The connector released a pipe's resources.
-    RawClose close = 10;
-    // Either direction. The sender accepts no new pipes on this tunnel.
-    RawDrain drain = 11;
-    // Either direction. Tunnel keepalive.
-    RawPing ping = 12;
-  }
+// RawTunnelChunk is one piece of the HTTP/2 session carried by
+// ConnectorService.RawTunnel. The RPC is a single byte pipe. Pipes are HTTP/2
+// streams inside that session, so flow control, reset, and keepalive come from
+// HTTP/2 rather than from a second multiplexer.
+message RawTunnelChunk {
+  // The next bytes of the HTTP/2 session, in order. At most one HTTP/2 frame.
+  bytes data = 1 [(buf.validate.field).bytes = {
+    min_len: 1
+    max_len: 16384
+  }];
 }
 
-// RawConnectorHello is the connector's first frame on a raw tunnel. The
+// RawConnectorHello is the connector's reply to the controller's hello. The
 // controller refuses the tunnel if it supports none of the listed protocol
 // versions.
 message RawConnectorHello {
@@ -84,7 +55,8 @@ message RawConnectorHello {
   }];
 }
 
-// RawControllerHello accepts a raw tunnel.
+// RawControllerHello opens a raw tunnel. The controller sends it and assigns
+// the tunnel id.
 message RawControllerHello {
   // The protocol version both sides use for the rest of the tunnel. It is one of
   // RawConnectorHello.supported_protocol_versions.
@@ -123,15 +95,8 @@ message RawOpen {
   }];
 }
 
-// RawOpened reports that the connector connected the pipe's destination socket.
-// The controller must not send data on a pipe before receiving it.
-message RawOpened {
-  // The pipe that opened.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-}
-
 // RawOpenError reports that the connector refused an open. No bytes reached the
-// destination, and the pipe ID is retired; no RawClose follows.
+// destination, and the pipe ID is retired.
 message RawOpenError {
   // The refused pipe.
   uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
@@ -145,82 +110,15 @@ message RawOpenError {
   string detail = 3 [(buf.validate.field).string.max_len = 256];
 }
 
-// RawData carries pipe bytes. Each payload byte spends one byte of the
-// sender's send credit for that pipe.
-message RawData {
-  // The pipe the bytes belong to.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-  // The bytes, in order. Never empty and at most 32 KiB.
-  bytes payload = 2 [(buf.validate.field).bytes = {
-    min_len: 1
-    max_len: 32768
-  }];
-}
-
-// RawWindowUpdate returns send credit to the peer after the sender's consumer
-// has drained received bytes. Each direction of a pipe starts with 256 KiB of
-// credit, and a sender's credit never exceeds that.
-message RawWindowUpdate {
-  // The pipe the credit applies to.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-  // Bytes of additional credit.
-  uint32 credit_bytes = 2 [(buf.validate.field).uint32 = {
-    gte: 1
-    lte: 262144
-  }];
-}
-
-// RawHalfClose ends one direction of a pipe, like a TCP FIN. The sender sends no
-// more data on the pipe; the opposite direction is unaffected.
-message RawHalfClose {
-  // The pipe whose sending direction ends.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-}
-
-// RawReset aborts a pipe in both directions. The receiver closes the pipe's
-// socket and discards buffered bytes.
-message RawReset {
-  // The aborted pipe.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-  // Why the pipe was aborted.
-  RawCloseReason reason = 2 [(buf.validate.field).enum = {
-    defined_only: true
-    not_in: [0]
-  }];
-}
-
-// RawClose reports that the connector finished a pipe and released its socket
-// and slot. The connector sends it exactly once for every pipe it opened or
-// that was reset while opening. The controller counts a pipe against the
-// tunnel's limit until it arrives, so the two sides never disagree about how
-// many pipes are open.
-message RawClose {
-  // The finished pipe.
-  uint64 pipe_id = 1 [(buf.validate.field).uint64.gt = 0];
-  // How the pipe ended.
-  RawCloseReason reason = 2 [(buf.validate.field).enum = {
-    defined_only: true
-    not_in: [0]
-  }];
-}
-
 // RawDrain stops new pipes on the tunnel. Pipes already open continue until they
 // end. The connector opens a replacement tunnel when it receives or sends one.
+// Either side writes it on the tunnel's control stream.
 message RawDrain {
   // Why the tunnel is draining.
   RawDrainReason reason = 1 [(buf.validate.field).enum = {
     defined_only: true
     not_in: [0]
   }];
-}
-
-// RawPing keeps an idle tunnel alive through intermediaries that close quiet
-// streams, and detects a dead peer.
-message RawPing {
-  // An opaque value echoed in the acknowledgement.
-  uint64 nonce = 1;
-  // True when this frame acknowledges a received ping.
-  bool ack = 2;
 }
 
 // RawPipeMode selects how the connector carries a pipe's bytes.
@@ -299,8 +197,7 @@ enum RawCloseReason {
   RAW_CLOSE_REASON_CONNECTOR_TERMINATING = 7;
   // The raw tunnel carrying the pipe was lost.
   RAW_CLOSE_REASON_TUNNEL_LOST = 8;
-  // A peer violated the pipe protocol, for example by exceeding its send
-  // credit.
+  // A peer violated the pipe protocol.
   RAW_CLOSE_REASON_PROTOCOL_ERROR = 9;
   // A drained tunnel still had pipes when its rotation deadline elapsed.
   // The connector pod is healthy. This is not CONNECTOR_TERMINATING, which

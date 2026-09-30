@@ -138,11 +138,11 @@ service ConnectorService {
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc Tunnel(stream ConnectorMessage) returns (stream ControllerMessage);
 
-  // Bidirectional streaming RPC that multiplexes raw byte pipes between the
-  // connector and controller. It runs on its own connections, independent of
-  // Tunnel, and is only established when the connector enables it.
+  // One HTTP/2 session, carried as chunks. Pipes are streams inside that
+  // session. The RPC runs on its own connections, independent of Tunnel, and
+  // is only established when the connector enables it.
   // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
-  rpc RawTunnel(stream RawTunnelFrame) returns (stream RawTunnelFrame);
+  rpc RawTunnel(stream RawTunnelChunk) returns (stream RawTunnelChunk);
 }

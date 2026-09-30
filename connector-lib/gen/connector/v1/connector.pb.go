@@ -900,7 +900,7 @@ const file_connector_v1_connector_proto_rawDesc = "" +
 	"\amessage2\xae\x01\n" +
 	"\x10ConnectorService\x12M\n" +
 	"\x06Tunnel\x12\x1e.connector.v1.ConnectorMessage\x1a\x1f.connector.v1.ControllerMessage(\x010\x01\x12K\n" +
-	"\tRawTunnel\x12\x1c.connector.v1.RawTunnelFrame\x1a\x1c.connector.v1.RawTunnelFrame(\x010\x01BYZWgithub.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connectorb\x06proto3"
+	"\tRawTunnel\x12\x1c.connector.v1.RawTunnelChunk\x1a\x1c.connector.v1.RawTunnelChunk(\x010\x01BYZWgithub.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connectorb\x06proto3"
 
 var (
 	file_connector_v1_connector_proto_rawDescOnce sync.Once
@@ -929,7 +929,7 @@ var file_connector_v1_connector_proto_goTypes = []any{
 	(*ConnectionRequest)(nil),     // 9: connector.v1.ConnectionRequest
 	(*ControllerMessage)(nil),     // 10: connector.v1.ControllerMessage
 	(*ConnectorMessage)(nil),      // 11: connector.v1.ConnectorMessage
-	(*RawTunnelFrame)(nil),        // 12: connector.v1.RawTunnelFrame
+	(*RawTunnelChunk)(nil),        // 12: connector.v1.RawTunnelChunk
 }
 var file_connector_v1_connector_proto_depIdxs = []int32{
 	1,  // 0: connector.v1.HttpRequest.headers:type_name -> connector.v1.Header
@@ -945,9 +945,9 @@ var file_connector_v1_connector_proto_depIdxs = []int32{
 	9,  // 10: connector.v1.ConnectorMessage.connection_request:type_name -> connector.v1.ConnectionRequest
 	8,  // 11: connector.v1.ConnectorMessage.metadata_response:type_name -> connector.v1.MetadataResponse
 	11, // 12: connector.v1.ConnectorService.Tunnel:input_type -> connector.v1.ConnectorMessage
-	12, // 13: connector.v1.ConnectorService.RawTunnel:input_type -> connector.v1.RawTunnelFrame
+	12, // 13: connector.v1.ConnectorService.RawTunnel:input_type -> connector.v1.RawTunnelChunk
 	10, // 14: connector.v1.ConnectorService.Tunnel:output_type -> connector.v1.ControllerMessage
-	12, // 15: connector.v1.ConnectorService.RawTunnel:output_type -> connector.v1.RawTunnelFrame
+	12, // 15: connector.v1.ConnectorService.RawTunnel:output_type -> connector.v1.RawTunnelChunk
 	14, // [14:16] is the sub-list for method output_type
 	12, // [12:14] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name

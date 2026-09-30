@@ -216,8 +216,7 @@ const (
 	RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING RawCloseReason = 7
 	// The raw tunnel carrying the pipe was lost.
 	RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST RawCloseReason = 8
-	// A peer violated the pipe protocol, for example by exceeding its send
-	// credit.
+	// A peer violated the pipe protocol.
 	RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR RawCloseReason = 9
 	// A drained tunnel still had pipes when its rotation deadline elapsed.
 	// The connector pod is healthy. This is not CONNECTOR_TERMINATING, which
@@ -335,52 +334,32 @@ func (RawDrainReason) EnumDescriptor() ([]byte, []int) {
 	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{3}
 }
 
-// RawTunnelFrame is the envelope for every message on ConnectorService.RawTunnel.
-//
-// One raw tunnel is one bidirectional gRPC stream that multiplexes many pipes. A
-// pipe is one outbound TCP connection from the connector to an authorized
-// destination, carrying opaque bytes in both directions. The same envelope is
-// used in both directions because every pipe frame (data, flow control,
-// half-close, reset) is symmetric. Each frame documents which side may send it;
-// a frame arriving from the wrong side is a protocol error that ends the tunnel.
-type RawTunnelFrame struct {
+// RawTunnelChunk is one piece of the HTTP/2 session carried by
+// ConnectorService.RawTunnel. The RPC is a single byte pipe. Pipes are HTTP/2
+// streams inside that session, so flow control, reset, and keepalive come from
+// HTTP/2 rather than from a second multiplexer.
+type RawTunnelChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The frame being sent. An unset or unknown frame is a protocol error that
-	// ends the tunnel.
-	//
-	// Types that are valid to be assigned to Frame:
-	//
-	//	*RawTunnelFrame_ConnectorHello
-	//	*RawTunnelFrame_ControllerHello
-	//	*RawTunnelFrame_Open
-	//	*RawTunnelFrame_Opened
-	//	*RawTunnelFrame_OpenError
-	//	*RawTunnelFrame_Data
-	//	*RawTunnelFrame_WindowUpdate
-	//	*RawTunnelFrame_HalfClose
-	//	*RawTunnelFrame_PipeReset
-	//	*RawTunnelFrame_Close
-	//	*RawTunnelFrame_Drain
-	//	*RawTunnelFrame_Ping
-	Frame         isRawTunnelFrame_Frame `protobuf_oneof:"frame"`
+	// The next bytes of the HTTP/2 session, in order. At most one HTTP/2 frame.
+	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RawTunnelFrame) Reset() {
-	*x = RawTunnelFrame{}
+func (x *RawTunnelChunk) Reset() {
+	*x = RawTunnelChunk{}
 	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RawTunnelFrame) String() string {
+func (x *RawTunnelChunk) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RawTunnelFrame) ProtoMessage() {}
+func (*RawTunnelChunk) ProtoMessage() {}
 
-func (x *RawTunnelFrame) ProtoReflect() protoreflect.Message {
+func (x *RawTunnelChunk) ProtoReflect() protoreflect.Message {
 	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -392,215 +371,19 @@ func (x *RawTunnelFrame) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RawTunnelFrame.ProtoReflect.Descriptor instead.
-func (*RawTunnelFrame) Descriptor() ([]byte, []int) {
+// Deprecated: Use RawTunnelChunk.ProtoReflect.Descriptor instead.
+func (*RawTunnelChunk) Descriptor() ([]byte, []int) {
 	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *RawTunnelFrame) GetFrame() isRawTunnelFrame_Frame {
+func (x *RawTunnelChunk) GetData() []byte {
 	if x != nil {
-		return x.Frame
+		return x.Data
 	}
 	return nil
 }
 
-func (x *RawTunnelFrame) GetConnectorHello() *RawConnectorHello {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_ConnectorHello); ok {
-			return x.ConnectorHello
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetControllerHello() *RawControllerHello {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_ControllerHello); ok {
-			return x.ControllerHello
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetOpen() *RawOpen {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Open); ok {
-			return x.Open
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetOpened() *RawOpened {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Opened); ok {
-			return x.Opened
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetOpenError() *RawOpenError {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_OpenError); ok {
-			return x.OpenError
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetData() *RawData {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Data); ok {
-			return x.Data
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetWindowUpdate() *RawWindowUpdate {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_WindowUpdate); ok {
-			return x.WindowUpdate
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetHalfClose() *RawHalfClose {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_HalfClose); ok {
-			return x.HalfClose
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetPipeReset() *RawReset {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_PipeReset); ok {
-			return x.PipeReset
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetClose() *RawClose {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Close); ok {
-			return x.Close
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetDrain() *RawDrain {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Drain); ok {
-			return x.Drain
-		}
-	}
-	return nil
-}
-
-func (x *RawTunnelFrame) GetPing() *RawPing {
-	if x != nil {
-		if x, ok := x.Frame.(*RawTunnelFrame_Ping); ok {
-			return x.Ping
-		}
-	}
-	return nil
-}
-
-type isRawTunnelFrame_Frame interface {
-	isRawTunnelFrame_Frame()
-}
-
-type RawTunnelFrame_ConnectorHello struct {
-	// Connector to controller. The first frame on a new tunnel.
-	ConnectorHello *RawConnectorHello `protobuf:"bytes,1,opt,name=connector_hello,json=connectorHello,proto3,oneof"`
-}
-
-type RawTunnelFrame_ControllerHello struct {
-	// Controller to connector. The reply to connector_hello.
-	ControllerHello *RawControllerHello `protobuf:"bytes,2,opt,name=controller_hello,json=controllerHello,proto3,oneof"`
-}
-
-type RawTunnelFrame_Open struct {
-	// Controller to connector. Requests a new pipe.
-	Open *RawOpen `protobuf:"bytes,3,opt,name=open,proto3,oneof"`
-}
-
-type RawTunnelFrame_Opened struct {
-	// Connector to controller. The pipe's destination socket is connected.
-	Opened *RawOpened `protobuf:"bytes,4,opt,name=opened,proto3,oneof"`
-}
-
-type RawTunnelFrame_OpenError struct {
-	// Connector to controller. The connector refused an open.
-	OpenError *RawOpenError `protobuf:"bytes,5,opt,name=open_error,json=openError,proto3,oneof"`
-}
-
-type RawTunnelFrame_Data struct {
-	// Either direction. Pipe bytes.
-	Data *RawData `protobuf:"bytes,6,opt,name=data,proto3,oneof"`
-}
-
-type RawTunnelFrame_WindowUpdate struct {
-	// Either direction. Grants the peer more send credit on a pipe.
-	WindowUpdate *RawWindowUpdate `protobuf:"bytes,7,opt,name=window_update,json=windowUpdate,proto3,oneof"`
-}
-
-type RawTunnelFrame_HalfClose struct {
-	// Either direction. The sender will send no more data on a pipe.
-	HalfClose *RawHalfClose `protobuf:"bytes,8,opt,name=half_close,json=halfClose,proto3,oneof"`
-}
-
-type RawTunnelFrame_PipeReset struct {
-	// Either direction. Aborts a pipe immediately.
-	PipeReset *RawReset `protobuf:"bytes,9,opt,name=pipe_reset,json=pipeReset,proto3,oneof"`
-}
-
-type RawTunnelFrame_Close struct {
-	// Connector to controller. The connector released a pipe's resources.
-	Close *RawClose `protobuf:"bytes,10,opt,name=close,proto3,oneof"`
-}
-
-type RawTunnelFrame_Drain struct {
-	// Either direction. The sender accepts no new pipes on this tunnel.
-	Drain *RawDrain `protobuf:"bytes,11,opt,name=drain,proto3,oneof"`
-}
-
-type RawTunnelFrame_Ping struct {
-	// Either direction. Tunnel keepalive.
-	Ping *RawPing `protobuf:"bytes,12,opt,name=ping,proto3,oneof"`
-}
-
-func (*RawTunnelFrame_ConnectorHello) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_ControllerHello) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Open) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Opened) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_OpenError) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Data) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_WindowUpdate) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_HalfClose) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_PipeReset) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Close) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Drain) isRawTunnelFrame_Frame() {}
-
-func (*RawTunnelFrame_Ping) isRawTunnelFrame_Frame() {}
-
-// RawConnectorHello is the connector's first frame on a raw tunnel. The
+// RawConnectorHello is the connector's reply to the controller's hello. The
 // controller refuses the tunnel if it supports none of the listed protocol
 // versions.
 type RawConnectorHello struct {
@@ -685,7 +468,8 @@ func (x *RawConnectorHello) GetSupportedModes() []RawPipeMode {
 	return nil
 }
 
-// RawControllerHello accepts a raw tunnel.
+// RawControllerHello opens a raw tunnel. The controller sends it and assigns
+// the tunnel id.
 type RawControllerHello struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The protocol version both sides use for the rest of the tunnel. It is one of
@@ -827,55 +611,8 @@ func (x *RawOpen) GetMode() RawPipeMode {
 	return RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED
 }
 
-// RawOpened reports that the connector connected the pipe's destination socket.
-// The controller must not send data on a pipe before receiving it.
-type RawOpened struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The pipe that opened.
-	PipeId        uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawOpened) Reset() {
-	*x = RawOpened{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawOpened) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawOpened) ProtoMessage() {}
-
-func (x *RawOpened) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawOpened.ProtoReflect.Descriptor instead.
-func (*RawOpened) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *RawOpened) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
 // RawOpenError reports that the connector refused an open. No bytes reached the
-// destination, and the pipe ID is retired; no RawClose follows.
+// destination, and the pipe ID is retired.
 type RawOpenError struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The refused pipe.
@@ -891,7 +628,7 @@ type RawOpenError struct {
 
 func (x *RawOpenError) Reset() {
 	*x = RawOpenError{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[5]
+	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -903,7 +640,7 @@ func (x *RawOpenError) String() string {
 func (*RawOpenError) ProtoMessage() {}
 
 func (x *RawOpenError) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[5]
+	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -916,7 +653,7 @@ func (x *RawOpenError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawOpenError.ProtoReflect.Descriptor instead.
 func (*RawOpenError) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{5}
+	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RawOpenError) GetPipeId() uint64 {
@@ -940,283 +677,9 @@ func (x *RawOpenError) GetDetail() string {
 	return ""
 }
 
-// RawData carries pipe bytes. Each payload byte spends one byte of the
-// sender's send credit for that pipe.
-type RawData struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The pipe the bytes belong to.
-	PipeId uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	// The bytes, in order. Never empty and at most 32 KiB.
-	Payload       []byte `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawData) Reset() {
-	*x = RawData{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawData) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawData) ProtoMessage() {}
-
-func (x *RawData) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawData.ProtoReflect.Descriptor instead.
-func (*RawData) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *RawData) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
-func (x *RawData) GetPayload() []byte {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-// RawWindowUpdate returns send credit to the peer after the sender's consumer
-// has drained received bytes. Each direction of a pipe starts with 256 KiB of
-// credit, and a sender's credit never exceeds that.
-type RawWindowUpdate struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The pipe the credit applies to.
-	PipeId uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	// Bytes of additional credit.
-	CreditBytes   uint32 `protobuf:"varint,2,opt,name=credit_bytes,json=creditBytes,proto3" json:"credit_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawWindowUpdate) Reset() {
-	*x = RawWindowUpdate{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawWindowUpdate) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawWindowUpdate) ProtoMessage() {}
-
-func (x *RawWindowUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawWindowUpdate.ProtoReflect.Descriptor instead.
-func (*RawWindowUpdate) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *RawWindowUpdate) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
-func (x *RawWindowUpdate) GetCreditBytes() uint32 {
-	if x != nil {
-		return x.CreditBytes
-	}
-	return 0
-}
-
-// RawHalfClose ends one direction of a pipe, like a TCP FIN. The sender sends no
-// more data on the pipe; the opposite direction is unaffected.
-type RawHalfClose struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The pipe whose sending direction ends.
-	PipeId        uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawHalfClose) Reset() {
-	*x = RawHalfClose{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawHalfClose) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawHalfClose) ProtoMessage() {}
-
-func (x *RawHalfClose) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawHalfClose.ProtoReflect.Descriptor instead.
-func (*RawHalfClose) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *RawHalfClose) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
-// RawReset aborts a pipe in both directions. The receiver closes the pipe's
-// socket and discards buffered bytes.
-type RawReset struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The aborted pipe.
-	PipeId uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	// Why the pipe was aborted.
-	Reason        RawCloseReason `protobuf:"varint,2,opt,name=reason,proto3,enum=connector.v1.RawCloseReason" json:"reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawReset) Reset() {
-	*x = RawReset{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawReset) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawReset) ProtoMessage() {}
-
-func (x *RawReset) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawReset.ProtoReflect.Descriptor instead.
-func (*RawReset) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *RawReset) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
-func (x *RawReset) GetReason() RawCloseReason {
-	if x != nil {
-		return x.Reason
-	}
-	return RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED
-}
-
-// RawClose reports that the connector finished a pipe and released its socket
-// and slot. The connector sends it exactly once for every pipe it opened or
-// that was reset while opening. The controller counts a pipe against the
-// tunnel's limit until it arrives, so the two sides never disagree about how
-// many pipes are open.
-type RawClose struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// The finished pipe.
-	PipeId uint64 `protobuf:"varint,1,opt,name=pipe_id,json=pipeId,proto3" json:"pipe_id,omitempty"`
-	// How the pipe ended.
-	Reason        RawCloseReason `protobuf:"varint,2,opt,name=reason,proto3,enum=connector.v1.RawCloseReason" json:"reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawClose) Reset() {
-	*x = RawClose{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawClose) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawClose) ProtoMessage() {}
-
-func (x *RawClose) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawClose.ProtoReflect.Descriptor instead.
-func (*RawClose) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *RawClose) GetPipeId() uint64 {
-	if x != nil {
-		return x.PipeId
-	}
-	return 0
-}
-
-func (x *RawClose) GetReason() RawCloseReason {
-	if x != nil {
-		return x.Reason
-	}
-	return RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED
-}
-
 // RawDrain stops new pipes on the tunnel. Pipes already open continue until they
 // end. The connector opens a replacement tunnel when it receives or sends one.
+// Either side writes it on the tunnel's control stream.
 type RawDrain struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Why the tunnel is draining.
@@ -1227,7 +690,7 @@ type RawDrain struct {
 
 func (x *RawDrain) Reset() {
 	*x = RawDrain{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[11]
+	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1239,7 +702,7 @@ func (x *RawDrain) String() string {
 func (*RawDrain) ProtoMessage() {}
 
 func (x *RawDrain) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[11]
+	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1252,7 +715,7 @@ func (x *RawDrain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RawDrain.ProtoReflect.Descriptor instead.
 func (*RawDrain) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{11}
+	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RawDrain) GetReason() RawDrainReason {
@@ -1262,85 +725,13 @@ func (x *RawDrain) GetReason() RawDrainReason {
 	return RawDrainReason_RAW_DRAIN_REASON_UNSPECIFIED
 }
 
-// RawPing keeps an idle tunnel alive through intermediaries that close quiet
-// streams, and detects a dead peer.
-type RawPing struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// An opaque value echoed in the acknowledgement.
-	Nonce uint64 `protobuf:"varint,1,opt,name=nonce,proto3" json:"nonce,omitempty"`
-	// True when this frame acknowledges a received ping.
-	Ack           bool `protobuf:"varint,2,opt,name=ack,proto3" json:"ack,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RawPing) Reset() {
-	*x = RawPing{}
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[12]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RawPing) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RawPing) ProtoMessage() {}
-
-func (x *RawPing) ProtoReflect() protoreflect.Message {
-	mi := &file_connector_v1_raw_tunnel_proto_msgTypes[12]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RawPing.ProtoReflect.Descriptor instead.
-func (*RawPing) Descriptor() ([]byte, []int) {
-	return file_connector_v1_raw_tunnel_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *RawPing) GetNonce() uint64 {
-	if x != nil {
-		return x.Nonce
-	}
-	return 0
-}
-
-func (x *RawPing) GetAck() bool {
-	if x != nil {
-		return x.Ack
-	}
-	return false
-}
-
 var File_connector_v1_raw_tunnel_proto protoreflect.FileDescriptor
 
 const file_connector_v1_raw_tunnel_proto_rawDesc = "" +
 	"\n" +
-	"\x1dconnector/v1/raw_tunnel.proto\x12\fconnector.v1\x1a\x1bbuf/validate/validate.proto\"\xce\x05\n" +
-	"\x0eRawTunnelFrame\x12J\n" +
-	"\x0fconnector_hello\x18\x01 \x01(\v2\x1f.connector.v1.RawConnectorHelloH\x00R\x0econnectorHello\x12M\n" +
-	"\x10controller_hello\x18\x02 \x01(\v2 .connector.v1.RawControllerHelloH\x00R\x0fcontrollerHello\x12+\n" +
-	"\x04open\x18\x03 \x01(\v2\x15.connector.v1.RawOpenH\x00R\x04open\x121\n" +
-	"\x06opened\x18\x04 \x01(\v2\x17.connector.v1.RawOpenedH\x00R\x06opened\x12;\n" +
-	"\n" +
-	"open_error\x18\x05 \x01(\v2\x1a.connector.v1.RawOpenErrorH\x00R\topenError\x12+\n" +
-	"\x04data\x18\x06 \x01(\v2\x15.connector.v1.RawDataH\x00R\x04data\x12D\n" +
-	"\rwindow_update\x18\a \x01(\v2\x1d.connector.v1.RawWindowUpdateH\x00R\fwindowUpdate\x12;\n" +
-	"\n" +
-	"half_close\x18\b \x01(\v2\x1a.connector.v1.RawHalfCloseH\x00R\thalfClose\x127\n" +
-	"\n" +
-	"pipe_reset\x18\t \x01(\v2\x16.connector.v1.RawResetH\x00R\tpipeReset\x12.\n" +
-	"\x05close\x18\n" +
-	" \x01(\v2\x16.connector.v1.RawCloseH\x00R\x05close\x12.\n" +
-	"\x05drain\x18\v \x01(\v2\x16.connector.v1.RawDrainH\x00R\x05drain\x12+\n" +
-	"\x04ping\x18\f \x01(\v2\x15.connector.v1.RawPingH\x00R\x04pingB\x0e\n" +
-	"\x05frame\x12\x05\xbaH\x02\b\x01\"\xbf\x02\n" +
+	"\x1dconnector/v1/raw_tunnel.proto\x12\fconnector.v1\x1a\x1bbuf/validate/validate.proto\"1\n" +
+	"\x0eRawTunnelChunk\x12\x1f\n" +
+	"\x04data\x18\x01 \x01(\fB\v\xbaH\bz\x06\x10\x01\x18\x80\x80\x01R\x04data\"\xbf\x02\n" +
 	"\x11RawConnectorHello\x12J\n" +
 	"\x1bsupported_protocol_versions\x18\x01 \x03(\rB\n" +
 	"\xbaH\a\x92\x01\x04\b\x01\x10\x10R\x19supportedProtocolVersions\x12$\n" +
@@ -1361,36 +752,15 @@ const file_connector_v1_raw_tunnel_proto_rawDesc = "" +
 	"\xbaH\ar\x05\x10\x01\x18\xfd\x01R\x04host\x12\x1f\n" +
 	"\x04port\x18\x04 \x01(\rB\v\xbaH\b*\x06\x18\xff\xff\x03(\x01R\x04port\x129\n" +
 	"\x04mode\x18\x05 \x01(\x0e2\x19.connector.v1.RawPipeModeB\n" +
-	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x04mode\"-\n" +
-	"\tRawOpened\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\"\x9a\x01\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x04mode\"\x9a\x01\n" +
 	"\fRawOpenError\x12 \n" +
 	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x12F\n" +
 	"\x06reason\x18\x02 \x01(\x0e2\".connector.v1.RawOpenFailureReasonB\n" +
 	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\x12 \n" +
-	"\x06detail\x18\x03 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x02R\x06detail\"R\n" +
-	"\aRawData\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x12%\n" +
-	"\apayload\x18\x02 \x01(\fB\v\xbaH\bz\x06\x10\x01\x18\x80\x80\x02R\apayload\"c\n" +
-	"\x0fRawWindowUpdate\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x12.\n" +
-	"\fcredit_bytes\x18\x02 \x01(\rB\v\xbaH\b*\x06\x18\x80\x80\x10(\x01R\vcreditBytes\"0\n" +
-	"\fRawHalfClose\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\"n\n" +
-	"\bRawReset\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x12@\n" +
-	"\x06reason\x18\x02 \x01(\x0e2\x1c.connector.v1.RawCloseReasonB\n" +
-	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\"n\n" +
-	"\bRawClose\x12 \n" +
-	"\apipe_id\x18\x01 \x01(\x04B\a\xbaH\x042\x02 \x00R\x06pipeId\x12@\n" +
-	"\x06reason\x18\x02 \x01(\x0e2\x1c.connector.v1.RawCloseReasonB\n" +
-	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\"L\n" +
+	"\x06detail\x18\x03 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x02R\x06detail\"L\n" +
 	"\bRawDrain\x12@\n" +
 	"\x06reason\x18\x01 \x01(\x0e2\x1c.connector.v1.RawDrainReasonB\n" +
-	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason\"1\n" +
-	"\aRawPing\x12\x14\n" +
-	"\x05nonce\x18\x01 \x01(\x04R\x05nonce\x12\x10\n" +
-	"\x03ack\x18\x02 \x01(\bR\x03ack*K\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\x06reason*K\n" +
 	"\vRawPipeMode\x12\x1d\n" +
 	"\x19RAW_PIPE_MODE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19RAW_PIPE_MODE_PASSTHROUGH\x10\x01*\xdf\x06\n" +
@@ -1446,50 +816,29 @@ func file_connector_v1_raw_tunnel_proto_rawDescGZIP() []byte {
 }
 
 var file_connector_v1_raw_tunnel_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_connector_v1_raw_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_connector_v1_raw_tunnel_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_connector_v1_raw_tunnel_proto_goTypes = []any{
 	(RawPipeMode)(0),           // 0: connector.v1.RawPipeMode
 	(RawOpenFailureReason)(0),  // 1: connector.v1.RawOpenFailureReason
 	(RawCloseReason)(0),        // 2: connector.v1.RawCloseReason
 	(RawDrainReason)(0),        // 3: connector.v1.RawDrainReason
-	(*RawTunnelFrame)(nil),     // 4: connector.v1.RawTunnelFrame
+	(*RawTunnelChunk)(nil),     // 4: connector.v1.RawTunnelChunk
 	(*RawConnectorHello)(nil),  // 5: connector.v1.RawConnectorHello
 	(*RawControllerHello)(nil), // 6: connector.v1.RawControllerHello
 	(*RawOpen)(nil),            // 7: connector.v1.RawOpen
-	(*RawOpened)(nil),          // 8: connector.v1.RawOpened
-	(*RawOpenError)(nil),       // 9: connector.v1.RawOpenError
-	(*RawData)(nil),            // 10: connector.v1.RawData
-	(*RawWindowUpdate)(nil),    // 11: connector.v1.RawWindowUpdate
-	(*RawHalfClose)(nil),       // 12: connector.v1.RawHalfClose
-	(*RawReset)(nil),           // 13: connector.v1.RawReset
-	(*RawClose)(nil),           // 14: connector.v1.RawClose
-	(*RawDrain)(nil),           // 15: connector.v1.RawDrain
-	(*RawPing)(nil),            // 16: connector.v1.RawPing
+	(*RawOpenError)(nil),       // 8: connector.v1.RawOpenError
+	(*RawDrain)(nil),           // 9: connector.v1.RawDrain
 }
 var file_connector_v1_raw_tunnel_proto_depIdxs = []int32{
-	5,  // 0: connector.v1.RawTunnelFrame.connector_hello:type_name -> connector.v1.RawConnectorHello
-	6,  // 1: connector.v1.RawTunnelFrame.controller_hello:type_name -> connector.v1.RawControllerHello
-	7,  // 2: connector.v1.RawTunnelFrame.open:type_name -> connector.v1.RawOpen
-	8,  // 3: connector.v1.RawTunnelFrame.opened:type_name -> connector.v1.RawOpened
-	9,  // 4: connector.v1.RawTunnelFrame.open_error:type_name -> connector.v1.RawOpenError
-	10, // 5: connector.v1.RawTunnelFrame.data:type_name -> connector.v1.RawData
-	11, // 6: connector.v1.RawTunnelFrame.window_update:type_name -> connector.v1.RawWindowUpdate
-	12, // 7: connector.v1.RawTunnelFrame.half_close:type_name -> connector.v1.RawHalfClose
-	13, // 8: connector.v1.RawTunnelFrame.pipe_reset:type_name -> connector.v1.RawReset
-	14, // 9: connector.v1.RawTunnelFrame.close:type_name -> connector.v1.RawClose
-	15, // 10: connector.v1.RawTunnelFrame.drain:type_name -> connector.v1.RawDrain
-	16, // 11: connector.v1.RawTunnelFrame.ping:type_name -> connector.v1.RawPing
-	0,  // 12: connector.v1.RawConnectorHello.supported_modes:type_name -> connector.v1.RawPipeMode
-	0,  // 13: connector.v1.RawOpen.mode:type_name -> connector.v1.RawPipeMode
-	1,  // 14: connector.v1.RawOpenError.reason:type_name -> connector.v1.RawOpenFailureReason
-	2,  // 15: connector.v1.RawReset.reason:type_name -> connector.v1.RawCloseReason
-	2,  // 16: connector.v1.RawClose.reason:type_name -> connector.v1.RawCloseReason
-	3,  // 17: connector.v1.RawDrain.reason:type_name -> connector.v1.RawDrainReason
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	0, // 0: connector.v1.RawConnectorHello.supported_modes:type_name -> connector.v1.RawPipeMode
+	0, // 1: connector.v1.RawOpen.mode:type_name -> connector.v1.RawPipeMode
+	1, // 2: connector.v1.RawOpenError.reason:type_name -> connector.v1.RawOpenFailureReason
+	3, // 3: connector.v1.RawDrain.reason:type_name -> connector.v1.RawDrainReason
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_connector_v1_raw_tunnel_proto_init() }
@@ -1497,27 +846,13 @@ func file_connector_v1_raw_tunnel_proto_init() {
 	if File_connector_v1_raw_tunnel_proto != nil {
 		return
 	}
-	file_connector_v1_raw_tunnel_proto_msgTypes[0].OneofWrappers = []any{
-		(*RawTunnelFrame_ConnectorHello)(nil),
-		(*RawTunnelFrame_ControllerHello)(nil),
-		(*RawTunnelFrame_Open)(nil),
-		(*RawTunnelFrame_Opened)(nil),
-		(*RawTunnelFrame_OpenError)(nil),
-		(*RawTunnelFrame_Data)(nil),
-		(*RawTunnelFrame_WindowUpdate)(nil),
-		(*RawTunnelFrame_HalfClose)(nil),
-		(*RawTunnelFrame_PipeReset)(nil),
-		(*RawTunnelFrame_Close)(nil),
-		(*RawTunnelFrame_Drain)(nil),
-		(*RawTunnelFrame_Ping)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_connector_v1_raw_tunnel_proto_rawDesc), len(file_connector_v1_raw_tunnel_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   13,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

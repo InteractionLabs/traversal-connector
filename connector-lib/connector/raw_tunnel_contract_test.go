@@ -51,277 +51,40 @@ func TestOpenStreamProcedureIsNotUnderConnectorPrefix(t *testing.T) {
 	}
 }
 
-func TestRawTunnelFrameValidation(t *testing.T) {
-	validOpen := func() *pb.RawOpen {
-		return &pb.RawOpen{
-			PipeId:     1,
-			Capability: "header.claims.signature",
-			Host:       "db.internal.example",
-			Port:       5432,
-			Mode:       pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
-		}
-	}
+func TestRawTunnelMessageValidation(t *testing.T) {
+	capability := strings.Repeat("a", 32)
 	tests := []struct {
 		name    string
-		frame   *pb.RawTunnelFrame
+		msg     proto.Message
 		wantErr bool
 	}{
-		{
-			name:    "unset frame",
-			frame:   &pb.RawTunnelFrame{},
-			wantErr: true,
-		},
-		{
-			name:  "data at the payload cap",
-			frame: dataFrame(1, maxDataPayload),
-		},
-		{
-			name:    "data over the payload cap",
-			frame:   dataFrame(1, maxDataPayload+1),
-			wantErr: true,
-		},
-		{
-			name:    "empty data",
-			frame:   dataFrame(1, 0),
-			wantErr: true,
-		},
-		{
-			name:    "data without a pipe",
-			frame:   dataFrame(0, 1),
-			wantErr: true,
-		},
-		{
-			name: "window update at the window size",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_WindowUpdate{
-				WindowUpdate: &pb.RawWindowUpdate{PipeId: 1, CreditBytes: 256 << 10},
-			}},
-		},
-		{
-			name: "window update over the window size",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_WindowUpdate{
-				WindowUpdate: &pb.RawWindowUpdate{PipeId: 1, CreditBytes: 256<<10 + 1},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "zero credit",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_WindowUpdate{
-				WindowUpdate: &pb.RawWindowUpdate{PipeId: 1},
-			}},
-			wantErr: true,
-		},
-		{
-			name:  "valid open",
-			frame: openFrame(validOpen()),
-		},
-		{
-			name: "open with port zero",
-			frame: openFrame(func() *pb.RawOpen {
-				o := validOpen()
-				o.Port = 0
-				return o
-			}()),
-			wantErr: true,
-		},
-		{
-			name: "open with port above 65535",
-			frame: openFrame(func() *pb.RawOpen {
-				o := validOpen()
-				o.Port = 65536
-				return o
-			}()),
-			wantErr: true,
-		},
-		{
-			name: "open without a mode",
-			frame: openFrame(func() *pb.RawOpen {
-				o := validOpen()
-				o.Mode = pb.RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED
-				return o
-			}()),
-			wantErr: true,
-		},
-		{
-			name: "open with an oversized capability",
-			frame: openFrame(func() *pb.RawOpen {
-				o := validOpen()
-				o.Capability = strings.Repeat("a", 4097)
-				return o
-			}()),
-			wantErr: true,
-		},
-		{
-			name: "reset without a reason",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_PipeReset{
-				PipeReset: &pb.RawReset{PipeId: 1},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "controller hello with a non-uuid tunnel id",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-				ControllerHello: &pb.RawControllerHello{ProtocolVersion: 1, TunnelId: "tunnel-1"},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "controller hello with protocol version zero",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-				ControllerHello: &pb.RawControllerHello{
-					TunnelId: "123e4567-e89b-12d3-a456-426614174000",
-				},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "controller hello",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-				ControllerHello: &pb.RawControllerHello{
-					ProtocolVersion: 1,
-					TunnelId:        "123e4567-e89b-12d3-a456-426614174000",
-				},
-			}},
-		},
-		{
-			name: "connector hello without a protocol version",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
-				ConnectorHello: &pb.RawConnectorHello{
-					MaxPipes:       1,
-					SupportedModes: []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
-				},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "connector hello with an unspecified mode",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
-				ConnectorHello: &pb.RawConnectorHello{
-					SupportedProtocolVersions: []uint32{1},
-					MaxPipes:                  1,
-					SupportedModes: []pb.RawPipeMode{
-						pb.RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED,
-					},
-				},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "connector hello with an unknown mode",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
-				ConnectorHello: &pb.RawConnectorHello{
-					SupportedProtocolVersions: []uint32{1},
-					MaxPipes:                  1,
-					SupportedModes:            []pb.RawPipeMode{99},
-				},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "connector hello with max pipes zero",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
-				ConnectorHello: &pb.RawConnectorHello{
-					SupportedProtocolVersions: []uint32{1},
-					SupportedModes: []pb.RawPipeMode{
-						pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
-					},
-				},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "open error with an unspecified reason",
-			frame: openErrorFrame(
-				1,
-				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED,
-				"",
-			),
-			wantErr: true,
-		},
-		{
-			name:    "open error with an unknown reason",
-			frame:   openErrorFrame(1, 99, ""),
-			wantErr: true,
-		},
-		{
-			name: "open error without a pipe id",
-			frame: openErrorFrame(
-				0,
-				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
-				"",
-			),
-			wantErr: true,
-		},
-		{
-			name: "open error detail at the cap",
-			frame: openErrorFrame(
-				1,
-				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
-				strings.Repeat("a", 256),
-			),
-		},
-		{
-			name: "open error detail over the cap",
-			frame: openErrorFrame(
-				1,
-				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
-				strings.Repeat("a", 257),
-			),
-			wantErr: true,
-		},
-		{
-			name: "close with an unspecified reason",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
-				Close: &pb.RawClose{PipeId: 1},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "close with an unknown reason",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
-				Close: &pb.RawClose{PipeId: 1, Reason: 99},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "close without a pipe id",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
-				Close: &pb.RawClose{Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "close",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
-				Close: &pb.RawClose{
-					PipeId: 1,
-					Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED,
-				},
-			}},
-		},
-		{
-			name: "drain with an unspecified reason",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
-				Drain: &pb.RawDrain{},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "drain with an unknown reason",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
-				Drain: &pb.RawDrain{Reason: 99},
-			}},
-			wantErr: true,
-		},
-		{
-			name: "drain",
-			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Drain{
-				Drain: &pb.RawDrain{Reason: pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION},
-			}},
-		},
+		{name: "empty chunk", msg: &pb.RawTunnelChunk{}, wantErr: true},
+		{name: "chunk", msg: &pb.RawTunnelChunk{Data: []byte{1}}, wantErr: false},
+		{name: "chunk over the frame size", msg: &pb.RawTunnelChunk{Data: bytes.Repeat([]byte{1}, 16385)}, wantErr: true},
+		{name: "controller hello", msg: &pb.RawControllerHello{ProtocolVersion: 1, TunnelId: "550e8400-e29b-41d4-a716-446655440000"}, wantErr: false},
+		{name: "controller hello version zero", msg: &pb.RawControllerHello{ProtocolVersion: 0, TunnelId: "550e8400-e29b-41d4-a716-446655440000"}, wantErr: true},
+		{name: "connector hello", msg: &pb.RawConnectorHello{
+			SupportedProtocolVersions: []uint32{1}, Hostname: "edge-1", MaxPipes: 100,
+			SupportedModes: []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+		}, wantErr: false},
+		{name: "connector hello empty modes", msg: &pb.RawConnectorHello{
+			SupportedProtocolVersions: []uint32{1}, Hostname: "edge-1", MaxPipes: 100,
+		}, wantErr: true},
+		{name: "open", msg: &pb.RawOpen{
+			PipeId: 1, Mode: pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+			Host: "10.0.0.1", Port: 443, Capability: capability,
+		}, wantErr: false},
+		{name: "open missing capability", msg: &pb.RawOpen{
+			PipeId: 1, Mode: pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH, Host: "10.0.0.1", Port: 443,
+		}, wantErr: true},
+		{name: "open error", msg: &pb.RawOpenError{PipeId: 1, Reason: pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED}, wantErr: false},
+		{name: "open error unspecified", msg: &pb.RawOpenError{PipeId: 1}, wantErr: true},
+		{name: "drain", msg: &pb.RawDrain{Reason: pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION}, wantErr: false},
+		{name: "drain unspecified", msg: &pb.RawDrain{}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := protovalidate.Validate(tt.frame)
+			err := protovalidate.Validate(tt.msg)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -351,21 +114,18 @@ func TestOpenStreamRejectsRelayBeyondOneHop(t *testing.T) {
 	}
 }
 
-// A full data frame must fit comfortably in one gRPC message and survive a
-// round trip byte-for-byte.
-func TestDataFrameRoundTrip(t *testing.T) {
-	frame := dataFrame(7, maxDataPayload)
-	wire, err := proto.Marshal(frame)
+func TestChunkRoundTrip(t *testing.T) {
+	chunk := &pb.RawTunnelChunk{Data: bytes.Repeat([]byte{0xab}, 16384)}
+	wire, err := proto.Marshal(chunk)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	var got pb.RawTunnelFrame
+	var got pb.RawTunnelChunk
 	if err := proto.Unmarshal(wire, &got); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if got.GetData().GetPipeId() != 7 ||
-		!bytes.Equal(got.GetData().GetPayload(), frame.GetData().GetPayload()) {
-		t.Fatal("data frame changed across a round trip")
+	if !bytes.Equal(got.GetData(), chunk.GetData()) {
+		t.Fatal("chunk changed across a round trip")
 	}
 }
 
@@ -458,22 +218,6 @@ func TestRequestResetIsOnlyCancelled(t *testing.T) {
 			t.Fatalf("caller reset allows infrastructure reason %s", reason)
 		}
 	}
-}
-
-func dataFrame(pipeID uint64, size int) *pb.RawTunnelFrame {
-	return &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Data{
-		Data: &pb.RawData{PipeId: pipeID, Payload: bytes.Repeat([]byte{0xab}, size)},
-	}}
-}
-
-func openFrame(open *pb.RawOpen) *pb.RawTunnelFrame {
-	return &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Open{Open: open}}
-}
-
-func openErrorFrame(id uint64, reason pb.RawOpenFailureReason, detail string) *pb.RawTunnelFrame {
-	return &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_OpenError{
-		OpenError: &pb.RawOpenError{PipeId: id, Reason: reason, Detail: detail},
-	}}
 }
 
 func openStreamData(size int) *streampb.OpenStreamRequest {

@@ -46,13 +46,13 @@ type ConnectorServiceClient interface {
 	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	Tunnel(context.Context) *connect.BidiStreamForClient[v1.ConnectorMessage, v1.ControllerMessage]
-	// Bidirectional streaming RPC that multiplexes raw byte pipes between the
-	// connector and controller. It runs on its own connections, independent of
-	// Tunnel, and is only established when the connector enables it.
+	// One HTTP/2 session, carried as chunks. Pipes are streams inside that
+	// session. The RPC runs on its own connections, independent of Tunnel, and
+	// is only established when the connector enables it.
 	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
-	RawTunnel(context.Context) *connect.BidiStreamForClient[v1.RawTunnelFrame, v1.RawTunnelFrame]
+	RawTunnel(context.Context) *connect.BidiStreamForClient[v1.RawTunnelChunk, v1.RawTunnelChunk]
 }
 
 // NewConnectorServiceClient constructs a client for the connector.v1.ConnectorService service. By
@@ -72,7 +72,7 @@ func NewConnectorServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(connectorServiceMethods.ByName("Tunnel")),
 			connect.WithClientOptions(opts...),
 		),
-		rawTunnel: connect.NewClient[v1.RawTunnelFrame, v1.RawTunnelFrame](
+		rawTunnel: connect.NewClient[v1.RawTunnelChunk, v1.RawTunnelChunk](
 			httpClient,
 			baseURL+ConnectorServiceRawTunnelProcedure,
 			connect.WithSchema(connectorServiceMethods.ByName("RawTunnel")),
@@ -84,7 +84,7 @@ func NewConnectorServiceClient(httpClient connect.HTTPClient, baseURL string, op
 // connectorServiceClient implements ConnectorServiceClient.
 type connectorServiceClient struct {
 	tunnel    *connect.Client[v1.ConnectorMessage, v1.ControllerMessage]
-	rawTunnel *connect.Client[v1.RawTunnelFrame, v1.RawTunnelFrame]
+	rawTunnel *connect.Client[v1.RawTunnelChunk, v1.RawTunnelChunk]
 }
 
 // Tunnel calls connector.v1.ConnectorService.Tunnel.
@@ -93,7 +93,7 @@ func (c *connectorServiceClient) Tunnel(ctx context.Context) *connect.BidiStream
 }
 
 // RawTunnel calls connector.v1.ConnectorService.RawTunnel.
-func (c *connectorServiceClient) RawTunnel(ctx context.Context) *connect.BidiStreamForClient[v1.RawTunnelFrame, v1.RawTunnelFrame] {
+func (c *connectorServiceClient) RawTunnel(ctx context.Context) *connect.BidiStreamForClient[v1.RawTunnelChunk, v1.RawTunnelChunk] {
 	return c.rawTunnel.CallBidiStream(ctx)
 }
 
@@ -103,13 +103,13 @@ type ConnectorServiceHandler interface {
 	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	Tunnel(context.Context, *connect.BidiStream[v1.ConnectorMessage, v1.ControllerMessage]) error
-	// Bidirectional streaming RPC that multiplexes raw byte pipes between the
-	// connector and controller. It runs on its own connections, independent of
-	// Tunnel, and is only established when the connector enables it.
+	// One HTTP/2 session, carried as chunks. Pipes are streams inside that
+	// session. The RPC runs on its own connections, independent of Tunnel, and
+	// is only established when the connector enables it.
 	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
-	RawTunnel(context.Context, *connect.BidiStream[v1.RawTunnelFrame, v1.RawTunnelFrame]) error
+	RawTunnel(context.Context, *connect.BidiStream[v1.RawTunnelChunk, v1.RawTunnelChunk]) error
 }
 
 // NewConnectorServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -150,6 +150,6 @@ func (UnimplementedConnectorServiceHandler) Tunnel(context.Context, *connect.Bid
 	return connect.NewError(connect.CodeUnimplemented, errors.New("connector.v1.ConnectorService.Tunnel is not implemented"))
 }
 
-func (UnimplementedConnectorServiceHandler) RawTunnel(context.Context, *connect.BidiStream[v1.RawTunnelFrame, v1.RawTunnelFrame]) error {
+func (UnimplementedConnectorServiceHandler) RawTunnel(context.Context, *connect.BidiStream[v1.RawTunnelChunk, v1.RawTunnelChunk]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("connector.v1.ConnectorService.RawTunnel is not implemented"))
 }
