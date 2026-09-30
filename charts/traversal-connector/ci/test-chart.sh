@@ -134,4 +134,19 @@ assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${commo
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
 
+# Every rendered container must satisfy the same security contract, including
+# the optional telemetry sidecar; its writable queue remains on its own volume.
+for scenario in direct sidecar disabled; do
+  expected=1
+  [[ "$scenario" == sidecar ]] && expected=2
+  for field in 'runAsNonRoot: true' 'runAsUser: 65532' 'runAsGroup: 65532' \
+    'allowPrivilegeEscalation: false' 'readOnlyRootFilesystem: true' 'type: RuntimeDefault' 'mountPath: /tmp'; do
+    actual=$(grep -Fc "$field" "$tmp_dir/$scenario.yaml")
+    [[ "$actual" == "$expected" ]] || fail "$scenario: expected $expected occurrences of $field, got $actual"
+  done
+  assert_contains "$tmp_dir/$scenario.yaml" 'fsGroup: 65532'
+done
+assert_contains "$tmp_dir/sidecar.yaml" 'mountPath: /var/lib/telemetry-sidecar'
+assert_contains "$tmp_dir/direct.yaml" 'mountPath: /etc/traversal'
+
 echo "All chart tests passed."
