@@ -222,15 +222,22 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 //
 // Connector verifiers know their own connector id and the requested
 // host/port/mode. They leave OrganizationID empty because the connector
-// credential already binds one tenant. They leave IntegrationID, ConsumerID,
-// SessionID, and TrafficClass empty because the open frame does not
-// independently authenticate the caller.
+// credential already binds one tenant. They leave Subject, IntegrationID,
+// ConsumerID, SessionID, and TrafficClass empty because the open frame does
+// not independently authenticate the caller.
 //
 // Controller and future Integration Proxy verifiers must set every claim their
-// authenticated context knows. Optional fields on Expected are enough; do not
-// invent a second code path per role.
+// authenticated context knows, including Subject. AllowedSubjects only says a
+// subject may open pipes somewhere. It does not stop caller A from presenting
+// a token whose subject is the also-allowlisted caller B. Optional fields on
+// Expected are enough; do not invent a second code path per role.
 type Expected struct {
 	ConnectorID string
+	// Subject, when set, must equal the claim. Leave empty on the connector,
+	// which does not authenticate the original caller. Controller and
+	// Integration Proxy verifiers set it from the authenticated transport or
+	// execution context.
+	Subject string
 	// OrganizationID, when set, must equal the claim. Leave empty on the
 	// connector, whose credentials already bind one tenant.
 	OrganizationID string
@@ -336,6 +343,8 @@ func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
 		return fail(CodeExpired, "exp has passed")
 	case !v.subjects[c.Subject]:
 		return fail(CodeForbiddenSubject, "sub may not open pipes")
+	case want.Subject != "" && c.Subject != want.Subject:
+		return fail(CodeForbidden, "sub does not match the authenticated caller")
 	case want.OrganizationID != "" && c.OrganizationID != want.OrganizationID:
 		return fail(CodeWrongTenant, "organization_id does not own the connector")
 	case want.IntegrationID != "" && c.IntegrationID != want.IntegrationID:

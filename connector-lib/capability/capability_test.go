@@ -225,6 +225,41 @@ func TestOpenCountsExpireWithTheCapability(t *testing.T) {
 	}
 }
 
+func TestExpectedSubjectBindsTheAuthenticatedCaller(t *testing.T) {
+	const otherSubject = "other-signer"
+	v, err := capability.NewVerifier(capability.VerifierConfig{
+		Issuer: testIssuer,
+		Keys: map[string]*ecdsa.PublicKey{
+			currentKID: &currentKey.PublicKey,
+		},
+		AllowedSubjects: []string{testSubject, otherSubject},
+		Now:             func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsA := validClaims(testNow)
+	claimsB := validClaims(testNow)
+	claimsB.Subject = otherSubject
+	claimsB.JTI = "jti-b"
+	tokenA := sign(t, claimsA)
+	tokenB := sign(t, claimsB)
+	base := connectorExpected()
+
+	if _, err = v.Verify(tokenB, base); err != nil {
+		t.Fatalf("empty subject rejected an allowlisted token: %v", err)
+	}
+	wantA := base
+	wantA.Subject = testSubject
+	if _, err = v.Verify(tokenA, wantA); err != nil {
+		t.Fatalf("matching subject rejected: %v", err)
+	}
+	_, err = v.Verify(tokenB, wantA)
+	if got := codeOf(err); got != capability.CodeForbidden {
+		t.Fatalf("other allowlisted subject = %v, want %s", err, capability.CodeForbidden)
+	}
+}
+
 func TestOptionalExpectedClaims(t *testing.T) {
 	token := sign(t, validClaims(testNow))
 	base := connectorExpected()
