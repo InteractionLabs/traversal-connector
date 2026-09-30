@@ -286,7 +286,7 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 			total := active + draining + connecting
 			return active == 1 && draining == 0 && connecting == 0 &&
 				sessions == 1 && total <= bound &&
-				ctrl.live.Load() <= int32(bound)
+				int64(ctrl.live.Load()) <= int64(bound)
 		})
 		active, draining, sessions, connecting := m.snapshot()
 		total := active + draining + connecting
@@ -296,7 +296,7 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 				i+1, active, draining, connecting, sessions, bound,
 			)
 		}
-		if live := ctrl.live.Load(); live > int32(bound) {
+		if live := int64(ctrl.live.Load()); live > int64(bound) {
 			t.Fatalf("rotation %d: controller still has %d live streams", i+1, live)
 		}
 		first = next
@@ -308,7 +308,7 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 			active, draining, connecting, sessions,
 		)
 	}
-	if live := ctrl.live.Load(); live > int32(bound) {
+	if live := int64(ctrl.live.Load()); live > int64(bound) {
 		t.Fatalf("final live streams = %d, want <= %d", live, bound)
 	}
 }
