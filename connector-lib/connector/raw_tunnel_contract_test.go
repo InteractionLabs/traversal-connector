@@ -198,7 +198,9 @@ func TestRawTunnelFrameValidation(t *testing.T) {
 				ConnectorHello: &pb.RawConnectorHello{
 					SupportedProtocolVersions: []uint32{1},
 					MaxPipes:                  1,
-					SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED},
+					SupportedModes: []pb.RawPipeMode{
+						pb.RawPipeMode_RAW_PIPE_MODE_UNSPECIFIED,
+					},
 				},
 			}},
 			wantErr: true,
@@ -219,14 +221,20 @@ func TestRawTunnelFrameValidation(t *testing.T) {
 			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ConnectorHello{
 				ConnectorHello: &pb.RawConnectorHello{
 					SupportedProtocolVersions: []uint32{1},
-					SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+					SupportedModes: []pb.RawPipeMode{
+						pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+					},
 				},
 			}},
 			wantErr: true,
 		},
 		{
-			name:    "open error with an unspecified reason",
-			frame:   openErrorFrame(1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED, ""),
+			name: "open error with an unspecified reason",
+			frame: openErrorFrame(
+				1,
+				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNSPECIFIED,
+				"",
+			),
 			wantErr: true,
 		},
 		{
@@ -235,20 +243,28 @@ func TestRawTunnelFrameValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "open error without a pipe id",
-			frame:   openErrorFrame(0, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, ""),
+			name: "open error without a pipe id",
+			frame: openErrorFrame(
+				0,
+				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
+				"",
+			),
 			wantErr: true,
 		},
 		{
 			name: "open error detail at the cap",
 			frame: openErrorFrame(
-				1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 256),
+				1,
+				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
+				strings.Repeat("a", 256),
 			),
 		},
 		{
 			name: "open error detail over the cap",
 			frame: openErrorFrame(
-				1, pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED, strings.Repeat("a", 257),
+				1,
+				pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED,
+				strings.Repeat("a", 257),
 			),
 			wantErr: true,
 		},
@@ -276,7 +292,10 @@ func TestRawTunnelFrameValidation(t *testing.T) {
 		{
 			name: "close",
 			frame: &pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_Close{
-				Close: &pb.RawClose{PipeId: 1, Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED},
+				Close: &pb.RawClose{
+					PipeId: 1,
+					Reason: pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED,
+				},
 			}},
 		},
 		{
