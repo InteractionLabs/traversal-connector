@@ -209,12 +209,7 @@ func TestCapacityRefusalsDoNotConsumeJTI(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("held pipe did not finish")
 	}
-	waitFor(t, 2*time.Second, func() bool {
-		slots := m.opener.pipes
-		slots.mu.Lock()
-		defer slots.mu.Unlock()
-		return slots.n == 0
-	})
+	waitSlots(t, m, 0)
 	// One use was spent on the held pipe; capacity refusals must not have
 	// spent any. The remaining budget is MaxOpensPerToken - 1.
 	for i := range capabilityOpens() - 1 {
@@ -226,11 +221,22 @@ func TestCapacityRefusalsDoNotConsumeJTI(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("pipe %d did not finish", i)
 		}
+		waitSlots(t, m, 0)
 	}
 	if reason := openRefusal(t, mux, token); reason !=
 		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPABILITY_EXHAUSTED {
 		t.Fatalf("reason %s after exhausting remaining budget", reason)
 	}
+}
+
+func waitSlots(t *testing.T, m *Manager, want int) {
+	t.Helper()
+	waitFor(t, 2*time.Second, func() bool {
+		slots := m.opener.pipes
+		slots.mu.Lock()
+		defer slots.mu.Unlock()
+		return slots.n == want
+	})
 }
 
 func TestOpenDialTimeout(t *testing.T) {
