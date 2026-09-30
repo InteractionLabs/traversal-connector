@@ -205,38 +205,6 @@ func (c *muxCtrl) Tunnel(
 	}
 }
 
-type badVersionCtrl struct {
-	connectorconnect.UnimplementedConnectorServiceHandler
-	calls chan struct{}
-}
-
-func (c *badVersionCtrl) RawTunnel(
-	ctx context.Context,
-	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
-) error {
-	select {
-	case c.calls <- struct{}{}:
-	default:
-	}
-	return rejectHello(ctx, stream, 99)
-}
-
-func (c *badVersionCtrl) Tunnel(
-	ctx context.Context,
-	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
-) error {
-	for {
-		if _, err := stream.Receive(); err != nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-	}
-}
-
 // legacyProbeResult is what a controller saw from one legacy tunnel exchange.
 type legacyProbeResult struct {
 	status     int32
@@ -336,54 +304,19 @@ func (c *legacyServingCtrl) Tunnel(
 
 func (c *legacyServingCtrl) RawTunnel(
 	ctx context.Context,
-	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+	stream *connect.BidiStream[pb.RawTunnelChunk, pb.RawTunnelChunk],
 ) error {
 	if c.rawCalls != nil {
-		_, _ = stream.Receive()
-		_ = stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-			ControllerHello: &pb.RawControllerHello{
-				ProtocolVersion: 99,
-				TunnelId:        uuid.NewString(),
-			},
-		}})
 		select {
 		case c.rawCalls <- struct{}{}:
 		default:
 		}
-		return nil
+		return rejectHello(ctx, stream, 99)
 	}
 	if c.rawReady == nil {
 		return connect.NewError(connect.CodeUnimplemented, errors.New("raw disabled"))
 	}
-	if _, err := stream.Receive(); err != nil {
-		return err
-	}
-	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
-		ControllerHello: &pb.RawControllerHello{
-			ProtocolVersion: rawtunnel.ProtocolVersion,
-			TunnelId:        uuid.NewString(),
-		},
-	}}); err != nil {
-		return err
-	}
-	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
-	mux, err := rawtunnel.New(rawtunnel.Config{
-		Role:         rawtunnel.RoleController,
-		MaxPipes:     128,
-		IdleTimeout:  time.Hour,
-		MaxLifetime:  time.Hour,
-		PingInterval: time.Hour,
-		Abort: func() {
-			now := time.Now()
-			_ = rc.SetReadDeadline(now)
-			_ = rc.SetWriteDeadline(now)
-		},
-	}, stream)
-	if err != nil {
-		return err
-	}
-	c.rawReady <- mux
-	return mux.Run(ctx)
+	return runController(ctx, stream, c.rawReady, time.Hour)
 }
 
 type pingCtrl struct {
