@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from vendor import filetype
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -25,17 +27,36 @@ except ModuleNotFoundError:
 
 UTC = dt.timezone.utc
 COOLDOWN = dt.timedelta(hours=168)
-USER_AGENT = "InteractionLabs-dependency-policy/3"
+CACHE_SCHEMA = 3
+USER_AGENT = "dependency-policy/4"
 GO_PROXY = "https://proxy.golang.org"
 GO_INDEX = "https://index.golang.org/index"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 UNSAFE_VERSION = re.compile(r"(?:^|[^A-Za-z])(latest|main|master)(?:$|[^A-Za-z])|[*<>=^~|,\s]")
+RELEASE_ASSET_PATTERN = re.compile(
+    r"https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/([^\s\"']+)"
+)
+RELEASE_ASSET_GREP_PATTERN = (
+    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/"
+    r"[^/[:space:]\"']+/[^[:space:]\"']+"
+)
+# Only ecosystems whose publication time can never move later for a given
+# coordinate. PyPI is cached only when the lockfile pins file hashes (see
+# is_cacheable); README.md explains why.
+CACHEABLE_ECOSYSTEMS = {
+    "npm",
+    "crates",
+    "maven",
+    "github-commit",
+    "go",
+}
 REPOSITORY = Path(".")
 LATEST_POLICY_REFERENCE = re.compile(
-    r"^(?i:InteractionLabs)/[A-Za-z0-9_.-]+/\.github/"
+    r"^(?i:InteractionLabs)/(?P<repository>[A-Za-z0-9_.-]+)/\.github/"
     r"(?P<kind>actions/dependency-policy|"
-    r"workflows/reusable-dependency-policy\.yml)@main$"
+    r"workflows/reusable-dependency-policy\.yml|"
+    r"workflows/sign-image\.yaml)@main$"
 )
 LATEST_POLICY_PATHS = {
     "actions/dependency-policy": ".github/workflows/reusable-dependency-policy.yml",
@@ -47,11 +68,23 @@ class UnverifiableEvidence(ValueError):
     pass
 
 
+class NonTextDependencyFile(ValueError):
+    pass
+
+
 @dataclass(frozen=True, order=True)
 class Dependency:
     ecosystem: str
     artifact: str
     version: str
+    source: str
+    digests: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PublicationEvidence:
+    published_at: dt.datetime
+    eligible_at: dt.datetime
     source: str
 
 
@@ -68,22 +101,136 @@ class Result:
     detail: Optional[str] = None
 
 
-def run_git(*args: str) -> str:
+@dataclass
+class EvidenceCache:
+    path: Optional[Path]
+    entries: dict[str, dict]
+    hits: int = 0
+    misses: int = 0
+    writes: int = 0
+
+    @classmethod
+    def load(cls, path: Optional[Path]) -> EvidenceCache:
+        if path is None:
+            return cls(None, {})
+        try:
+            document = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return cls(path, {})
+        if (
+            not isinstance(document, dict)
+            or document.get("schema") != CACHE_SCHEMA
+            or document.get("cooldown_seconds")
+            != int(COOLDOWN.total_seconds())
+            or not isinstance(document.get("entries"), dict)
+        ):
+            return cls(path, {})
+        return cls(path, document["entries"])
+
+    def get(self, dependency: Dependency) -> Optional[PublicationEvidence]:
+        if self.path is None:
+            return None
+        key = evidence_cache_key(dependency)
+        entry = self.entries.get(key)
+        try:
+            if not isinstance(entry, dict) or set(entry) != {
+                "published_at",
+                "eligible_at",
+                "evidence",
+            }:
+                raise ValueError("invalid cache entry")
+            published = parse_time(entry["published_at"])
+            eligible = parse_time(entry["eligible_at"])
+            evidence_source = entry["evidence"]
+            if not isinstance(evidence_source, str) or not evidence_source:
+                raise ValueError("invalid cache evidence")
+        except (KeyError, TypeError, ValueError):
+            self.entries.pop(key, None)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return PublicationEvidence(published, eligible, evidence_source)
+
+    # Publication timestamps are immutable, so entries never expire; status is
+    # always recomputed from eligible_at against the current time.
+    def put(self, dependency: Dependency, evidence: PublicationEvidence) -> None:
+        if self.path is None:
+            return
+        self.entries[evidence_cache_key(dependency)] = {
+            "published_at": evidence.published_at.isoformat(),
+            "eligible_at": evidence.eligible_at.isoformat(),
+            "evidence": evidence.source,
+        }
+        self.writes += 1
+
+    def save(self) -> Optional[str]:
+        if self.path is None:
+            return None
+        document = {
+            "schema": CACHE_SCHEMA,
+            "cooldown_seconds": int(COOLDOWN.total_seconds()),
+            "entries": self.entries,
+        }
+        temporary = self.path.with_name(f"{self.path.name}.tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+            temporary.replace(self.path)
+        except OSError as error:
+            return str(error)
+        return None
+
+
+def is_cacheable(dependency: Dependency) -> bool:
+    return dependency.ecosystem in CACHEABLE_ECOSYSTEMS or (
+        dependency.ecosystem == "pypi" and bool(dependency.digests)
+    )
+
+
+def evidence_cache_key(dependency: Dependency) -> str:
+    key: list[object] = [
+        dependency.ecosystem,
+        dependency.artifact,
+        dependency.version,
+    ]
+    if dependency.digests:
+        key.append(list(dependency.digests))
+    return json.dumps(key, separators=(",", ":"))
+
+
+def run_git_bytes(*args: str) -> bytes:
     return subprocess.run(
         ["git", *args],
         cwd=REPOSITORY,
         check=True,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ).stdout
 
 
+def run_git(*args: str) -> str:
+    return run_git_bytes(*args).decode("utf-8", errors="surrogateescape")
+
+
+def binary_format(content: bytes) -> Optional[str]:
+    if kind := filetype.guess(content):
+        return kind.mime
+    if b"\0" in content[:8192]:
+        return "binary"
+    return None
+
+
 def git_file(revision: str, path: str) -> str:
     try:
-        return run_git("show", f"{revision}:{path}")
+        content = run_git_bytes("show", f"{revision}:{path}")
     except subprocess.CalledProcessError:
         return ""
+    if file_format := binary_format(content):
+        raise NonTextDependencyFile(f"{path} contains {file_format} data")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise NonTextDependencyFile(f"{path} is not valid UTF-8 text") from error
 
 
 def parse_time(value: object) -> dt.datetime:
@@ -122,7 +269,15 @@ def discover_github_actions(path: str, text: str) -> set[Dependency]:
         policy_reference = LATEST_POLICY_REFERENCE.fullmatch(target)
         if (
             policy_reference
-            and LATEST_POLICY_PATHS[policy_reference["kind"]] == path
+            and (
+                LATEST_POLICY_PATHS.get(policy_reference["kind"]) == path
+                or (
+                    policy_reference["kind"] == "workflows/sign-image.yaml"
+                    and policy_reference["repository"].casefold()
+                    == "infrastructure"
+                    and path.startswith(".github/workflows/")
+                )
+            )
         ):
             artifact, version = target.rsplit("@", 1)
             found.add(Dependency("policy-exception", artifact, version, path))
@@ -170,6 +325,18 @@ def discover_containers(path: str, text: str) -> set[Dependency]:
     return found
 
 
+def uv_lock_digests(package: dict) -> tuple[str, ...]:
+    files = [package.get("sdist"), *package.get("wheels", [])]
+    digests = {
+        str(item["hash"]).lower()
+        for item in files
+        if isinstance(item, dict) and item.get("hash")
+    }
+    if not digests or not all(SHA256_DIGEST.fullmatch(digest) for digest in digests):
+        return ()
+    return tuple(sorted(digests))
+
+
 def discover_toml(path: str, text: str) -> set[Dependency]:
     found: set[Dependency] = set()
     if path.endswith("uv.lock"):
@@ -186,6 +353,7 @@ def discover_toml(path: str, text: str) -> set[Dependency]:
                         str(package["name"]).lower(),
                         str(package["version"]),
                         path,
+                        uv_lock_digests(package),
                     )
                 )
         return found
@@ -374,10 +542,7 @@ def discover_charts(path: str, text: str) -> set[Dependency]:
 
 def discover_release_assets(path: str, text: str) -> set[Dependency]:
     found: set[Dependency] = set()
-    pattern = re.compile(
-        r"https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/([^\s\"']+)"
-    )
-    for match in pattern.finditer(text):
+    for match in RELEASE_ASSET_PATTERN.finditer(text):
         found.add(
             Dependency(
                 "github-release",
@@ -400,7 +565,6 @@ def discover_text(path: str, text: str) -> list[Dependency]:
         discover_terraform,
         discover_precommit,
         discover_charts,
-        discover_release_assets,
     ):
         found.update(discoverer(path, text))
     if path.endswith(("requirements.txt", "requirements-dev.txt")):
@@ -409,23 +573,109 @@ def discover_text(path: str, text: str) -> list[Dependency]:
     return sorted(found)
 
 
-def discover(rows: list[tuple[str, str]]) -> list[Dependency]:
-    by_path: dict[str, list[str]] = {}
-    for path, line in rows:
-        by_path.setdefault(path, []).append(line)
+def has_dependency_parser(path: str) -> bool:
+    name = Path(path).name
+    return (
+        (path.startswith(".github/") and path.endswith((".yml", ".yaml")))
+        or "Dockerfile" in name
+        or path.endswith(
+            (
+                "uv.lock",
+                "Cargo.lock",
+                "pyproject.toml",
+                "package-lock.json",
+                "npm-shrinkwrap.json",
+                "pnpm-lock.yaml",
+                "go.mod",
+                "go.sum",
+                ".tf",
+                ".terraform.lock.hcl",
+                "Chart.yaml",
+                "Chart.lock",
+                "requirements.txt",
+                "requirements-dev.txt",
+            )
+        )
+        or name in {"mise.toml", ".mise.toml"}
+        or path == ".pre-commit-config.yaml"
+    )
+
+
+def discover_file(revision: str, path: str) -> set[Dependency]:
+    try:
+        return set(discover_text(path, git_file(revision, path)))
+    except NonTextDependencyFile as error:
+        return {Dependency("unparseable", path, str(error), path)}
+
+
+def release_asset_dependencies(
+    revision: str, paths: list[str]
+) -> set[Dependency]:
     found: set[Dependency] = set()
-    for path, lines in by_path.items():
-        found.update(discover_text(path, "\n".join(lines)))
-    return sorted(found)
+    revision_prefix = os.fsencode(f"{revision}:")
+    for offset in range(0, len(paths), 128):
+        pathspecs = [f":(literal){path}" for path in paths[offset : offset + 128]]
+        completed = subprocess.run(
+            [
+                "git",
+                "grep",
+                "-I",
+                "-o",
+                "-E",
+                "-z",
+                RELEASE_ASSET_GREP_PATTERN,
+                revision,
+                "--",
+                *pathspecs,
+            ],
+            cwd=REPOSITORY,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if completed.returncode == 1:
+            continue
+        if completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        position = 0
+        while position < len(completed.stdout):
+            separator = completed.stdout.index(b"\0", position)
+            end = completed.stdout.index(b"\n", separator)
+            location = completed.stdout[position:separator]
+            match = completed.stdout[separator + 1 : end]
+            if not location.startswith(revision_prefix):
+                raise ValueError("git grep returned an unexpected source")
+            path = os.fsdecode(location[len(revision_prefix) :])
+            text = match.decode("utf-8", errors="replace")
+            found.update(discover_release_assets(path, text))
+            position = end + 1
+    return found
 
 
 def dependency_delta(base: str, head: str) -> list[Dependency]:
     found: set[Dependency] = set()
-    paths = run_git("diff", "--name-only", base, head, "--").splitlines()
+    paths = [
+        path
+        for path in run_git(
+            "diff", "--diff-filter=ACMRTUXB", "--name-only", "-z", base, head, "--"
+        ).split("\0")
+        if path and not path.casefold().endswith(".tgz")
+    ]
     for path in paths:
-        old = set(discover_text(path, git_file(base, path)))
-        new = set(discover_text(path, git_file(head, path)))
+        if not has_dependency_parser(path):
+            continue
+        old = discover_file(base, path)
+        new = discover_file(head, path)
         found.update(new - old)
+    found.update(
+        release_asset_dependencies(head, paths)
+        - release_asset_dependencies(base, paths)
+    )
     return sorted(found)
 
 
@@ -525,6 +775,14 @@ def registry_evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
         ]
         if not uploads:
             raise ValueError("PyPI returned no upload timestamp")
+        published_digests = {
+            f"sha256:{item.get('digests', {}).get('sha256', '')}".lower()
+            for item in data.get("urls", [])
+        }
+        if missing := set(dependency.digests) - published_digests:
+            raise ValueError(
+                f"PyPI has no file for locked hash {sorted(missing)[0]}"
+            )
         return max(parse_time(value) for value in uploads), url
     if dependency.ecosystem == "npm":
         data, url = request(
@@ -604,11 +862,13 @@ def evidence(dependency: Dependency) -> tuple[dt.datetime, str]:
 
 
 def validate_exact_version(ecosystem: str, version: str) -> None:
+    if ecosystem == "unparseable":
+        raise ValueError(version)
     if ecosystem == "github-commit" and not FULL_SHA.fullmatch(version):
         raise ValueError("GitHub commit exception must use a full lowercase SHA")
     if ecosystem == "oci" and not SHA256_DIGEST.fullmatch(version):
         raise ValueError("OCI exception must use a sha256 digest")
-    if ecosystem in {"mutable", "unparseable"} or UNSAFE_VERSION.search(version):
+    if ecosystem == "mutable" or UNSAFE_VERSION.search(version):
         raise ValueError("exception version must be one exact immutable coordinate")
 
 
@@ -656,6 +916,7 @@ def check(
     dependencies: list[Dependency],
     exceptions: dict[tuple[str, str, str], dict],
     now: dt.datetime,
+    cache: Optional[EvidenceCache] = None,
 ) -> list[Result]:
     results: list[Result] = []
     for dependency in dependencies:
@@ -666,13 +927,31 @@ def check(
         try:
             if dependency.ecosystem == "policy-exception":
                 status = "excepted"
-                detail = "approved latest dependency-policy reference"
+                detail = "approved first-party main reference"
             elif is_internal_github_dependency(dependency):
                 validate_exact_version(dependency.ecosystem, dependency.version)
                 status = "internal"
             else:
-                published, evidence_source = evidence(dependency)
-                eligible = published + COOLDOWN
+                validate_exact_version(dependency.ecosystem, dependency.version)
+                cached = (
+                    cache.get(dependency)
+                    if cache is not None and is_cacheable(dependency)
+                    else None
+                )
+                if cached is not None:
+                    publication = cached
+                else:
+                    published, evidence_source = evidence(dependency)
+                    publication = PublicationEvidence(
+                        published,
+                        published + COOLDOWN,
+                        evidence_source,
+                    )
+                    if cache is not None and is_cacheable(dependency):
+                        cache.put(dependency, publication)
+                published = publication.published_at
+                eligible = publication.eligible_at
+                evidence_source = publication.source
                 status = "eligible" if now >= eligible else "blocked"
         except UnverifiableEvidence as error:
             status = "unverifiable"
@@ -730,6 +1009,7 @@ def main() -> int:
         default=Path(".github/dependency-policy/exceptions.json"),
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--cache", type=Path)
     parser.add_argument("--now", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     REPOSITORY = arguments.repo.resolve()
@@ -737,10 +1017,14 @@ def main() -> int:
     exception_path = arguments.exceptions
     if not exception_path.is_absolute():
         exception_path = REPOSITORY / exception_path
+    cache_path = arguments.cache
+    if cache_path is not None and not cache_path.is_absolute():
+        cache_path = REPOSITORY / cache_path
+    cache = EvidenceCache.load(cache_path)
     try:
         dependencies = dependency_delta(arguments.base, arguments.head)
         exceptions = load_exceptions(exception_path, now)
-        results = check(dependencies, exceptions, now)
+        results = check(dependencies, exceptions, now, cache)
     except (
         json.JSONDecodeError,
         OSError,
@@ -750,12 +1034,24 @@ def main() -> int:
     ) as error:
         print(f"dependency-policy: {error}", file=sys.stderr)
         return 2
+    if cache_error := cache.save():
+        print(
+            f"dependency-policy: could not save evidence cache: {cache_error}",
+            file=sys.stderr,
+        )
     report = {
         "threshold_hours": 168,
         "base": arguments.base,
         "head": arguments.head,
         "results": [asdict(result) for result in results],
     }
+    if cache.path is not None:
+        report["cache"] = {
+            "entries": len(cache.entries),
+            "hits": cache.hits,
+            "misses": cache.misses,
+            "writes": cache.writes,
+        }
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if arguments.output:
         arguments.output.write_text(rendered)

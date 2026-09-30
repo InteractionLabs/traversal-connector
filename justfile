@@ -47,7 +47,8 @@ dependency-policy-check:
     python3 .github/actions/dependency-policy/repository_invariants.py --repo .
 
 dependency-policy-test:
-    python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_*.py'
+    python3 -m unittest discover -s .github/actions/dependency-policy -p 'test_vendor.py'
+    python3 -m pytest -q .github/actions/dependency-policy/test_policy.py
     just dependency-policy-check
 
 # Build and load an image for the current host platform.

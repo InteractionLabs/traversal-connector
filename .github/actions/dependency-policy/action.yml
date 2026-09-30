@@ -19,6 +19,10 @@ inputs:
     description: JSON evidence report path
     required: false
     default: dependency-policy-results.json
+  cache:
+    description: Publication evidence cache path
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -43,10 +47,16 @@ runs:
         INPUT_BASE_SHA: ${{ inputs.base-sha }}
         INPUT_HEAD_SHA: ${{ inputs.head-sha }}
         INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_CACHE: ${{ inputs.cache }}
       run: |
         set -euo pipefail
-        python3 "$GITHUB_ACTION_PATH/policy.py" \
-          --repo "$GITHUB_WORKSPACE" \
-          --base "$INPUT_BASE_SHA" \
-          --head "$INPUT_HEAD_SHA" \
+        arguments=(
+          --repo "$GITHUB_WORKSPACE"
+          --base "$INPUT_BASE_SHA"
+          --head "$INPUT_HEAD_SHA"
           --output "$INPUT_OUTPUT"
+        )
+        if [[ -n "$INPUT_CACHE" ]]; then
+          arguments+=(--cache "$INPUT_CACHE")
+        fi
+        python3 "$GITHUB_ACTION_PATH/policy.py" "${arguments[@]}"
