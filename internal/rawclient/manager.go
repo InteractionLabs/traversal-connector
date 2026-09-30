@@ -16,7 +16,10 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
-var errShutdown = errors.New("raw tunnels are shutting down")
+var (
+	errShutdown        = errors.New("raw tunnels are shutting down")
+	errSessionCapacity = errors.New("raw tunnel session capacity reached")
+)
 
 // clientFactory opens one HTTP/2 client that shares no connection with any
 // other client. Tests replace it; production uses client.NewIsolatedClient.
@@ -37,6 +40,7 @@ type Manager struct {
 	mu           sync.Mutex
 	sessions     []*session
 	active       int
+	connecting   int
 	draining     int
 	shuttingDown bool
 	cancel       context.CancelFunc
@@ -44,6 +48,15 @@ type Manager struct {
 	started      chan struct{}
 	wg           sync.WaitGroup
 	shutdownOnce sync.Once
+}
+
+// sessionBound caps active + connecting + draining. MaxTunnels active slots
+// may each keep one drained predecessor while its replacement connects, so
+// the bound is 2×MaxTunnels. Empty drained tunnels are closed locally and a
+// ShutdownGrace deadline force-closes ones that still have pipes, so the
+// draining set cannot grow without limit across repeated controller DRAINs.
+func (m *Manager) sessionBound() int {
+	return 2 * m.cfg.RawTunnel.MaxTunnels
 }
 
 // New builds a manager. When raw tunnels are disabled it does not dial and
@@ -213,10 +226,32 @@ func (m *Manager) watch(sess *session, next chan struct{}) {
 	}
 }
 
-func (m *Manager) openSession(ctx context.Context) (*session, error) {
-	if m.isShutdown() {
-		return nil, errShutdown
+// retireDraining closes a drained tunnel once it has no pipes left, or when
+// ShutdownGrace elapses so a drained tunnel with lingering pipes cannot keep
+// its TCP connection forever across rotations.
+func (m *Manager) retireDraining(sess *session) {
+	grace := m.cfg.RawTunnel.ShutdownGrace
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-sess.mux.Drained():
+	case <-timer.C:
+	case <-sess.mux.Done():
+		return
 	}
+	sess.mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+}
+
+func (m *Manager) openSession(ctx context.Context) (*session, error) {
+	if err := m.reserveSession(); err != nil {
+		return nil, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			m.releaseConnecting()
+		}
+	}()
 	rpc, cleanup, err := m.newRPC()
 	if err != nil {
 		return nil, err
@@ -263,11 +298,36 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 		return nil, errShutdown
 	}
 	m.sessions = append(m.sessions, sess)
+	m.connecting--
 	m.active++
+	reserved = false
 	m.mu.Unlock()
 	m.metrics.addActive(1)
 	m.log.Info("raw tunnel established", "tunnel_id", tunnelID)
 	return sess, nil
+}
+
+// reserveSession claims one connecting slot under the session bound so a
+// replacement cannot open while drained-but-open tunnels already fill it.
+func (m *Manager) reserveSession() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.shuttingDown {
+		return errShutdown
+	}
+	if m.active+m.connecting+m.draining >= m.sessionBound() {
+		return errSessionCapacity
+	}
+	m.connecting++
+	return nil
+}
+
+func (m *Manager) releaseConnecting() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.connecting > 0 {
+		m.connecting--
+	}
 }
 
 func (m *Manager) markDraining(sess *session) bool {
@@ -289,6 +349,7 @@ func (m *Manager) markDraining(sess *session) bool {
 		reason = pb.RawDrainReason_RAW_DRAIN_REASON_SHUTDOWN
 	}
 	m.metrics.drain(reason)
+	go m.retireDraining(sess)
 	return replace
 }
 

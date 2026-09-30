@@ -264,10 +264,10 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	t.Fatal("condition not met")
 }
 
-func (m *Manager) snapshot() (active, draining int) {
+func (m *Manager) snapshot() (active, draining, sessions, connecting int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.active, m.draining
+	return m.active, m.draining, len(m.sessions), m.connecting
 }
 
 func discardLogs() *slog.Logger {

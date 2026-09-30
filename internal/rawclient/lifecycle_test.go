@@ -12,8 +12,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -40,10 +44,10 @@ func startManager(t *testing.T, cfg *config.Config, policy *dialpolicy.Policy) *
 	return m
 }
 
-func recvMux(t *testing.T, ctrl *muxCtrl) *rawtunnel.Mux {
+func recvMux(t *testing.T, ready <-chan *rawtunnel.Mux) *rawtunnel.Mux {
 	t.Helper()
 	select {
-	case mux := <-ctrl.ready:
+	case mux := <-ready:
 		return mux
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for a raw tunnel")
@@ -82,7 +86,7 @@ func TestRawTunnelsUseSeparateConnections(t *testing.T) {
 	t.Cleanup(m.Shutdown)
 
 	waitFor(t, 3*time.Second, func() bool {
-		active, _ := m.snapshot()
+		active, _, _, _ := m.snapshot()
 		return active == 2
 	})
 	ports := map[string]bool{}
@@ -140,9 +144,9 @@ func TestIsolatedClientSpeaksTLS(t *testing.T) {
 	cfg.TLSCA = &certPEM
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
-	recvMux(t, ctrl)
+	recvMux(t, ctrl.ready)
 	waitFor(t, 3*time.Second, func() bool {
-		active, _ := m.snapshot()
+		active, _, _, _ := m.snapshot()
 		return active == 1
 	})
 }
@@ -193,7 +197,7 @@ func TestUnansweredPingDoesNotDropTheTunnel(t *testing.T) {
 	// that an unanswered ping would already have dropped the tunnel if it were
 	// treated as a failure. A second hello would mean the slot reconnected.
 	time.Sleep(1500 * time.Millisecond)
-	if active, _ := m.snapshot(); active != 1 {
+	if active, _, _, _ := m.snapshot(); active != 1 {
 		t.Fatalf("active tunnels = %d after an unanswered ping", active)
 	}
 	if got := ctrl.tunnels.Load(); got != 1 {
@@ -248,12 +252,127 @@ func TestIdleRotationReplacesWithoutBackoff(t *testing.T) {
 	m.Start()
 	t.Cleanup(m.Shutdown)
 
-	first := recvMux(t, ctrl)
+	first := recvMux(t, ctrl.ready)
 	first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
 	first.Close(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST)
 	started := time.Now()
-	_ = recvMux(t, ctrl)
+	_ = recvMux(t, ctrl.ready)
 	if time.Since(started) > 2*time.Second {
 		t.Fatalf("replacement waited %s, want the reconnect backoff skipped", time.Since(started))
+	}
+}
+
+// TestRepeatedDrainKeepsSessionsBounded is the race-tested regression for
+// controller-driven rotation that keeps each drained stream open: without a
+// session bound and local empty-drain retirement, MaxTunnels=1 grew to
+// sessions=7 active=1 draining=6 after six rotations.
+func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
+	ctrl := newStickyDrainCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	cfg := baseConfig(srv.url)
+	cfg.RawTunnel.MaxTunnels = 1
+	cfg.RawTunnel.ShutdownGrace = 200 * time.Millisecond
+	m := startManager(t, cfg, nil)
+	t.Cleanup(m.Shutdown)
+
+	bound := 2 // sessionBound = 2 * MaxTunnels
+	first := recvMux(t, ctrl.ready)
+	for i := range 6 {
+		first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+		next := recvMux(t, ctrl.ready)
+		waitFor(t, 3*time.Second, func() bool {
+			active, draining, sessions, connecting := m.snapshot()
+			total := active + draining + connecting
+			return active == 1 && draining == 0 && connecting == 0 &&
+				sessions == 1 && total <= bound &&
+				ctrl.live.Load() <= int32(bound)
+		})
+		active, draining, sessions, connecting := m.snapshot()
+		total := active + draining + connecting
+		if total > bound || sessions > bound {
+			t.Fatalf(
+				"rotation %d: active=%d draining=%d connecting=%d sessions=%d (bound %d)",
+				i+1, active, draining, connecting, sessions, bound,
+			)
+		}
+		if live := ctrl.live.Load(); live > int32(bound) {
+			t.Fatalf("rotation %d: controller still has %d live streams", i+1, live)
+		}
+		first = next
+	}
+	active, draining, sessions, connecting := m.snapshot()
+	if active != 1 || draining != 0 || connecting != 0 || sessions != 1 {
+		t.Fatalf(
+			"final: active=%d draining=%d connecting=%d sessions=%d",
+			active, draining, connecting, sessions,
+		)
+	}
+	if live := ctrl.live.Load(); live > int32(bound) {
+		t.Fatalf("final live streams = %d, want <= %d", live, bound)
+	}
+}
+
+// stickyDrainCtrl speaks the mux and leaves drained streams open until the
+// connector retires them. That is the unbounded-accumulation case.
+type stickyDrainCtrl struct {
+	connectorconnect.UnimplementedConnectorServiceHandler
+	ready chan *rawtunnel.Mux
+	live  atomic.Int32
+}
+
+func newStickyDrainCtrl() *stickyDrainCtrl {
+	return &stickyDrainCtrl{ready: make(chan *rawtunnel.Mux, 8)}
+}
+
+func (c *stickyDrainCtrl) RawTunnel(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+) error {
+	c.live.Add(1)
+	defer c.live.Add(-1)
+	if _, err := stream.Receive(); err != nil {
+		return err
+	}
+	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
+		ControllerHello: &pb.RawControllerHello{
+			ProtocolVersion: rawtunnel.ProtocolVersion,
+			TunnelId:        uuid.NewString(),
+		},
+	}}); err != nil {
+		return err
+	}
+	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
+	mux, err := rawtunnel.New(rawtunnel.Config{
+		Role:         rawtunnel.RoleController,
+		MaxPipes:     128,
+		IdleTimeout:  time.Hour,
+		MaxLifetime:  time.Hour,
+		PingInterval: time.Hour,
+		Abort: func() {
+			now := time.Now()
+			_ = rc.SetReadDeadline(now)
+			_ = rc.SetWriteDeadline(now)
+		},
+	}, stream)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.ready <- mux:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return mux.Run(ctx)
+}
+
+func (c *stickyDrainCtrl) Tunnel(
+	_ context.Context,
+	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
+) error {
+	for {
+		if _, err := stream.Receive(); err != nil {
+			return nil
+		}
 	}
 }
