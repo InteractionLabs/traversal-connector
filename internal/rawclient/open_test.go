@@ -484,6 +484,80 @@ func openRefusal(
 	return openErr.Reason
 }
 
+func TestCancelledDialIsNotAuditedAsDialFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(*rawtunnel.Mux, *rawtunnel.Pipe, *Manager)
+	}{
+		{
+			name: "reset",
+			end: func(_ *rawtunnel.Mux, pipe *rawtunnel.Pipe, _ *Manager) {
+				pipe.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+			},
+		},
+		{
+			name: "tunnel-lost",
+			end: func(mux *rawtunnel.Mux, _ *rawtunnel.Pipe, _ *Manager) {
+				mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST)
+			},
+		},
+		{
+			name: "shutdown",
+			end: func(_ *rawtunnel.Mux, _ *rawtunnel.Pipe, m *Manager) {
+				m.Shutdown()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, buf := jsonLogger()
+			ctrl := newMuxCtrl()
+			srv := serveH2C(t, ctrl)
+			t.Cleanup(srv.close)
+			var dialOnce sync.Once
+			started := make(chan struct{})
+			policy := directPolicy(t,
+				func(context.Context, string, string) ([]netip.Addr, error) {
+					return []netip.Addr{checkedAddr()}, nil
+				},
+				func(ctx context.Context, _, _ string) (net.Conn, error) {
+					dialOnce.Do(func() { close(started) })
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			)
+			cfg := baseConfig(srv.url)
+			cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+			m := startLogged(t, cfg, policy, logger)
+			var shutdownOnce sync.Once
+			t.Cleanup(func() { shutdownOnce.Do(m.Shutdown) })
+			mux := recvMux(t, ctrl.ready)
+			pipe, err := mux.Open(
+				sign(t, "jti-cancel-"+tc.name), testHost, testPort,
+				pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("dial did not start")
+			}
+			tc.end(mux, pipe, m)
+			select {
+			case <-pipe.Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("pipe did not finish")
+			}
+			text := buf.String()
+			if strings.Contains(text, "DIAL_FAILED") ||
+				strings.Contains(text, `"outcome":"refused"`) {
+				t.Fatalf("cancelled dial was audited as a refusal: %s", text)
+			}
+		})
+	}
+}
+
 func startLogged(
 	t *testing.T, cfg *config.Config, policy *dialpolicy.Policy, logger *slog.Logger,
 ) *Manager {

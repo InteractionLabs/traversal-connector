@@ -203,6 +203,13 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 	)
 	if err != nil {
 		o.pipes.release()
+		// Reset, tunnel loss, and shutdown cancel the pipe while dial is in
+		// flight. The pipe already has a terminal reason. Recording a dial
+		// refusal would blame the destination for a peer that went away.
+		// Open timeout cancels only dialCtx, so a live pipe still records it.
+		if p.Context().Err() != nil && !errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		o.refuse(tunnelID, open, p, &verified.Claims, dialFailure(err), dialDetail(err))
 		return
 	}
