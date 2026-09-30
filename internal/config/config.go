@@ -43,6 +43,7 @@ const (
 	defaultRawMaxPipesPerPod       = 200
 	defaultRawIdleTimeout          = 15 * time.Minute
 	defaultRawMaxLifetime          = 4 * time.Hour
+	defaultRawOpenTimeout          = 30 * time.Second
 	defaultRawPingInterval         = 30 * time.Second
 	defaultRawShutdownGrace        = 30 * time.Second
 	minRawWindowBytes              = 16 << 10
@@ -184,7 +185,10 @@ type RawTunnelConfig struct {
 	MaxPipesPerPod    int
 	IdleTimeout       time.Duration
 	MaxLifetime       time.Duration
-	PingInterval      time.Duration
+	// OpenTimeout bounds dial and forward-proxy handshake before OPENED.
+	// Maximum pipe lifetime (MaxLifetime) begins at OPENED / Start, not OPEN.
+	OpenTimeout  time.Duration
+	PingInterval time.Duration
 	// ShutdownGrace bounds both process shutdown and tunnel rotation. Shutdown
 	// waits this long, then closes remaining pipes with connector_terminating.
 	// A rotation that still has pipes when the grace elapses closes them with
@@ -668,6 +672,11 @@ func loadRawTunnelConfig() (RawTunnelConfig, error) {
 	); err != nil {
 		return RawTunnelConfig{}, err
 	}
+	if cfg.OpenTimeout, err = env.ParseDuration(
+		"RAW_TUNNEL_OPEN_TIMEOUT", defaultRawOpenTimeout,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
 	if cfg.PingInterval, err = env.ParseDuration(
 		"RAW_TUNNEL_PING_INTERVAL", defaultRawPingInterval,
 	); err != nil {
@@ -723,8 +732,8 @@ func (r RawTunnelConfig) validate() error {
 	if r.MaxPipesPerTunnel > 1_000_000 || r.MaxPipesPerPod > 1_000_000 {
 		return errors.New("raw tunnel pipe limits are too large")
 	}
-	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.ShutdownGrace <= 0 ||
-		r.PingInterval <= 0 {
+	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.OpenTimeout <= 0 ||
+		r.ShutdownGrace <= 0 || r.PingInterval <= 0 {
 		return errors.New("raw tunnel timeouts must be positive")
 	}
 	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||

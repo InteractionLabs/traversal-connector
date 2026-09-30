@@ -103,6 +103,7 @@ func baseConfig(controllerURL string) *config.Config {
 			MaxPipesPerPod:      200,
 			IdleTimeout:         time.Hour,
 			MaxLifetime:         time.Hour,
+			OpenTimeout:         time.Second,
 			PingInterval:        time.Hour,
 			ShutdownGrace:       time.Second,
 			Issuer:              testIssuer,

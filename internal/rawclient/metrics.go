@@ -27,6 +27,7 @@ type rawMetrics struct {
 	halfCloses      metric.Int64Counter
 	drains          metric.Int64Counter
 	reconnects      metric.Int64Counter
+	resets          metric.Int64Counter
 	clockSkew       metric.Float64Histogram
 }
 
@@ -123,6 +124,15 @@ func newRawMetrics() (*rawMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("raw reconnects: %w", err)
 	}
+	m.resets, err = meter.Int64Counter(
+		telemetry.MetricRawResetsTotal,
+		metric.WithDescription(
+			"Raw pipe RESET frames sent or received, by origin and reason",
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("raw resets: %w", err)
+	}
 	m.clockSkew, err = meter.Float64Histogram(
 		telemetry.MetricRawClockSkew,
 		metric.WithDescription(
@@ -184,6 +194,14 @@ func (m *rawMetrics) drain(reason pb.RawDrainReason) {
 }
 
 func (m *rawMetrics) reconnect() { m.reconnects.Add(context.Background(), 1) }
+
+func (m *rawMetrics) reset(origin, phase string, reason pb.RawCloseReason) {
+	m.resets.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("origin", origin),
+		attribute.String("phase", phase),
+		attribute.String("reason", reason.String()),
+	))
+}
 
 func (m *rawMetrics) skew(d time.Duration) {
 	m.clockSkew.Record(context.Background(), d.Seconds())

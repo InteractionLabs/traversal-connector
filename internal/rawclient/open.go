@@ -1,6 +1,7 @@
 package rawclient
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
@@ -173,6 +174,14 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 			"port is invalid")
 		return
 	}
+	// Reserve pod capacity before Verify so repeated capacity refusals cannot
+	// exhaust a valid capability's per-jti open budget.
+	if !o.pipes.tryAcquire() {
+		o.refuse(tunnelID, open, p, nil,
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY,
+			"connector pipe capacity reached")
+		return
+	}
 	verified, err := o.verifier.Verify(open.GetCapability(), capability.Expected{
 		ConnectorID: o.cfg.ConnectorID,
 		Host:        open.GetHost(),
@@ -180,24 +189,21 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 		Mode:        open.GetMode(),
 	})
 	if err != nil {
+		o.pipes.release()
 		o.refuse(tunnelID, open, p, nil, openFailure(err), failureDetail(err))
 		return
 	}
 	o.metrics.skew(verified.ClockSkew)
-	// Count the pipe, including ones still running on a draining tunnel,
-	// before dialing so a full pod never opens another socket.
-	if !o.pipes.tryAcquire() {
-		o.refuse(tunnelID, open, p, &verified.Claims,
-			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY,
-			"connector pipe capacity reached")
-		return
-	}
+	// OpenTimeout bounds dial and forward-proxy handshake before OPENED.
+	// Maximum pipe lifetime (MaxLifetime) begins at OPENED / Start, not OPEN.
+	dialCtx, cancel := context.WithTimeout(p.Context(), o.cfg.RawTunnel.OpenTimeout)
+	defer cancel()
 	conn, _, err := o.policy.Dial(
-		p.Context(), verified.Claims.Host, verified.Claims.Port,
+		dialCtx, verified.Claims.Host, verified.Claims.Port,
 	)
 	if err != nil {
 		o.pipes.release()
-		o.refuse(tunnelID, open, p, &verified.Claims, openFailure(err), failureDetail(err))
+		o.refuse(tunnelID, open, p, &verified.Claims, dialFailure(err), dialDetail(err))
 		return
 	}
 	counted := &countingConn{Conn: conn, onHalf: o.metrics.halfClose}
@@ -323,6 +329,13 @@ func openFailure(err error) pb.RawOpenFailureReason {
 	return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_DIAL_FAILED
 }
 
+func dialFailure(err error) pb.RawOpenFailureReason {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_OPEN_TIMEOUT
+	}
+	return openFailure(err)
+}
+
 func failureDetail(err error) string {
 	var capErr *capability.Error
 	if errors.As(err, &capErr) {
@@ -333,6 +346,13 @@ func failureDetail(err error) string {
 		return refusal.Error()
 	}
 	return "dial failed"
+}
+
+func dialDetail(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "open timed out"
+	}
+	return failureDetail(err)
 }
 
 // countingConn reports a directional half-close without closing the other

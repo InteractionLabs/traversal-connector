@@ -273,6 +273,7 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 		PingInterval:  m.cfg.RawTunnel.PingInterval,
 		Hello:         m.hello.message(),
 		OnControlDrop: m.metrics.controlDrop,
+		OnReset:       m.metrics.reset,
 		Abort: func() {
 			cancel()
 			stop()

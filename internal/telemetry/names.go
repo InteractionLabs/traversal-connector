@@ -34,4 +34,5 @@ const (
 	MetricRawDrainsTotal                   = "connector.raw_drains_total"
 	MetricRawReconnectsTotal               = "connector.raw_reconnects_total"
 	MetricRawClockSkew                     = "connector.raw_clock_skew"
+	MetricRawResetsTotal                   = "connector.raw_resets_total"
 )

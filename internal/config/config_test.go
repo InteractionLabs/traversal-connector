@@ -1020,6 +1020,7 @@ func disabledRawTunnel() RawTunnelConfig {
 		MaxPipesPerPod:    200,
 		IdleTimeout:       15 * time.Minute,
 		MaxLifetime:       4 * time.Hour,
+		OpenTimeout:       30 * time.Second,
 		PingInterval:      30 * time.Second,
 		ShutdownGrace:     30 * time.Second,
 	}

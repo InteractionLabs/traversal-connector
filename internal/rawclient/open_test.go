@@ -180,6 +180,83 @@ func TestPodCapacityRefusesBeforeDial(t *testing.T) {
 	}
 }
 
+// TestCapacityRefusalsDoNotConsumeJTI fills the pod, receives capacity
+// refusals on the same jti, drains the held pipe, and checks the open budget
+// is unchanged: capacity checks run before Verify consumes a use.
+func TestCapacityRefusalsDoNotConsumeJTI(t *testing.T) {
+	ln := listen(t)
+	var dials atomic.Int32
+	policy := countingPolicy(t, ln, &dials)
+	ctrl, m, _ := running(t, policy, func(cfg *config.Config) {
+		cfg.RawTunnel.MaxPipesPerPod = 1
+	})
+	t.Cleanup(m.Shutdown)
+	mux := recvMux(t, ctrl)
+	token := sign(t, "jti-budget")
+	held, err := openHeld(t, mux, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 8 {
+		if reason := openRefusal(t, mux, token); reason !=
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY {
+			t.Fatalf("reason %s", reason)
+		}
+	}
+	held.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+	select {
+	case <-held.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("held pipe did not finish")
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		slots := m.opener.pipes
+		slots.mu.Lock()
+		defer slots.mu.Unlock()
+		return slots.n == 0
+	})
+	// One use was spent on the held pipe; capacity refusals must not have
+	// spent any. The remaining budget is MaxOpensPerToken - 1.
+	for i := range capabilityOpens() - 1 {
+		pipe, peer := openPipe(t, mux, token)
+		_ = peer.Close()
+		pipe.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+		select {
+		case <-pipe.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("pipe %d did not finish", i)
+		}
+	}
+	if reason := openRefusal(t, mux, token); reason !=
+		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPABILITY_EXHAUSTED {
+		t.Fatalf("reason %s after exhausting remaining budget", reason)
+	}
+}
+
+func TestOpenDialTimeout(t *testing.T) {
+	policy := directPolicy(t,
+		func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{checkedAddr()}, nil
+		},
+		func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	)
+	ctrl, m, _ := running(t, policy, func(cfg *config.Config) {
+		cfg.RawTunnel.OpenTimeout = 50 * time.Millisecond
+	})
+	t.Cleanup(m.Shutdown)
+	started := time.Now()
+	reason := openRefusal(t, recvMux(t, ctrl), sign(t, "jti-dial-timeout"))
+	if reason != pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_OPEN_TIMEOUT {
+		t.Fatalf("reason %s", reason)
+	}
+	if d := time.Since(started); d > 2*time.Second {
+		t.Fatalf("dial timeout took %s", d)
+	}
+}
+
 func TestCapabilityExhaustedDoesNotDial(t *testing.T) {
 	ln := listen(t)
 	var dials atomic.Int32
@@ -458,35 +535,85 @@ func TestTCPPortDoesNotTruncate(t *testing.T) {
 	}
 }
 
-func TestCapacityRefusalRecordsTheVerifiedPipe(t *testing.T) {
-	logger, buf := jsonLogger()
-	ln := listen(t)
-	ctrl := newMuxCtrl()
-	srv := serveH2C(t, ctrl)
-	t.Cleanup(srv.close)
-	cfg := baseConfig(srv.url)
-	cfg.RawTunnel.MaxPipesPerPod = 1
-	m := startLogged(t, cfg, countingPolicy(t, ln, new(atomic.Int32)), logger)
-	var once sync.Once
-	stop := func() { once.Do(m.Shutdown) }
-	t.Cleanup(stop)
+func TestResetMetricsSentAndReceived(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	ctrl, m, ln := running(t, nil, nil)
+	t.Cleanup(m.Shutdown)
 	mux := recvMux(t, ctrl)
-	if _, err := openHeld(t, mux, sign(t, "jti-held")); err != nil {
+
+	dstCh := acceptOne(ln)
+	received, _ := openPipe(t, mux, sign(t, "jti-reset-recv"))
+	<-dstCh
+	received.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+	select {
+	case <-received.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("received reset pipe did not finish")
+	}
+
+	dstCh = acceptOne(ln)
+	sent, peer := openPipe(t, mux, sign(t, "jti-reset-sent"))
+	dst := <-dstCh
+	if tc, ok := dst.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = dst.Close()
+	_, _ = peer.Write([]byte("x"))
+	select {
+	case <-sent.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("sent reset pipe did not finish")
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &rm); err != nil {
 		t.Fatal(err)
 	}
-	token := sign(t, "jti-capacity")
-	if reason := openRefusal(t, mux, token); reason !=
-		pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY {
-		t.Fatalf("reason %s", reason)
+	points := sumPoints(t, rm, telemetry.MetricRawResetsTotal)
+	if len(points) == 0 {
+		t.Fatal("no reset metric")
 	}
-	stop()
-	text := buf.String()
-	if strings.Contains(text, token) {
-		t.Fatal("audit log contains the capability")
-	}
-	for _, want := range []string{"jti-capacity", "org-1", "session-1", testHost} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("audit log missing %s: %s", want, text)
+	var sawSent, sawReceived bool
+	for _, point := range points {
+		var origin, reason string
+		for _, attr := range point.Attributes.ToSlice() {
+			switch attr.Key {
+			case "host", "jti", "pipe_id", "destination", "capability":
+				t.Fatalf("unbounded label %s", attr.Key)
+			case "origin":
+				origin = attr.Value.String()
+			case "reason":
+				reason = attr.Value.String()
+			case "phase":
+				if attr.Value.String() != "open" && attr.Value.String() != "opening" {
+					t.Fatalf("phase %q", attr.Value.String())
+				}
+			}
 		}
+		if point.Value < 1 {
+			continue
+		}
+		switch origin {
+		case "received":
+			sawReceived = true
+			if reason != pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED.String() {
+				t.Fatalf("received reason %s", reason)
+			}
+		case "sent":
+			sawSent = true
+		default:
+			t.Fatalf("origin %q", origin)
+		}
+	}
+	if !sawReceived {
+		t.Fatal("missing received reset metric")
+	}
+	if !sawSent {
+		t.Fatal("missing sent reset metric")
 	}
 }
