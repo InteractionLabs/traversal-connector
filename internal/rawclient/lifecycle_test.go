@@ -9,12 +9,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"sync/atomic"
 	"testing"
@@ -28,7 +30,9 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawtunnel"
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/env"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/router"
 )
 
 func startManager(t *testing.T, cfg *config.Config, policy *dialpolicy.Policy) *Manager {
@@ -207,10 +211,104 @@ func TestUnansweredPingDoesNotDropTheTunnel(t *testing.T) {
 }
 
 func TestIncompatibleRawHelloLeavesLegacyTunnelUp(t *testing.T) {
-	bad := &badVersionCtrl{calls: make(chan struct{}, 8)}
-	srv := serveH2C(t, bad)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("legacy-ok"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	probe := make(chan struct{})
+	ctrl := &legacyServingCtrl{
+		upstreamURL:    upstream.URL,
+		wantConcurrent: 7,
+		probe:          probe,
+		result:         make(chan legacyProbeResult, 1),
+		rawCalls:       make(chan struct{}, 8),
+	}
+	srv := serveH2C(t, ctrl)
 	t.Cleanup(srv.close)
 	cfg := baseConfig(srv.url)
+	cfg.MaxConcurrentRequests = 7
+	cm, err := client.NewConnectionManager(cfg, redact.NewRedactor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = cm.Run(ctx) }()
+	waitFor(t, 3*time.Second, func() bool { return cm.ActiveCount() == 1 })
+	assertReady(t, cm, 1)
+
+	m := startManager(t, cfg, nil)
+	t.Cleanup(m.Shutdown)
+	for range 2 {
+		select {
+		case <-ctrl.rawCalls:
+		case <-time.After(2 * time.Second):
+			t.Fatal("raw tunnel did not retry an incompatible hello")
+		}
+	}
+	if got := cm.ActiveCount(); got != 1 {
+		t.Fatalf("legacy tunnels = %d, want 1", got)
+	}
+	close(probe)
+	assertLegacyProbe(t, ctrl, "legacy-ok", 7)
+	assertReady(t, cm, 1)
+}
+
+func TestLegacyServesWithRawDisabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("raw-off"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	ctrl := &legacyServingCtrl{
+		upstreamURL:    upstream.URL,
+		wantConcurrent: 5,
+		result:         make(chan legacyProbeResult, 1),
+	}
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	cfg := baseConfig(srv.url)
+	cfg.RawTunnel.Enabled = false
+	cfg.MaxConcurrentRequests = 5
+	cm, err := client.NewConnectionManager(cfg, redact.NewRedactor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = cm.Run(ctx) }()
+	waitFor(t, 3*time.Second, func() bool { return cm.ActiveCount() == 1 })
+	assertReady(t, cm, 1)
+
+	m := startManager(t, cfg, nil)
+	t.Cleanup(m.Shutdown)
+	time.Sleep(100 * time.Millisecond)
+	if active, draining := m.snapshot(); active != 0 || draining != 0 {
+		t.Fatalf("disabled raw manager opened tunnels: active=%d draining=%d", active, draining)
+	}
+	assertLegacyProbe(t, ctrl, "raw-off", 5)
+	assertReady(t, cm, 1)
+}
+
+func TestLegacyServesWhileRawTunnelDraining(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("while-draining"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	probe := make(chan struct{})
+	ctrl := &legacyServingCtrl{
+		upstreamURL:    upstream.URL,
+		wantConcurrent: 4,
+		probe:          probe,
+		result:         make(chan legacyProbeResult, 1),
+		rawReady:       make(chan *rawtunnel.Mux, 8),
+	}
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	cfg := baseConfig(srv.url)
+	cfg.MaxConcurrentRequests = 4
 	cm, err := client.NewConnectionManager(cfg, redact.NewRedactor())
 	if err != nil {
 		t.Fatal(err)
@@ -222,15 +320,82 @@ func TestIncompatibleRawHelloLeavesLegacyTunnelUp(t *testing.T) {
 
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
-	for range 2 {
-		select {
-		case <-bad.calls:
-		case <-time.After(2 * time.Second):
-			t.Fatal("raw tunnel did not retry an incompatible hello")
-		}
+	var first *rawtunnel.Mux
+	select {
+	case first = <-ctrl.rawReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for a raw tunnel")
 	}
+	first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	select {
+	case <-ctrl.rawReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for replacement raw tunnel")
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		active, draining := m.snapshot()
+		return active == 1 && draining == 1
+	})
 	if got := cm.ActiveCount(); got != 1 {
 		t.Fatalf("legacy tunnels = %d, want 1", got)
+	}
+	close(probe)
+	assertLegacyProbe(t, ctrl, "while-draining", 4)
+	assertReady(t, cm, 1)
+}
+
+func assertLegacyProbe(
+	t *testing.T, ctrl *legacyServingCtrl, wantBody string, wantConcurrent int32,
+) {
+	t.Helper()
+	select {
+	case got := <-ctrl.result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.status != http.StatusOK {
+			t.Fatalf("legacy http status = %d, want %d", got.status, http.StatusOK)
+		}
+		if got.body != wantBody {
+			t.Fatalf("legacy http body = %q, want %q", got.body, wantBody)
+		}
+		if got.concurrent != wantConcurrent {
+			t.Fatalf(
+				"MaxConcurrentRequests = %d, want %d",
+				got.concurrent, wantConcurrent,
+			)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for legacy probe")
+	}
+}
+
+func assertReady(t *testing.T, cm *client.ConnectionManager, wantTunnels int) {
+	t.Helper()
+	cfg := config.Config{
+		EnvLevel:        env.EnvLevelDevelopment,
+		OTELServiceName: "test",
+	}
+	r := router.NewRouter(cfg, cm)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("readyz status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var body struct {
+		Status        string `json:"status"`
+		ActiveTunnels int    `json:"active_tunnels"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ready" || body.ActiveTunnels != wantTunnels {
+		t.Fatalf("readyz body = %+v, want ready with %d tunnels", body, wantTunnels)
 	}
 }
 

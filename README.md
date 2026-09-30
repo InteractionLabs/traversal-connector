@@ -286,7 +286,10 @@ Raw tunnels are off unless `RAW_TUNNEL_ENABLED=true`. Leaving them off changes
 nothing: the same number of legacy tunnels, the same readiness and health
 behavior, and the same process exit timing. Turning them on does not change
 the customer hostname, port 443, mTLS identity, or firewall rules. A connector
-that cannot open a raw tunnel keeps serving legacy tunnels.
+that cannot open a raw tunnel keeps serving legacy tunnels. Binary tests cover
+legacy request/response behavior with raw disabled and with raw enabled but
+incompatible or draining, including unchanged concurrency advertisement and
+readiness.
 
 Pipes are checked in order: capability, exact host and port, redaction, DNS,
 forbidden addresses, then dial. A destination covered by any redaction rule is
@@ -297,19 +300,21 @@ proxy for those dials is `HTTPS_PROXY` / `NO_PROXY`, which is separate from
 
 `RAW_TUNNEL_MAX_PIPES_PER_POD` counts pipes on draining tunnels too, so a
 rotation cannot grow memory without a bound, and it must be at least
-`RAW_TUNNEL_MAX_PIPES_PER_TUNNEL`. New pipes may be refused with `capacity`
-until the old ones finish. Ping, idle, and lifetime must be at least one
-second, and idle must not be longer than the lifetime. The next key id must
-differ from the current one. On SIGTERM the connector stops admitting pipes,
-waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains. The pod's
+`RAW_TUNNEL_MAX_PIPES_PER_TUNNEL`. Hard ceilings reject configs that would
+exhaust the process: at most 64 active raw tunnels, 2048 pipes per tunnel, and
+4096 pipes per pod. New pipes may be refused with `capacity` until the old ones
+finish. Ping, idle, and lifetime must be at least one second, and idle must not
+be longer than the lifetime. The next key id must differ from the current one.
+On SIGTERM the connector stops admitting pipes, waits
+`RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS`, then closes what remains. The pod's
 termination grace must be longer than that wait.
 
 | Variable | Default | Description |
 |---|---|---|
 | `RAW_TUNNEL_ENABLED` | `false` | Open raw tunnels alongside the legacy ones. |
-| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod. Draining tunnels are extra. |
-| `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel. |
-| `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels. |
+| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Draining tunnels are extra. |
+| `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel (hard max 2048). |
+| `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels (hard max 4096). |
 | `RAW_TUNNEL_IDLE_TIMEOUT` | `15m` | Close a pipe that moves no bytes for this long. |
 | `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. |
 | `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. An unanswered ping does not close it. |
@@ -321,7 +326,7 @@ termination grace must be longer than that wait.
 | `RAW_TUNNEL_NEXT_KEY_ID` | (none) | `kid` trusted during a key rotation. Set with the next public key. |
 | `RAW_TUNNEL_NEXT_PUBLIC_KEY` | (none) | Next PKIX P-256 public key, PEM or base64-encoded PEM. |
 | `RAW_TUNNEL_FORBIDDEN_CIDRS` | (none) | Extra comma-separated CIDRs a pipe must never dial. |
-| `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS` | `false` | Allow proxied dials to hostnames. Leave false unless the proxy itself refuses loopback, link-local, and metadata addresses. |
+| `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS` | `false` | Allow proxied dials to hostnames. Leave false unless the customer's forward proxy enforces the full direct-dial safety floor itself: connector-local interface addresses, configured `RAW_TUNNEL_FORBIDDEN_CIDRS`, loopback, link-local (including cloud metadata), multicast, unspecified/reserved ranges, NAT64-embedded forbidden IPv4, and the well-known metadata/localhost hostnames. Proxy mode is not production-canary eligible until those delegated behaviors are verified. |
 
 ### mTLS to the control plane
 

@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -234,6 +235,155 @@ func (c *badVersionCtrl) Tunnel(
 		default:
 		}
 	}
+}
+
+// legacyProbeResult is what a controller saw from one legacy tunnel exchange.
+type legacyProbeResult struct {
+	status     int32
+	body       string
+	concurrent int32
+	err        error
+}
+
+// legacyServingCtrl speaks the legacy Tunnel RPC: after the connector's
+// opening health check it can send an HTTP request and a metadata request
+// and record the replies. Optional raw handlers cover coexistence cases.
+type legacyServingCtrl struct {
+	connectorconnect.UnimplementedConnectorServiceHandler
+	upstreamURL    string
+	wantConcurrent int32
+	// probe is closed (or receives) when the test wants the HTTP/metadata
+	// exchange. Nil means probe as soon as the tunnel is up.
+	probe  <-chan struct{}
+	result chan legacyProbeResult
+
+	rawCalls chan struct{}
+	rawReady chan *rawtunnel.Mux
+}
+
+func (c *legacyServingCtrl) Tunnel(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
+) error {
+	if _, err := stream.Receive(); err != nil {
+		c.result <- legacyProbeResult{err: err}
+		return err
+	}
+	if c.probe != nil {
+		select {
+		case <-c.probe:
+		case <-ctx.Done():
+			c.result <- legacyProbeResult{err: ctx.Err()}
+			return ctx.Err()
+		}
+	}
+	const reqID = "legacy-http"
+	if err := stream.Send(&pb.ControllerMessage{
+		RequestId: reqID,
+		Message: &pb.ControllerMessage_HttpRequest{
+			HttpRequest: &pb.HttpRequest{
+				Method: http.MethodGet,
+				Url:    c.upstreamURL,
+			},
+		},
+	}); err != nil {
+		c.result <- legacyProbeResult{err: err}
+		return err
+	}
+	httpMsg, err := stream.Receive()
+	if err != nil {
+		c.result <- legacyProbeResult{err: err}
+		return err
+	}
+	resp := httpMsg.GetHttpResponse()
+	if resp == nil {
+		c.result <- legacyProbeResult{
+			err: fmt.Errorf("want HttpResponse, got %T", httpMsg.Message),
+		}
+		return nil
+	}
+
+	const metaID = "legacy-meta"
+	if err := stream.Send(&pb.ControllerMessage{
+		RequestId: metaID,
+		Message: &pb.ControllerMessage_MetadataRequest{
+			MetadataRequest: &pb.MetadataRequest{},
+		},
+	}); err != nil {
+		c.result <- legacyProbeResult{err: err}
+		return err
+	}
+	metaMsg, err := stream.Receive()
+	if err != nil {
+		c.result <- legacyProbeResult{err: err}
+		return err
+	}
+	meta := metaMsg.GetMetadataResponse()
+	if meta == nil {
+		c.result <- legacyProbeResult{
+			err: fmt.Errorf("want MetadataResponse, got %T", metaMsg.Message),
+		}
+		return nil
+	}
+	c.result <- legacyProbeResult{
+		status:     resp.GetHttpStatus(),
+		body:       string(resp.GetBody()),
+		concurrent: meta.GetMaxConcurrentRequests(),
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (c *legacyServingCtrl) RawTunnel(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.RawTunnelFrame, pb.RawTunnelFrame],
+) error {
+	if c.rawCalls != nil {
+		_, _ = stream.Receive()
+		_ = stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
+			ControllerHello: &pb.RawControllerHello{
+				ProtocolVersion: 99,
+				TunnelId:        uuid.NewString(),
+			},
+		}})
+		select {
+		case c.rawCalls <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	if c.rawReady == nil {
+		return connect.NewError(connect.CodeUnimplemented, errors.New("raw disabled"))
+	}
+	if _, err := stream.Receive(); err != nil {
+		return err
+	}
+	if err := stream.Send(&pb.RawTunnelFrame{Frame: &pb.RawTunnelFrame_ControllerHello{
+		ControllerHello: &pb.RawControllerHello{
+			ProtocolVersion: rawtunnel.ProtocolVersion,
+			TunnelId:        uuid.NewString(),
+		},
+	}}); err != nil {
+		return err
+	}
+	rc := http.NewResponseController(ctx.Value(respKey{}).(http.ResponseWriter))
+	mux, err := rawtunnel.New(rawtunnel.Config{
+		Role:         rawtunnel.RoleController,
+		MaxPipes:     128,
+		IdleTimeout:  time.Hour,
+		MaxLifetime:  time.Hour,
+		PingInterval: time.Hour,
+		Abort: func() {
+			now := time.Now()
+			_ = rc.SetReadDeadline(now)
+			_ = rc.SetWriteDeadline(now)
+		},
+	}, stream)
+	if err != nil {
+		return err
+	}
+	c.rawReady <- mux
+	return mux.Run(ctx)
 }
 
 type pingCtrl struct {

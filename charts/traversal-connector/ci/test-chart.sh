@@ -127,6 +127,48 @@ assert_contains "$tmp_dir/raw-on.yaml" 'terminationGracePeriodSeconds: 45'
 assert_contains "$tmp_dir/raw-on.yaml" 'value: "traversal-raw-tunnel/ci"'
 assert_not_contains "$tmp_dir/raw-on.yaml" '-----BEGIN PUBLIC KEY-----'
 
+current_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
+next_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'next' '-----END PUBLIC KEY-----')"
+current_b64=$(printf '%s' "$current_pem" | base64 | tr -d '\n')
+next_b64=$(printf '%s' "$next_pem" | base64 | tr -d '\n')
+render raw-wired "$fixtures/direct-export-values.yaml" \
+  --set rawTunnel.enabled=true \
+  --set rawTunnel.maxTunnels=8 \
+  --set rawTunnel.maxPipesPerTunnel=250 \
+  --set rawTunnel.maxPipesPerPod=500 \
+  --set-string rawTunnel.idleTimeout=45m \
+  --set-string rawTunnel.maxLifetime=6h \
+  --set-string rawTunnel.pingInterval=15s \
+  --set rawTunnel.shutdownGraceSeconds=20 \
+  --set rawTunnel.terminationGraceSeconds=40 \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/wired \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer-a' \
+  --set-string 'rawTunnel.allowedSubjects[1]=signer-b' \
+  --set-string rawTunnel.currentKeyID=current-kid \
+  --set-string rawTunnel.currentPublicKeyPEM="$current_pem" \
+  --set-string rawTunnel.nextKeyID=next-kid \
+  --set-string rawTunnel.nextPublicKeyPEM="$next_pem" \
+  --set-string 'rawTunnel.forbiddenCIDRs[0]=10.0.0.0/8' \
+  --set-string 'rawTunnel.forbiddenCIDRs[1]=192.168.0.0/16' \
+  --set rawTunnel.allowDelegatedProxyChecks=true
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ENABLED\n              value: "true"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_TUNNELS\n              value: "8"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_PIPES_PER_TUNNEL\n              value: "250"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_PIPES_PER_POD\n              value: "500"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_IDLE_TIMEOUT\n              value: "45m"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_MAX_LIFETIME\n              value: "6h"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_PING_INTERVAL\n              value: "15s"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS\n              value: "20"'
+assert_contains "$tmp_dir/raw-wired.yaml" 'terminationGracePeriodSeconds: 40'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ISSUER\n              value: "traversal-raw-tunnel/wired"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ALLOWED_SUBJECTS\n              value: "signer-a,signer-b"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_CURRENT_KEY_ID\n              value: "current-kid"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_CURRENT_PUBLIC_KEY\n              value: "'"$current_b64"'"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_NEXT_KEY_ID\n              value: "next-kid"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_NEXT_PUBLIC_KEY\n              value: "'"$next_b64"'"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_FORBIDDEN_CIDRS\n              value: "10.0.0.0/8,192.168.0.0/16"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS\n              value: "true"'
+
 assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
 assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
 assert_render_fails missing-id 'connectorID is required' "${common[@]}" --set connectorID=
@@ -168,6 +210,29 @@ assert_render_fails raw-grace 'shutdownGraceSeconds must be less' "${common[@]}"
   --set-string rawTunnel.currentPublicKeyPEM=abc \
   --set rawTunnel.shutdownGraceSeconds=45 \
   --set rawTunnel.terminationGraceSeconds=45
+assert_render_fails raw-tunnels-ceiling 'maxTunnels must be from 1 to 64' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set rawTunnel.maxTunnels=65
+assert_render_fails raw-pipes-tunnel-ceiling 'maxPipesPerTunnel must be from 1 to 2048' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set rawTunnel.maxPipesPerTunnel=2049 \
+  --set rawTunnel.maxPipesPerPod=4096
+assert_render_fails raw-pipes-pod-ceiling 'maxPipesPerPod must be from 1 to 4096' "${common[@]}" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.issuer=traversal-raw-tunnel/ci \
+  --set-string 'rawTunnel.allowedSubjects[0]=signer' \
+  --set-string rawTunnel.currentKeyID=k1 \
+  --set-string rawTunnel.currentPublicKeyPEM=abc \
+  --set rawTunnel.maxPipesPerTunnel=100 \
+  --set rawTunnel.maxPipesPerPod=4097
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca

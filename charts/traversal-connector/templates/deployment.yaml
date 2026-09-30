@@ -46,6 +46,15 @@
 {{- if lt (int .Values.rawTunnel.maxPipesPerPod) (int .Values.rawTunnel.maxPipesPerTunnel) }}
 {{- fail "rawTunnel.maxPipesPerPod must be at least rawTunnel.maxPipesPerTunnel" }}
 {{- end }}
+{{- if or (le (int .Values.rawTunnel.maxTunnels) 0) (gt (int .Values.rawTunnel.maxTunnels) 64) }}
+{{- fail "rawTunnel.maxTunnels must be from 1 to 64" }}
+{{- end }}
+{{- if or (le (int .Values.rawTunnel.maxPipesPerTunnel) 0) (gt (int .Values.rawTunnel.maxPipesPerTunnel) 2048) }}
+{{- fail "rawTunnel.maxPipesPerTunnel must be from 1 to 2048" }}
+{{- end }}
+{{- if or (le (int .Values.rawTunnel.maxPipesPerPod) 0) (gt (int .Values.rawTunnel.maxPipesPerPod) 4096) }}
+{{- fail "rawTunnel.maxPipesPerPod must be from 1 to 4096" }}
+{{- end }}
 {{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}

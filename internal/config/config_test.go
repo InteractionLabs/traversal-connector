@@ -1097,6 +1097,27 @@ func TestLoad_RawTunnelRejectsUnsafeLimits(t *testing.T) {
 			},
 			want: "IDLE_TIMEOUT",
 		},
+		{
+			name: "tunnels above hard ceiling",
+			env:  map[string]string{"RAW_TUNNEL_MAX_TUNNELS": "65"},
+			want: "MAX_TUNNELS must be at most 64",
+		},
+		{
+			name: "pipes per tunnel above hard ceiling",
+			env: map[string]string{
+				"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL": "2049",
+				"RAW_TUNNEL_MAX_PIPES_PER_POD":    "4096",
+			},
+			want: "MAX_PIPES_PER_TUNNEL must be at most 2048",
+		},
+		{
+			name: "pipes per pod above hard ceiling",
+			env: map[string]string{
+				"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL": "100",
+				"RAW_TUNNEL_MAX_PIPES_PER_POD":    "4097",
+			},
+			want: "MAX_PIPES_PER_POD must be at most 4096",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1114,6 +1135,34 @@ func TestLoad_RawTunnelRejectsUnsafeLimits(t *testing.T) {
 				t.Fatalf("Load() = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoad_RawTunnelAcceptsHardCeilings(t *testing.T) {
+	clearEnv()
+	t.Cleanup(clearEnv)
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+	_ = os.Setenv("RAW_TUNNEL_ENABLED", "true")
+	_ = os.Setenv("RAW_TUNNEL_MAX_TUNNELS", "64")
+	_ = os.Setenv("RAW_TUNNEL_MAX_PIPES_PER_TUNNEL", "2048")
+	_ = os.Setenv("RAW_TUNNEL_MAX_PIPES_PER_POD", "4096")
+	_ = os.Setenv("RAW_TUNNEL_ISSUER", "traversal-raw-tunnel/test")
+	_ = os.Setenv("RAW_TUNNEL_ALLOWED_SUBJECTS", "signer")
+	_ = os.Setenv("RAW_TUNNEL_CURRENT_KEY_ID", "k1")
+	_ = os.Setenv(
+		"RAW_TUNNEL_CURRENT_PUBLIC_KEY",
+		"-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----",
+	)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RawTunnel.MaxTunnels != 64 ||
+		cfg.RawTunnel.MaxPipesPerTunnel != 2048 ||
+		cfg.RawTunnel.MaxPipesPerPod != 4096 {
+		t.Fatalf("raw limits = %+v", cfg.RawTunnel)
 	}
 }
 

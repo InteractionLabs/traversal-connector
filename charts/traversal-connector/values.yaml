@@ -209,7 +209,8 @@ affinity: {}
 # NO_PROXY, not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
 # allowDelegatedProxyChecks is true. The per-pod pipe cap counts pipes on
 # draining tunnels, so a rotation cannot grow memory without a bound. The pod
-# cap must be at least the per-tunnel cap.
+# cap must be at least the per-tunnel cap. Hard ceilings match the process:
+# maxTunnels ≤ 64, maxPipesPerTunnel ≤ 2048, maxPipesPerPod ≤ 4096.
 rawTunnel:
   enabled: false
   maxTunnels: 2

@@ -47,8 +47,14 @@ const (
 	defaultRawPingInterval         = 30 * time.Second
 	defaultRawRotationDeadline     = 15 * time.Minute
 	defaultRawShutdownGrace        = 30 * time.Second
-	minRawWindowBytes              = 16 << 10
-	maxRawWindowBytes              = 16 << 20
+	minRawWindowBytes = 16 << 10
+	maxRawWindowBytes = 16 << 20
+	// Hard ceilings grounded in per-tunnel goroutine, HTTP/2 connection, and
+	// pipe buffer cost. Defaults stay far below these; they only reject
+	// configs that would exhaust the process before any useful load.
+	maxRawTunnels        = 64
+	maxRawPipesPerTunnel = 2048
+	maxRawPipesPerPod    = 4096
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -741,9 +747,22 @@ func (r RawTunnelConfig) validate() error {
 	if r.MaxTunnels <= 0 || r.MaxPipesPerTunnel <= 0 || r.MaxPipesPerPod <= 0 {
 		return errors.New("raw tunnel limits must be positive")
 	}
-	if r.MaxTunnels > 1_000_000 || r.MaxPipesPerTunnel > 1_000_000 ||
-		r.MaxPipesPerPod > 1_000_000 {
-		return errors.New("raw tunnel limits are too large")
+	if r.MaxTunnels > maxRawTunnels {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_TUNNELS must be at most %d", maxRawTunnels,
+		)
+	}
+	if r.MaxPipesPerTunnel > maxRawPipesPerTunnel {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL must be at most %d",
+			maxRawPipesPerTunnel,
+		)
+	}
+	if r.MaxPipesPerPod > maxRawPipesPerPod {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_PIPES_PER_POD must be at most %d",
+			maxRawPipesPerPod,
+		)
 	}
 	if r.MaxPipesPerPod < r.MaxPipesPerTunnel {
 		return errors.New(
