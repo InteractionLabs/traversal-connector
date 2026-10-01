@@ -3,6 +3,7 @@ package rawtunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -176,7 +177,7 @@ func TestTunnelWindowBoundsQueuedBytes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var maxQueued func() int
-			ctrl, stop := startSessionObserved(t, tc.outer, func(p *Pipe, _ *pb.RawOpen) {
+			ctrl, _, stop := startSessionObserved(t, tc.outer, func(p *Pipe, _ *pb.RawOpen) {
 				if err := p.Start(newEcho()); err != nil {
 					t.Errorf("start: %v", err)
 				}
@@ -200,6 +201,118 @@ func TestTunnelWindowBoundsQueuedBytes(t *testing.T) {
 				t.Fatalf("queued %d bytes, outer window %d", got, tc.outer)
 			}
 		})
+	}
+}
+
+func TestDrainCrossesAFullConnectionWindow(t *testing.T) {
+	ctrl, conn, stop := startSessionObserved(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+		if err := p.Start(newHold()); err != nil {
+			t.Errorf("start: %v", err)
+		}
+	}, nil)
+	defer stop()
+	payload := bytes.Repeat([]byte{7}, StreamWindow)
+	var pipes []*Pipe
+	for range 4 {
+		pipes = append(pipes, openPipe(t, ctrl, "stall.test", newScript(payload)))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var sent int64
+	for time.Now().Before(deadline) {
+		sent = 0
+		for _, p := range pipes {
+			sent += p.Result().BytesSent
+		}
+		if sent >= int64(TunnelWindow-maxRecord) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent < int64(TunnelWindow-maxRecord) {
+		t.Fatalf("connection window did not fill, sent %d", sent)
+	}
+	ctrl.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	select {
+	case <-conn.Draining():
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not reach the connector")
+	}
+}
+
+func TestCloseReturnsWhileTheWindowIsFull(t *testing.T) {
+	ctrl, _, stop := startSessionObserved(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+		if err := p.Start(newHold()); err != nil {
+			t.Errorf("start: %v", err)
+		}
+	}, nil)
+	defer stop()
+	payload := bytes.Repeat([]byte{7}, StreamWindow)
+	for range 4 {
+		openPipe(t, ctrl, "stall.test", newScript(payload))
+	}
+	done := make(chan struct{})
+	go func() {
+		ctrl.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked while the connection window was full")
+	}
+}
+
+func TestConcurrentFramesStayIntact(t *testing.T) {
+	pr, pw := io.Pipe()
+	payload := bytes.Repeat([]byte{0x11}, 100)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		w := recordWriter{w: pw}
+		for range 50 {
+			if err := w.frame(payload); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		w := recordWriter{w: pw}
+		for range 50 {
+			if err := w.frameClose(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		_ = pw.Close()
+	}()
+	frames := 0
+	for {
+		got, err := readFrame(pr)
+		if err == io.EOF {
+			break
+		}
+		var closed *closeError
+		if errors.As(err, &closed) {
+			if closed.reason != pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED {
+				t.Fatalf("close reason %s", closed.reason)
+			}
+			frames++
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("torn frame len %d", len(got))
+		}
+		frames++
+	}
+	if frames != 100 {
+		t.Fatalf("frames = %d, want 100", frames)
 	}
 }
 
@@ -231,14 +344,14 @@ func waitDone(t *testing.T, p *Pipe) {
 
 func startSession(t *testing.T, outer int, accept func(*Pipe, *pb.RawOpen)) *Mux {
 	t.Helper()
-	ctrl, stop := startSessionObserved(t, outer, accept, nil)
+	ctrl, _, stop := startSessionObserved(t, outer, accept, nil)
 	t.Cleanup(stop)
 	return ctrl
 }
 
 func startSessionObserved(
 	t *testing.T, outer int, accept func(*Pipe, *pb.RawOpen), queued *func() int,
-) (*Mux, func()) {
+) (*Mux, *Mux, func()) {
 	t.Helper()
 	left, right, maxQueued := newWindowPair(outer)
 	if queued != nil {
@@ -290,7 +403,7 @@ func startSessionObserved(
 		conn.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
 		cancel()
 	}
-	return ctrl, stop
+	return ctrl, conn, stop
 }
 
 type scriptLocal struct {

@@ -276,6 +276,10 @@ func (p *Pipe) copyToPeer() {
 				_, werr = (recordWriter{w: w}).Write(buf[:n])
 			}
 			if werr != nil {
+				if p.m.conn.Lost() {
+					p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST, "received")
+					return
+				}
 				p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED, "sent")
 				return
 			}
@@ -340,7 +344,7 @@ func (p *Pipe) readPeer(r io.Reader, local Local) {
 		case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe):
 			_ = local.CloseWrite()
 			return
-		case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, errRecordTooLarge):
+		case errors.Is(err, errRecordTooLarge):
 			p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_PROTOCOL_ERROR, "received")
 			return
 		default:
@@ -362,7 +366,11 @@ func (p *Pipe) relay(
 	go func() {
 		select {
 		case <-ctx.Done():
-			p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED, "received")
+			reason := pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED
+			if p.m.conn.Lost() {
+				reason = pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST
+			}
+			p.finish(reason, "received")
 		case <-gone:
 		}
 	}()
@@ -384,6 +392,10 @@ func (p *Pipe) relay(
 		}
 		reason := p.Result().Reason
 		if reason == pb.RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED {
+			if p.m.conn.Lost() {
+				p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST, "received")
+				return
+			}
 			reason = pb.RawCloseReason_RAW_CLOSE_REASON_UPSTREAM_ERROR
 		}
 		_ = rw.frameClose(reason)

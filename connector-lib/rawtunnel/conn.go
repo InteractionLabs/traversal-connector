@@ -40,6 +40,10 @@ type ChunkConn struct {
 	off        int
 	maxHeld    int
 	closed     bool
+	lost       bool
+	// interrupt unblocks a Receive that Close cannot cancel itself. The gRPC
+	// stream behind FromChunks is not an io.Closer.
+	interrupt func()
 }
 
 // NewChunkConn adapts stream to a net.Conn. Deadlines are ignored: a blocked
@@ -68,6 +72,9 @@ func (c *ChunkConn) Read(p []byte) (int, error) {
 		c.rmu.Unlock()
 		b, err := c.stream.Receive()
 		c.rmu.Lock()
+		if err != nil {
+			c.lost = true
+		}
 		if c.closed {
 			c.rmu.Unlock()
 			if err != nil {
@@ -124,8 +131,12 @@ func (c *ChunkConn) Close() error {
 		c.wmu.Lock()
 		c.rmu.Lock()
 		c.closed = true
+		c.lost = true
 		c.rmu.Unlock()
 		c.wmu.Unlock()
+		if c.interrupt != nil {
+			c.interrupt()
+		}
 		c.writes.Wait()
 		if closer, ok := c.stream.(io.Closer); ok {
 			_ = closer.Close()
@@ -134,6 +145,14 @@ func (c *ChunkConn) Close() error {
 	})
 	<-c.closedDone
 	return nil
+}
+
+// Lost reports that a read failed or Close has started. Callers use it to
+// tell a dropped tunnel from a reset of one pipe.
+func (c *ChunkConn) Lost() bool {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	return c.lost
 }
 
 func (c *ChunkConn) LocalAddr() net.Addr         { return stubAddr{} }

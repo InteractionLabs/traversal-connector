@@ -118,15 +118,13 @@ func (w recordWriter) Write(p []byte) (int, error) {
 func (w recordWriter) CloseWrite() error { return w.frame(nil) }
 
 func (w recordWriter) frame(p []byte) error {
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(p)))
-	if _, err := w.w.Write(hdr[:]); err != nil {
+	// One Write so a close record on the same pipe cannot land between the
+	// length and the payload. io.Pipe keeps each Write contiguous.
+	buf := make([]byte, 4+len(p))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(p)))
+	copy(buf[4:], p)
+	if _, err := w.w.Write(buf); err != nil {
 		return err
-	}
-	if len(p) > 0 {
-		if _, err := w.w.Write(p); err != nil {
-			return err
-		}
 	}
 	if w.flush != nil {
 		w.flush()

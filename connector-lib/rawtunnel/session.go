@@ -20,8 +20,10 @@ import (
 const (
 	helloPath    = "/raw/v1/hello"
 	controlPath  = "/raw/v1/control"
+	drainPath    = "/raw/v1/drain"
 	pipePath     = "/raw/v1/pipes"
 	headerOpen   = "Raw-Open"
+	headerDrain  = "Raw-Drain"
 	trailerClose = "Raw-Close-Reason"
 	helloLimit   = 8192
 	// Control records share one stream, separate from any pipe's window.
@@ -80,8 +82,10 @@ type Config struct {
 	// Accept is required for RoleConnector. The Mux calls it on a new goroutine
 	// and it must call exactly one of Pipe.Start or Pipe.Refuse.
 	Accept func(*Pipe, *pb.RawOpen)
-	// Abort unblocks the outer gRPC stream. The Mux calls it once when the
-	// tunnel ends. It must not block and must not use the Mux.
+	// Abort unblocks the outer gRPC stream. The Mux calls it when the tunnel
+	// ends and when the inner session closes the byte pipe, so a stuck read
+	// cannot outlive the peer. It may run more than once. It must not block
+	// and must not use the Mux or the connection.
 	Abort func()
 	// OnReset is called when this side resets a pipe or the tunnel drops it.
 	// origin is "sent" or "received". It must not block or use the Mux.
@@ -182,22 +186,40 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 		cfg.PingTimeout = DefaultPingTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Mux{
+	conn := NewChunkConn(stream)
+	m := &Mux{
 		cfg:          cfg,
 		stream:       stream,
-		conn:         NewChunkConn(stream),
+		conn:         conn,
 		ctx:          ctx,
 		cancel:       cancel,
 		established:  make(chan struct{}),
 		done:         make(chan struct{}),
 		draining:     make(chan struct{}),
 		drained:      make(chan struct{}),
-		controlOut:   make(chan []byte, 8),
+		controlOut:   make(chan []byte, cfg.MaxPipes+8),
 		pipes:        make(map[uint64]*Pipe),
 		seen:         make(map[uint64]struct{}),
 		handlersIdle: make(chan struct{}),
 		tunnelID:     cfg.TunnelID,
-	}, nil
+	}
+	// Closing the byte pipe has to cancel the gRPC read. ServeConn does not
+	// return, and Abort never runs, while Receive is still blocked.
+	conn.interrupt = m.unblock
+	return m, nil
+}
+
+// unblock cancels the outer read when the inner session gives up on the byte
+// pipe. The controller skips it until hello has finished: Abort before then
+// replaces the hello status with a reset.
+func (m *Mux) unblock() {
+	if m.cfg.Abort == nil {
+		return
+	}
+	if m.cfg.Role == RoleController && !m.establishedClosed() {
+		return
+	}
+	m.cfg.Abort()
 }
 
 // Run exchanges hello and carries pipes until the tunnel ends.
@@ -308,6 +330,13 @@ func (m *Mux) Drain(reason pb.RawDrainReason) {
 	m.signalDraining()
 	m.checkDrainedLocked()
 	m.mu.Unlock()
+	// Pipe data can fill the connection window. A drain carried as a DATA
+	// frame then waits behind it. HEADERS are not flow-controlled, so the
+	// controller sends the drain as a header on its own request.
+	if m.cfg.Role == RoleController {
+		go m.postDrain(body)
+		return
+	}
 	m.sendControl(body)
 }
 
@@ -465,7 +494,9 @@ func (m *Mux) shutdown(err error) {
 
 func (m *Mux) serve() error {
 	srv := &http2.Server{
-		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 2),
+		// Pipes, the control stream, and one drain request. The drain must still
+		// open after every pipe slot is taken.
+		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 3),
 		MaxUploadBufferPerStream:     StreamWindow,
 		MaxUploadBufferPerConnection: TunnelWindow,
 		MaxReadFrameSize:             maxChunk,
@@ -476,6 +507,7 @@ func (m *Mux) serve() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+helloPath, m.handleHello)
 	mux.HandleFunc("POST "+controlPath, m.handleControl)
+	mux.HandleFunc("POST "+drainPath, m.handleDrain)
 	mux.HandleFunc("POST "+pipePath, m.handlePipe)
 	srv.ServeConn(m.conn, &http2.ServeConnOpts{Handler: mux, Context: m.ctx})
 	if err := m.ctx.Err(); err != nil {
@@ -735,9 +767,14 @@ func (m *Mux) sendControl(body []byte) {
 		m.writeControlBytes(body)
 		return
 	}
+	// Close finishes every pipe on this goroutine. Blocking here while the
+	// peer has stopped reading would keep the process from cancelling the TCP
+	// connection. A full buffer drops the record; the pipe is already closed
+	// locally, and the outer abort ends the session.
 	select {
 	case m.controlOut <- body:
 	case <-m.done:
+	default:
 	}
 }
 
@@ -748,7 +785,40 @@ func (m *Mux) writeControlBytes(body []byte) {
 	if w == nil {
 		return
 	}
-	_ = (recordWriter{w: w}).frame(body)
+	// The HTTP/2 client reads this pipe only between flow-control waits. A
+	// full connection window must not pin the caller, or Close never reaches
+	// shutdown. Each record is one Write, so concurrent records stay intact.
+	go func() {
+		_ = (recordWriter{w: w}).frame(body)
+	}()
+}
+
+func (m *Mux) postDrain(body []byte) {
+	if m.cc == nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(
+		m.ctx, http.MethodPost, "http://tunnel"+drainPath, nil,
+	)
+	if err != nil {
+		return
+	}
+	req.Header.Set(headerDrain, base64.StdEncoding.EncodeToString(body))
+	resp, err := m.cc.RoundTrip(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+func (m *Mux) handleDrain(w http.ResponseWriter, r *http.Request) {
+	raw, err := base64.StdEncoding.DecodeString(r.Header.Get(headerDrain))
+	if err != nil || len(raw) == 0 || len(raw) > helloLimit || !m.applyControl(raw) {
+		http.Error(w, "bad drain", http.StatusBadRequest)
+		m.shutdown(ErrIncompatibleHello)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // notifyPeer tells the other side that this pipe ended. The data stream may
@@ -790,7 +860,14 @@ func (m *Mux) readControl(r io.Reader) {
 				errors.Is(err, io.ErrUnexpectedEOF) {
 				return
 			}
-			m.shutdown(ErrIncompatibleHello)
+			// A malformed record is a protocol failure. A reset or a transport
+			// error is the session ending; calling it an incompatible hello makes
+			// the connector treat a dropped tunnel as a bad peer.
+			if errors.Is(err, errRecordTooLarge) {
+				m.shutdown(ErrIncompatibleHello)
+				return
+			}
+			m.shutdown(ErrClosed)
 			return
 		}
 		if !m.applyControl(b) {
