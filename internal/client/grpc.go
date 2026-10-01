@@ -447,6 +447,27 @@ func (cm *ConnectionManager) RunTunnel(ctx context.Context) error {
 	return cm.receiveLoop(ctx, es, ss, conn)
 }
 
+func receiveMessage(
+	ctx context.Context,
+	receiver *connectStream,
+) (*pb.ControllerMessage, error) {
+	type result struct {
+		msg *pb.ControllerMessage
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		msg, err := receiver.Receive()
+		done <- result{msg, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, context.Canceled
+	case got := <-done:
+		return got.msg, got.err
+	}
+}
+
 // receiveLoop reads messages from the Traversal control plane and dispatches responses.
 // The receiver is used for reading; the sender (serialized) is used for writing.
 // HTTP requests are handled concurrently with a semaphore limiting concurrency.
@@ -459,7 +480,11 @@ func (cm *ConnectionManager) receiveLoop(
 	sem := make(chan struct{}, cm.config.MaxConcurrentRequests)
 
 	for {
-		msg, err := receiver.Receive()
+		// Receive blocks in the HTTP/2 body read. Canceling ctx does not
+		// unblock that read once response headers have arrived, so a shutdown
+		// that only waits on Receive never returns and the process misses
+		// its termination grace.
+		msg, err := receiveMessage(ctx, receiver)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				slog.InfoContext(ctx, "context canceled, closing tunnel", "tunnel_id", conn.ID)
