@@ -41,7 +41,7 @@ func TestSessionIdentityAndOuterWindow(t *testing.T) {
 		cfg.MaxReceiveBufferPerConnection != TunnelWindow {
 		t.Fatalf("windows %d %d", cfg.MaxReceiveBufferPerStream, cfg.MaxReceiveBufferPerConnection)
 	}
-	if got, want := ConnectionWindow(100), 100*StreamWindow; got != want {
+	if got, want := ConnectionWindow(100), 101*StreamWindow; got != want {
 		t.Fatalf("connection window %d, want %d", got, want)
 	}
 	if got := ConnectionWindow(math.MaxInt32); got != math.MaxInt32 {
@@ -53,7 +53,7 @@ func TestSessionIdentityAndOuterWindow(t *testing.T) {
 		custom.MaxReceiveBufferPerConnection != 2<<20 {
 		t.Fatalf("custom windows %d %d", custom.MaxReceiveBufferPerStream, custom.MaxReceiveBufferPerConnection)
 	}
-	if got := connectionWindow(4, 64<<10); got != 4*(64<<10) {
+	if got := connectionWindow(4, 64<<10); got != 5*(64<<10) {
 		t.Fatalf("narrow connection window %d", got)
 	}
 	var http2cfg http.HTTP2Config
@@ -225,6 +225,75 @@ func TestResetUnblocksAStalledPeer(t *testing.T) {
 	}
 }
 
+func TestResetCrossesAFullWindowOnAOnePipeTunnel(t *testing.T) {
+	seen := make(chan *Pipe, 1)
+	left, right, _ := newWindowPair(TunnelWindow)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hello := &pb.RawConnectorHello{
+		SupportedProtocolVersions: []uint32{ProtocolVersion},
+		Hostname:                  "edge-1",
+		MaxPipes:                  1,
+		SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+	}
+	ctrl, err := New(Config{
+		Role:         RoleController,
+		TunnelID:     "550e8400-e29b-41d4-a716-446655440000",
+		MaxPipes:     1,
+		IdleTimeout:  time.Hour,
+		MaxLifetime:  time.Hour,
+		PingInterval: time.Hour,
+		PingTimeout:  time.Hour,
+		Abort:        cancel,
+	}, left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := New(Config{
+		Role:         RoleConnector,
+		MaxPipes:     1,
+		IdleTimeout:  time.Hour,
+		MaxLifetime:  time.Hour,
+		PingInterval: time.Hour,
+		PingTimeout:  time.Hour,
+		Hello:        hello,
+		Abort:        func() {},
+		Accept: func(p *Pipe, _ *pb.RawOpen) {
+			seen <- p
+			if startErr := p.Start(newHold()); startErr != nil {
+				t.Errorf("start: %v", startErr)
+			}
+		},
+	}, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = ctrl.Run(ctx) }()
+	go func() { _ = conn.Run(ctx) }()
+	t.Cleanup(func() {
+		ctrl.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+		conn.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+	})
+	select {
+	case <-ctrl.Established():
+	case <-time.After(2 * time.Second):
+		t.Fatal("tunnel did not establish")
+	}
+	stall := openPipe(t, ctrl, "stall.test", newScript(bytes.Repeat([]byte{7}, StreamWindow)))
+	select {
+	case <-stall.Done():
+		t.Fatal("unread pipe ended on its own")
+	case <-time.After(50 * time.Millisecond):
+	}
+	peer := <-seen
+	stall.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+	select {
+	case <-peer.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset did not end the only pipe")
+	}
+}
+
 func TestResetReachesThePeer(t *testing.T) {
 	seen := make(chan *Pipe, 1)
 	ctrl := startSession(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
@@ -365,7 +434,7 @@ func TestCloseReturnsWhileTheWindowIsFull(t *testing.T) {
 	for range pipes {
 		opened = append(opened, openPipe(t, ctrl, "stall.test", newScript(payload)))
 	}
-	want := int64(ConnectionWindow(pipes)) - int64(pipes)*int64(maxRecord)
+	want := int64(pipes)*int64(StreamWindow) - int64(pipes)*int64(maxRecord)
 	deadline := time.Now().Add(5 * time.Second)
 	var sent int64
 	for time.Now().Before(deadline) {

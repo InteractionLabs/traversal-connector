@@ -41,9 +41,10 @@ const (
 )
 
 // ConnectionWindow is the inner HTTP/2 connection window for a session that
-// admits maxPipes pipes at the default per-pipe window. Each pipe may park
-// StreamWindow unread bytes, so the connection window is that sum: one unread
-// pipe cannot stop the others.
+// admits maxPipes pipes at the default per-pipe window, plus the control
+// stream. Each pipe may park StreamWindow unread bytes. The extra stream
+// keeps a reset moving when every pipe window is full, and one unread pipe
+// cannot spend another pipe's allowance.
 //
 // The window is advertised when the connection starts, from this side's cap.
 // Hello may lower the pipe count afterward. HTTP/2 cannot shrink a window,
@@ -69,11 +70,15 @@ func connectionWindow(maxPipes, perPipe int) int {
 	if perPipe < 1 {
 		perPipe = StreamWindow
 	}
+	// The control stream is one more stream. Without its share, one full
+	// pipe on a one-pipe tunnel fills the connection window and a reset
+	// cannot move.
+	streams := maxPipes + 1
 	maxWindow := math.MaxInt32
-	if maxPipes > maxWindow/perPipe {
+	if streams > maxWindow/perPipe {
 		return maxWindow
 	}
-	return maxPipes * perPipe
+	return streams * perPipe
 }
 
 // ApplyOuterWindow sets the gRPC connection's receive windows. A non-positive
