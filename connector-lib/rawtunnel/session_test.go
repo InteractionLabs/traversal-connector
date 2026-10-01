@@ -51,7 +51,11 @@ func TestSessionIdentityAndOuterWindow(t *testing.T) {
 	ApplyOuterWindow(&custom, 2<<20)
 	if custom.MaxReceiveBufferPerStream != 2<<20 ||
 		custom.MaxReceiveBufferPerConnection != 2<<20 {
-		t.Fatalf("custom windows %d %d", custom.MaxReceiveBufferPerStream, custom.MaxReceiveBufferPerConnection)
+		t.Fatalf(
+			"custom windows %d %d",
+			custom.MaxReceiveBufferPerStream,
+			custom.MaxReceiveBufferPerConnection,
+		)
 	}
 	if got := connectionWindow(4, 64<<10); got != 5*(64<<10) {
 		t.Fatalf("narrow connection window %d", got)
@@ -354,11 +358,17 @@ func TestTunnelWindowBoundsQueuedBytes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var maxQueued func() int
-			ctrl, _, stop := startSessionObserved(t, tc.outer, tc.stream, func(p *Pipe, _ *pb.RawOpen) {
-				if err := p.Start(newEcho()); err != nil {
-					t.Errorf("start: %v", err)
-				}
-			}, &maxQueued)
+			ctrl, _, stop := startSessionObserved(
+				t,
+				tc.outer,
+				tc.stream,
+				func(p *Pipe, _ *pb.RawOpen) {
+					if err := p.Start(newEcho()); err != nil {
+						t.Errorf("start: %v", err)
+					}
+				},
+				&maxQueued,
+			)
 			defer stop()
 			payload := bytes.Repeat([]byte{0xab}, tc.size)
 			var pipes []*Pipe
