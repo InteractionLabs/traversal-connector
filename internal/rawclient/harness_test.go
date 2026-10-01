@@ -179,7 +179,6 @@ func (c *badVersionCtrl) Tunnel(
 
 type pingCtrl struct {
 	connectorconnect.UnimplementedConnectorServiceHandler
-	pings   chan struct{}
 	tunnels atomic.Int32
 }
 
