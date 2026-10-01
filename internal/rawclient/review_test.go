@@ -101,7 +101,11 @@ func TestConnectorVerifierAllowsUnknownClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := newVerifier(baseConfig("http://127.0.0.1:9"))
+	metrics, err := newRawMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := newVerifier(baseConfig("http://127.0.0.1:9"), metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
