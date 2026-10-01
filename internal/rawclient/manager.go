@@ -256,13 +256,14 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 	stop := sync.OnceFunc(func() { closeClient(cleanup) })
 	var mux *rawtunnel.Mux
 	mux, err = rawtunnel.New(rawtunnel.Config{
-		Role:         rawtunnel.RoleConnector,
-		MaxPipes:     m.cfg.RawTunnel.MaxPipesPerTunnel,
-		IdleTimeout:  m.cfg.RawTunnel.IdleTimeout,
-		MaxLifetime:  m.cfg.RawTunnel.MaxLifetime,
-		PingInterval: m.cfg.RawTunnel.PingInterval,
-		Hello:        m.hello.message(),
-		OnSendStall:  m.metrics.stall,
+		Role:          rawtunnel.RoleConnector,
+		MaxPipes:      m.cfg.RawTunnel.MaxPipesPerTunnel,
+		StreamWindow:  m.cfg.RawTunnel.StreamWindow,
+		IdleTimeout:   m.cfg.RawTunnel.IdleTimeout,
+		MaxLifetime:   m.cfg.RawTunnel.MaxLifetime,
+		PingInterval:  m.cfg.RawTunnel.PingInterval,
+		Hello:         m.hello.message(),
+		OnControlDrop: m.metrics.controlDrop,
 		Abort: func() {
 			cancel()
 			stop()

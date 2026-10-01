@@ -145,7 +145,7 @@ func newIsolatedTransport(cfg *config.Config) (*http.Transport, func(), error) {
 	transport.Protocols = &protocols
 	http2cfg := &http.HTTP2Config{}
 	rawtunnel.ConfigureHTTP2(http2cfg)
-	rawtunnel.ApplyOuterWindows(http2cfg)
+	rawtunnel.ApplyOuterWindow(http2cfg, cfg.RawTunnel.OuterWindow)
 	transport.HTTP2 = http2cfg
 	dial := (&net.Dialer{}).DialContext
 	if cfg.TraversalControllerConnectTo != "" {

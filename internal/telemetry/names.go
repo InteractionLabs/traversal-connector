@@ -29,7 +29,7 @@ const (
 	MetricRawPipeClosesTotal               = "connector.raw_pipe_closes_total"
 	MetricRawPipeBytes                     = "connector.raw_pipe_bytes"
 	MetricRawPipeDuration                  = "connector.raw_pipe_duration"
-	MetricRawFlowControlStallsTotal        = "connector.raw_flow_control_stalls_total"
+	MetricRawControlRecordsDroppedTotal    = "connector.raw_control_records_dropped_total"
 	MetricRawHalfClosesTotal               = "connector.raw_half_closes_total"
 	MetricRawDrainsTotal                   = "connector.raw_drains_total"
 	MetricRawReconnectsTotal               = "connector.raw_reconnects_total"

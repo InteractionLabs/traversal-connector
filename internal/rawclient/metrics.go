@@ -17,7 +17,7 @@ import (
 type rawMetrics struct {
 	tunnelsActive   metric.Int64UpDownCounter
 	tunnelsDraining metric.Int64UpDownCounter
-	stalls          metric.Int64Counter
+	controlDrops    metric.Int64Counter
 	drains          metric.Int64Counter
 	reconnects      metric.Int64Counter
 }
@@ -42,14 +42,14 @@ func newRawMetrics() (*rawMetrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("raw tunnels draining: %w", err)
 	}
-	m.stalls, err = meter.Int64Counter(
-		telemetry.MetricRawFlowControlStallsTotal,
+	m.controlDrops, err = meter.Int64Counter(
+		telemetry.MetricRawControlRecordsDroppedTotal,
 		metric.WithDescription(
-			"Times a raw pipe waited because it had no send credit",
+			"Connector control records dropped because the send buffer was full",
 		),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("raw stalls: %w", err)
+		return nil, fmt.Errorf("raw control drops: %w", err)
 	}
 	m.drains, err = meter.Int64Counter(
 		telemetry.MetricRawDrainsTotal,
@@ -78,7 +78,9 @@ func (m *rawMetrics) addDraining(n int64) {
 	m.tunnelsDraining.Add(context.Background(), n)
 }
 
-func (m *rawMetrics) stall() { m.stalls.Add(context.Background(), 1) }
+func (m *rawMetrics) controlDrop() {
+	m.controlDrops.Add(context.Background(), 1)
+}
 
 func (m *rawMetrics) drain(reason pb.RawDrainReason) {
 	m.drains.Add(context.Background(), 1,

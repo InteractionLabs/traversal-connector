@@ -45,6 +45,8 @@ const (
 	defaultRawMaxLifetime          = 4 * time.Hour
 	defaultRawPingInterval         = 30 * time.Second
 	defaultRawShutdownGrace        = 30 * time.Second
+	minRawWindowBytes              = 16 << 10
+	maxRawWindowBytes              = 16 << 20
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -196,6 +198,12 @@ type RawTunnelConfig struct {
 	NextPublicKeyPEM          string
 	ForbiddenCIDRs            []string
 	AllowDelegatedProxyChecks bool
+	// StreamWindow is the per-pipe receive window in bytes. Zero uses the
+	// library default. RAW_TUNNEL_STREAM_WINDOW.
+	StreamWindow int
+	// OuterWindow is this process's outer gRPC receive window in bytes. Zero
+	// uses the library default. RAW_TUNNEL_OUTER_WINDOW.
+	OuterWindow int
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -693,6 +701,12 @@ func loadRawTunnelConfig() (RawTunnelConfig, error) {
 	); err != nil {
 		return RawTunnelConfig{}, err
 	}
+	if cfg.StreamWindow, err = env.ParseInt("RAW_TUNNEL_STREAM_WINDOW", 0); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.OuterWindow, err = env.ParseInt("RAW_TUNNEL_OUTER_WINDOW", 0); err != nil {
+		return RawTunnelConfig{}, err
+	}
 	return cfg, nil
 }
 
@@ -726,7 +740,16 @@ func (r RawTunnelConfig) validate() error {
 			"RAW_TUNNEL_NEXT_KEY_ID and RAW_TUNNEL_NEXT_PUBLIC_KEY must be set together",
 		)
 	}
+	if !rawWindowOK(r.StreamWindow) || !rawWindowOK(r.OuterWindow) {
+		return errors.New(
+			"RAW_TUNNEL_STREAM_WINDOW and RAW_TUNNEL_OUTER_WINDOW must be unset or from 16KiB to 16MiB",
+		)
+	}
 	return nil
+}
+
+func rawWindowOK(n int) bool {
+	return n == 0 || (n >= minRawWindowBytes && n <= maxRawWindowBytes)
 }
 
 func splitList(value string) []string {
