@@ -527,13 +527,15 @@ func (m *Mux) shutdown(err error) {
 }
 
 func (m *Mux) serve() error {
+	// ConnectionWindow caps at MaxInt32, so the conversion cannot overflow.
+	uploadWindow := int32(ConnectionWindow(m.cfg.MaxPipes)) //nolint:gosec // G115
 	srv := &http2.Server{
 		// Pipes, the control stream, and one drain request. The drain must still
 		// open after every pipe slot is taken.
 		// MaxPipes is validated to a small limit, so the cap fits in uint32.
 		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 3), //nolint:gosec // G115
 		MaxUploadBufferPerStream:     StreamWindow,
-		MaxUploadBufferPerConnection: TunnelWindow,
+		MaxUploadBufferPerConnection: uploadWindow,
 		MaxReadFrameSize:             maxChunk,
 		IdleTimeout:                  0,
 		ReadIdleTimeout:              m.cfg.PingInterval,
@@ -703,7 +705,7 @@ func (m *Mux) dial(ctx context.Context) error {
 	h2.AllowHTTP = true
 	tr.HTTP2 = &http.HTTP2Config{
 		MaxReceiveBufferPerStream:     StreamWindow,
-		MaxReceiveBufferPerConnection: TunnelWindow,
+		MaxReceiveBufferPerConnection: ConnectionWindow(m.cfg.MaxPipes),
 		MaxReadFrameSize:              maxChunk,
 		SendPingTimeout:               m.cfg.PingInterval,
 		PingTimeout:                   m.cfg.PingTimeout,

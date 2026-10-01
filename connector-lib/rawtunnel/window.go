@@ -1,6 +1,7 @@
 package rawtunnel
 
 import (
+	"math"
 	"net/http"
 	"time"
 )
@@ -11,10 +12,9 @@ const (
 	// StreamWindow is the inner HTTP/2 receive window for one pipe. One
 	// stalled pipe can hold at most this much unread data.
 	StreamWindow = 256 << 10
-	// TunnelWindow is the inner HTTP/2 connection window and the receive
-	// window of the outer gRPC stream that carries the tunnel. One pipe that
-	// nobody is reading is limited to StreamWindow, a quarter of this, so it
-	// cannot fill the connection window and stop the read loop.
+	// TunnelWindow is the receive window of the outer gRPC stream. Bytes sit
+	// here until the inner session reads them, so this caps how much is in
+	// flight for every pipe together. The inner connection window is separate.
 	TunnelWindow = 1 << 20
 	// maxChunk is the largest outer gRPC message. The adapter holds at most
 	// one of these between Receive and the inner read that consumes it.
@@ -40,8 +40,26 @@ const (
 	DefaultWriteByteTimeout = 30 * time.Second
 )
 
+// ConnectionWindow is the inner HTTP/2 connection window for a session that
+// admits maxPipes pipes. Each pipe may park StreamWindow unread bytes, so the
+// connection window is that sum: one unread pipe cannot stop the others.
+//
+// The window is advertised when the connection starts, from this side's cap.
+// Hello may lower the pipe count afterward. HTTP/2 cannot shrink a window,
+// and the pipes that are not opened simply leave the extra allowance unused.
+func ConnectionWindow(maxPipes int) int {
+	if maxPipes < 1 {
+		maxPipes = 1
+	}
+	maxWindow := math.MaxInt32
+	if maxPipes > maxWindow/StreamWindow {
+		return maxWindow
+	}
+	return maxPipes * StreamWindow
+}
+
 // ApplyOuterWindows sets the gRPC connection's receive windows to exactly one
-// tunnel window. The raw-tunnel client must call it: the HTTP/2 client default
+// outer window. The raw-tunnel client must call it: the HTTP/2 client default
 // is much larger, and bytes the application has not Recv'd stay in that window.
 func ApplyOuterWindows(cfg *http.HTTP2Config) {
 	cfg.MaxReceiveBufferPerStream = TunnelWindow

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"sync"
 	"testing"
@@ -38,6 +39,12 @@ func TestSessionIdentityAndOuterWindow(t *testing.T) {
 	if cfg.MaxReceiveBufferPerStream != TunnelWindow ||
 		cfg.MaxReceiveBufferPerConnection != TunnelWindow {
 		t.Fatalf("windows %d %d", cfg.MaxReceiveBufferPerStream, cfg.MaxReceiveBufferPerConnection)
+	}
+	if got, want := ConnectionWindow(100), 100*StreamWindow; got != want {
+		t.Fatalf("connection window %d, want %d", got, want)
+	}
+	if got := ConnectionWindow(math.MaxInt32); got != math.MaxInt32 {
+		t.Fatalf("connection window overflowed: %d", got)
 	}
 	var http2cfg http.HTTP2Config
 	ConfigureHTTP2(&http2cfg)
@@ -284,6 +291,10 @@ func TestTunnelWindowBoundsQueuedBytes(t *testing.T) {
 }
 
 func TestDrainCrossesAFullConnectionWindow(t *testing.T) {
+	// startSessionObserved admits 32 pipes. Eight full stream windows are
+	// 2 MiB, past the 1 MiB outer window, so this fails if the inner
+	// connection window is still the outer window.
+	const pipes = 8
 	ctrl, conn, stop := startSessionObserved(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
 		if err := p.Start(newHold()); err != nil {
 			t.Errorf("start: %v", err)
@@ -291,24 +302,25 @@ func TestDrainCrossesAFullConnectionWindow(t *testing.T) {
 	}, nil)
 	defer stop()
 	payload := bytes.Repeat([]byte{7}, StreamWindow)
-	var pipes []*Pipe
-	for range 4 {
-		pipes = append(pipes, openPipe(t, ctrl, "stall.test", newScript(payload)))
+	var opened []*Pipe
+	for range pipes {
+		opened = append(opened, openPipe(t, ctrl, "stall.test", newScript(payload)))
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	want := int64(pipes)*int64(StreamWindow) - int64(pipes)*int64(maxRecord)
+	deadline := time.Now().Add(5 * time.Second)
 	var sent int64
 	for time.Now().Before(deadline) {
 		sent = 0
-		for _, p := range pipes {
+		for _, p := range opened {
 			sent += p.Result().BytesSent
 		}
-		if sent >= int64(TunnelWindow-maxRecord) {
+		if sent >= want {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if sent < int64(TunnelWindow-maxRecord) {
-		t.Fatalf("connection window did not fill, sent %d", sent)
+	if sent < want {
+		t.Fatalf("pipes stalled below the connection window, sent %d want %d", sent, want)
 	}
 	ctrl.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
 	select {
@@ -325,9 +337,27 @@ func TestCloseReturnsWhileTheWindowIsFull(t *testing.T) {
 		}
 	}, nil)
 	defer stop()
+	const pipes = 32 // startSessionObserved admits 32
 	payload := bytes.Repeat([]byte{7}, StreamWindow)
-	for range 4 {
-		openPipe(t, ctrl, "stall.test", newScript(payload))
+	var opened []*Pipe
+	for range pipes {
+		opened = append(opened, openPipe(t, ctrl, "stall.test", newScript(payload)))
+	}
+	want := int64(ConnectionWindow(pipes)) - int64(pipes)*int64(maxRecord)
+	deadline := time.Now().Add(5 * time.Second)
+	var sent int64
+	for time.Now().Before(deadline) {
+		sent = 0
+		for _, p := range opened {
+			sent += p.Result().BytesSent
+		}
+		if sent >= want {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sent < want {
+		t.Fatalf("connection window did not fill, sent %d want %d", sent, want)
 	}
 	done := make(chan struct{})
 	go func() {
