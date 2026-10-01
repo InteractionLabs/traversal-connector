@@ -291,7 +291,8 @@ func TestCapabilityExhaustedDoesNotDial(t *testing.T) {
 
 func TestRotationDeadlineClosesALivePipe(t *testing.T) {
 	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
-		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+		cfg.RawTunnel.ShutdownGrace = time.Hour
+		cfg.RawTunnel.RotationDeadline = 40 * time.Millisecond
 	})
 	t.Cleanup(m.Shutdown)
 	dstCh := acceptOne(ln)

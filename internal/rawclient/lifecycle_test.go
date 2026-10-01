@@ -331,6 +331,7 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 	cfg := baseConfig(srv.url)
 	cfg.RawTunnel.MaxTunnels = 1
 	cfg.RawTunnel.ShutdownGrace = 200 * time.Millisecond
+	cfg.RawTunnel.RotationDeadline = 200 * time.Millisecond
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
 

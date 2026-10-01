@@ -106,6 +106,7 @@ func baseConfig(controllerURL string) *config.Config {
 			OpenTimeout:         time.Second,
 			PingInterval:        time.Hour,
 			ShutdownGrace:       time.Second,
+			RotationDeadline:    time.Hour,
 			Issuer:              testIssuer,
 			AllowedSubjects:     []string{testSubject},
 			CurrentKeyID:        testKid,

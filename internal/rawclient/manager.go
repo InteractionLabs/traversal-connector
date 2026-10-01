@@ -55,9 +55,9 @@ type Manager struct {
 
 // sessionBound caps active + connecting + draining. MaxTunnels active slots
 // may each keep one drained predecessor while its replacement connects, so
-// the bound is 2×MaxTunnels. Empty drained tunnels are closed locally and a
-// ShutdownGrace deadline force-closes ones that still have pipes, so the
-// draining set cannot grow without limit across repeated controller DRAINs.
+// the bound is 2×MaxTunnels. Empty drained tunnels are closed locally and
+// RotationDeadline force-closes ones that still have pipes, so the draining
+// set cannot grow without limit across repeated controller DRAINs.
 func (m *Manager) sessionBound() int {
 	return 2 * m.cfg.RawTunnel.MaxTunnels
 }
@@ -236,12 +236,12 @@ func (m *Manager) watch(sess *session, next chan struct{}) {
 }
 
 // retireDraining closes a drained tunnel once it has no pipes left, or when
-// ShutdownGrace elapses. That grace is the rotation deadline as well as the
-// shutdown wait. A rotation that still has pipes is not a pod shutdown, so
-// the close reason is rotation_deadline rather than connector_terminating.
+// RotationDeadline elapses. Shutdown does not wait on this timer: it closes
+// the tunnel after ShutdownGrace, and that close wakes Done. A rotation that
+// still has pipes is not a pod shutdown, so the close reason is
+// rotation_deadline rather than connector_terminating.
 func (m *Manager) retireDraining(sess *session) {
-	grace := m.cfg.RawTunnel.ShutdownGrace
-	timer := time.NewTimer(grace)
+	timer := time.NewTimer(m.cfg.RawTunnel.RotationDeadline)
 	defer timer.Stop()
 	select {
 	case <-sess.mux.Drained():
@@ -249,8 +249,8 @@ func (m *Manager) retireDraining(sess *session) {
 	case <-sess.mux.Done():
 		return
 	}
-	// Shutdown drains too, and this timer is the same grace. A pod that is
-	// exiting must still report connector_terminating.
+	// Shutdown drains too. A pod that is already exiting must report
+	// connector_terminating even when this rotation timer fires first.
 	reason := pb.RawCloseReason_RAW_CLOSE_REASON_ROTATION_DEADLINE
 	if m.isShutdown() {
 		reason = pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING

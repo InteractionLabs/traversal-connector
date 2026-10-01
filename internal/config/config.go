@@ -45,6 +45,7 @@ const (
 	defaultRawMaxLifetime          = 4 * time.Hour
 	defaultRawOpenTimeout          = 30 * time.Second
 	defaultRawPingInterval         = 30 * time.Second
+	defaultRawRotationDeadline     = 15 * time.Minute
 	defaultRawShutdownGrace        = 30 * time.Second
 	minRawWindowBytes              = 16 << 10
 	maxRawWindowBytes              = 16 << 20
@@ -189,11 +190,17 @@ type RawTunnelConfig struct {
 	// Maximum pipe lifetime (MaxLifetime) begins at OPENED / Start, not OPEN.
 	OpenTimeout  time.Duration
 	PingInterval time.Duration
-	// ShutdownGrace bounds both process shutdown and tunnel rotation. Shutdown
-	// waits this long, then closes remaining pipes with connector_terminating.
-	// A rotation that still has pipes when the grace elapses closes them with
-	// rotation_deadline instead, so a healthy pod is not reported as terminating.
-	ShutdownGrace             time.Duration
+	// ShutdownGrace is how long process shutdown waits before closing
+	// remaining pipes with connector_terminating. It must stay shorter than
+	// the pod's termination grace.
+	ShutdownGrace time.Duration
+	// RotationDeadline is how long a drained tunnel may keep pipes that are
+	// still open. When it elapses those pipes close with rotation_deadline.
+	// It is separate from ShutdownGrace: a pipe can outlast pod termination,
+	// and the deadline must stay shorter than the controller tunnel lifetime
+	// (default 20 minutes) so the extra session slot frees before the next
+	// rotation.
+	RotationDeadline          time.Duration
 	Issuer                    string
 	AllowedSubjects           []string
 	CurrentKeyID              string
@@ -690,6 +697,11 @@ func loadRawTunnelConfig() (RawTunnelConfig, error) {
 		return RawTunnelConfig{}, err
 	}
 	cfg.ShutdownGrace = time.Duration(graceSeconds) * time.Second
+	if cfg.RotationDeadline, err = env.ParseDuration(
+		"RAW_TUNNEL_ROTATION_DEADLINE", defaultRawRotationDeadline,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
 	cfg.Issuer = env.GetEnvString("RAW_TUNNEL_ISSUER", "")
 	cfg.AllowedSubjects = splitList(env.GetEnvString(
 		"RAW_TUNNEL_ALLOWED_SUBJECTS", "",
@@ -733,8 +745,11 @@ func (r RawTunnelConfig) validate() error {
 		return errors.New("raw tunnel pipe limits are too large")
 	}
 	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.OpenTimeout <= 0 ||
-		r.ShutdownGrace <= 0 || r.PingInterval <= 0 {
+		r.ShutdownGrace <= 0 || r.PingInterval <= 0 || r.RotationDeadline <= 0 {
 		return errors.New("raw tunnel timeouts must be positive")
+	}
+	if r.RotationDeadline < time.Second {
+		return errors.New("raw tunnel timeouts must be at least 1s")
 	}
 	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||
 		r.CurrentKeyID == "" || r.CurrentPublicKeyPEM == "" {

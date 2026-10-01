@@ -1023,6 +1023,7 @@ func disabledRawTunnel() RawTunnelConfig {
 		OpenTimeout:       30 * time.Second,
 		PingInterval:      30 * time.Second,
 		ShutdownGrace:     30 * time.Second,
+		RotationDeadline:  15 * time.Minute,
 	}
 }
 
