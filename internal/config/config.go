@@ -47,8 +47,8 @@ const (
 	defaultRawPingInterval         = 30 * time.Second
 	defaultRawRotationDeadline     = 15 * time.Minute
 	defaultRawShutdownGrace        = 30 * time.Second
-	minRawWindowBytes = 16 << 10
-	maxRawWindowBytes = 16 << 20
+	minRawWindowBytes              = 16 << 10
+	maxRawWindowBytes              = 16 << 20
 	// Hard ceilings grounded in per-tunnel goroutine, HTTP/2 connection, and
 	// pipe buffer cost. Defaults stay far below these; they only reject
 	// configs that would exhaust the process before any useful load.

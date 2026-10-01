@@ -205,7 +205,9 @@ affinity: {}
 # Disabled by default. Enabling does not change the customer hostname, port
 # 443, mTLS identity, or firewall rules, and it does not change legacy tunnel
 # count, readiness, or health. Hosts covered by a redaction rule are refused
-# before dial. A customer forward proxy for raw destinations is
+# before dial. A rule with no hosts filter refuses every raw pipe. An IP
+# literal is refused when any rule lists hosts, because that rule cannot
+# match the address. A customer forward proxy for raw destinations is
 # rawTunnel.httpsProxy (HTTPS_PROXY and NO_PROXY on the connector container),
 # not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
 # allowDelegatedProxyChecks is true. Prefer existingSecret over url. The
@@ -232,6 +234,10 @@ rawTunnel:
   # session slot frees before the next rotation. Pod shutdown uses
   # shutdownGraceSeconds, which must stay under terminationGraceSeconds.
   rotationDeadline: 15m
+  # Receive windows in bytes. Zero uses the library defaults: 256KiB per pipe
+  # and 1MiB on the outer gRPC stream. Set only to raise a window.
+  streamWindowBytes: 0
+  outerWindowBytes: 0
   issuer: ""
   allowedSubjects: []
   currentKeyID: ""

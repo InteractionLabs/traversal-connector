@@ -69,8 +69,19 @@
 {{- if le $rawRotation 0 }}
 {{- fail "rawTunnel.rotationDeadline must be at least 1s" }}
 {{- end }}
+{{- if gt $rawRotation $rawLife }}
+{{- fail "rawTunnel.rotationDeadline must not exceed rawTunnel.maxLifetime" }}
+{{- end }}
 {{- if gt $rawIdle $rawLife }}
 {{- fail "rawTunnel.idleTimeout must not exceed rawTunnel.maxLifetime" }}
+{{- end }}
+{{- $rawStream := int .Values.rawTunnel.streamWindowBytes }}
+{{- $rawOuter := int .Values.rawTunnel.outerWindowBytes }}
+{{- if and (ne $rawStream 0) (or (lt $rawStream 16384) (gt $rawStream 16777216)) }}
+{{- fail "rawTunnel.streamWindowBytes must be 0 or from 16KiB to 16MiB" }}
+{{- end }}
+{{- if and (ne $rawOuter 0) (or (lt $rawOuter 16384) (gt $rawOuter 16777216)) }}
+{{- fail "rawTunnel.outerWindowBytes must be 0 or from 16KiB to 16MiB" }}
 {{- end }}
 {{- $rawProxy := .Values.rawTunnel.httpsProxy | default dict }}
 {{- if and $rawProxy.url $rawProxy.existingSecret }}
@@ -322,6 +333,10 @@ spec:
               value: {{ .Values.rawTunnel.shutdownGraceSeconds | quote }}
             - name: RAW_TUNNEL_ROTATION_DEADLINE
               value: {{ .Values.rawTunnel.rotationDeadline | quote }}
+            - name: RAW_TUNNEL_STREAM_WINDOW
+              value: {{ .Values.rawTunnel.streamWindowBytes | quote }}
+            - name: RAW_TUNNEL_OUTER_WINDOW
+              value: {{ .Values.rawTunnel.outerWindowBytes | quote }}
             - name: RAW_TUNNEL_ISSUER
               value: {{ .Values.rawTunnel.issuer | quote }}
             - name: RAW_TUNNEL_ALLOWED_SUBJECTS

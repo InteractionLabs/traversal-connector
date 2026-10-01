@@ -146,6 +146,8 @@ render raw-wired "$fixtures/direct-export-values.yaml" \
   --set rawTunnel.shutdownGraceSeconds=20 \
   --set rawTunnel.terminationGraceSeconds=40 \
   --set-string rawTunnel.rotationDeadline=10m \
+  --set rawTunnel.streamWindowBytes=65536 \
+  --set rawTunnel.outerWindowBytes=1048576 \
   --set-string rawTunnel.issuer=traversal-raw-tunnel/wired \
   --set-string 'rawTunnel.allowedSubjects[0]=signer-a' \
   --set-string 'rawTunnel.allowedSubjects[1]=signer-b' \
@@ -166,6 +168,8 @@ assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_OPEN_
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_PING_INTERVAL\n              value: "15s"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS\n              value: "20"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ROTATION_DEADLINE\n              value: "10m"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_STREAM_WINDOW\n              value: "65536"'
+assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_OUTER_WINDOW\n              value: "1048576"'
 assert_contains "$tmp_dir/raw-wired.yaml" 'terminationGracePeriodSeconds: 40'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ISSUER\n              value: "traversal-raw-tunnel/wired"'
 assert_contains "$tmp_dir/raw-wired.yaml" $'            - name: RAW_TUNNEL_ALLOWED_SUBJECTS\n              value: "signer-a,signer-b"'
@@ -273,6 +277,11 @@ assert_render_fails raw-idle-exceeds-life 'idleTimeout must not exceed' "${commo
   --set-string rawTunnel.maxLifetime=1h
 assert_render_fails raw-rotation-short 'rawTunnel.rotationDeadline must be at least 1s' "${common[@]}" "${raw_required[@]}" \
   --set-string rawTunnel.rotationDeadline=500ms
+assert_render_fails raw-rotation-exceeds-life 'rotationDeadline must not exceed' "${common[@]}" "${raw_required[@]}" \
+  --set-string rawTunnel.rotationDeadline=5h \
+  --set-string rawTunnel.maxLifetime=1h
+assert_render_fails raw-stream-window 'streamWindowBytes must be 0 or from 16KiB' "${common[@]}" "${raw_required[@]}" \
+  --set rawTunnel.streamWindowBytes=1000
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
