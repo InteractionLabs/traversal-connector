@@ -72,7 +72,9 @@ func readFrame(r io.Reader) ([]byte, error) {
 		if _, err := io.ReadFull(r, raw[:]); err != nil {
 			return nil, err
 		}
-		return nil, &closeError{reason: pb.RawCloseReason(binary.BigEndian.Uint32(raw[:]))}
+		//nolint:gosec // G115: wire reason is a small int32 enum
+		reason := pb.RawCloseReason(binary.BigEndian.Uint32(raw[:]))
+		return nil, &closeError{reason: reason}
 	case n > maxRecord:
 		return nil, errRecordTooLarge
 	}
@@ -121,7 +123,8 @@ func (w recordWriter) frame(p []byte) error {
 	// One Write so a close record on the same pipe cannot land between the
 	// length and the payload. io.Pipe keeps each Write contiguous.
 	buf := make([]byte, 4+len(p))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(p)))
+	n := uint32(len(p)) //nolint:gosec // G115: len(p) <= maxRecord
+	binary.BigEndian.PutUint32(buf[:4], n)
 	copy(buf[4:], p)
 	if _, err := w.w.Write(buf); err != nil {
 		return err
@@ -135,7 +138,8 @@ func (w recordWriter) frame(p []byte) error {
 func (w recordWriter) frameClose(reason pb.RawCloseReason) error {
 	var buf [8]byte
 	binary.BigEndian.PutUint32(buf[0:4], closeMark)
-	binary.BigEndian.PutUint32(buf[4:8], uint32(reason))
+	reasonWire := uint32(reason) //nolint:gosec // G115: enum fits in uint32
+	binary.BigEndian.PutUint32(buf[4:8], reasonWire)
 	if _, err := w.w.Write(buf[:]); err != nil {
 		return err
 	}

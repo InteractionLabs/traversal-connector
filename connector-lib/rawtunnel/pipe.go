@@ -247,7 +247,7 @@ func (p *Pipe) roundTrip() {
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, helloLimit))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		var oe pb.RawOpenError
 		if proto.Unmarshal(body, &oe) == nil && protovalidate.Validate(&oe) == nil {
 			p.mu.Lock()
@@ -267,7 +267,7 @@ func (p *Pipe) roundTrip() {
 	}
 	p.mu.Unlock()
 	if finished {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 }
 

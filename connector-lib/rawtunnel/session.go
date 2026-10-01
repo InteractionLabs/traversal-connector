@@ -518,7 +518,7 @@ func (m *Mux) shutdown(err error) {
 			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 		if !keepStatus {
 			if m.cc != nil {
-				m.cc.Close()
+				_ = m.cc.Close()
 			}
 			_ = m.conn.Close()
 		}
@@ -530,7 +530,8 @@ func (m *Mux) serve() error {
 	srv := &http2.Server{
 		// Pipes, the control stream, and one drain request. The drain must still
 		// open after every pipe slot is taken.
-		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 3),
+		// MaxPipes is validated to a small limit, so the cap fits in uint32.
+		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 3), //nolint:gosec // G115
 		MaxUploadBufferPerStream:     StreamWindow,
 		MaxUploadBufferPerConnection: TunnelWindow,
 		MaxReadFrameSize:             maxChunk,
@@ -663,9 +664,15 @@ func (m *Mux) admit(open *pb.RawOpen) (*Pipe, *pb.RawOpenError) {
 	case m.err != nil:
 		return fail(pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR, "tunnel closed")
 	case m.localDrain || m.peerDrain:
-		return fail(pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING, "tunnel draining")
+		return fail(
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CONNECTOR_DRAINING,
+			"tunnel draining",
+		)
 	case m.slots >= m.cfg.MaxPipes:
-		return fail(pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY, "tunnel at pipe capacity")
+		return fail(
+			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_CAPACITY,
+			"tunnel at pipe capacity",
+		)
 	case open.GetPipeId() == 0:
 		return fail(
 			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR,
@@ -794,7 +801,7 @@ func (m *Mux) openControl(ctx context.Context) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, ErrIncompatibleHello
 	}
 	return resp.Body, nil
@@ -846,7 +853,7 @@ func (m *Mux) postDrain(body []byte) {
 	if err != nil {
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 func (m *Mux) handleDrain(w http.ResponseWriter, r *http.Request) {
@@ -930,7 +937,8 @@ func encodeReset(id uint64, reason pb.RawCloseReason) []byte {
 	out := make([]byte, 13)
 	out[0] = controlReset
 	binary.BigEndian.PutUint64(out[1:9], id)
-	binary.BigEndian.PutUint32(out[9:13], uint32(reason))
+	reasonWire := uint32(reason) //nolint:gosec // G115: enum fits in uint32
+	binary.BigEndian.PutUint32(out[9:13], reasonWire)
 	return out
 }
 
@@ -951,6 +959,7 @@ func (m *Mux) applyControl(body []byte) bool {
 			return false
 		}
 		id := binary.BigEndian.Uint64(body[1:9])
+		//nolint:gosec // G115: wire reason is a small int32 enum
 		reason := pb.RawCloseReason(binary.BigEndian.Uint32(body[9:13]))
 		if reason == pb.RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED ||
 			reason == pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED {
@@ -1029,7 +1038,7 @@ func writeOpenError(w http.ResponseWriter, e *pb.RawOpenError) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusConflict)
-	_, _ = w.Write(b)
+	_, _ = w.Write(b) //nolint:gosec // G705: body is a marshaled protobuf, not HTML
 }
 
 func flush(w http.ResponseWriter) {

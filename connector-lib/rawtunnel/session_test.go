@@ -5,12 +5,81 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 )
+
+func TestSessionIdentityAndOuterWindow(t *testing.T) {
+	ctrl := startSession(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+		if err := p.Start(newEcho()); err != nil {
+			t.Errorf("start: %v", err)
+		}
+	})
+	if ctrl.TunnelID() != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("tunnel id %q", ctrl.TunnelID())
+	}
+	select {
+	case <-ctrl.Done():
+		t.Fatal("session ended before close")
+	case <-ctrl.Drained():
+		t.Fatal("session drained before close")
+	default:
+	}
+	pipe := openPipe(t, ctrl, "id.test", newScript([]byte("x")))
+	if pipe.ID() == 0 {
+		t.Fatal("pipe id is zero")
+	}
+	var cfg http.HTTP2Config
+	ApplyOuterWindows(&cfg)
+	if cfg.MaxReceiveBufferPerStream != TunnelWindow ||
+		cfg.MaxReceiveBufferPerConnection != TunnelWindow {
+		t.Fatalf("windows %d %d", cfg.MaxReceiveBufferPerStream, cfg.MaxReceiveBufferPerConnection)
+	}
+	var http2cfg http.HTTP2Config
+	ConfigureHTTP2(&http2cfg)
+	if http2cfg.SendPingTimeout != DefaultPingInterval ||
+		http2cfg.PingTimeout != DefaultPingTimeout ||
+		http2cfg.WriteByteTimeout != DefaultWriteByteTimeout {
+		t.Fatal("http2 timeouts were not set")
+	}
+}
+
+type memChunks struct {
+	msgs []*pb.RawTunnelChunk
+}
+
+func (m *memChunks) Send(c *pb.RawTunnelChunk) error {
+	b := append([]byte(nil), c.GetData()...)
+	m.msgs = append(m.msgs, &pb.RawTunnelChunk{Data: b})
+	return nil
+}
+
+func (m *memChunks) Receive() (*pb.RawTunnelChunk, error) {
+	if len(m.msgs) == 0 {
+		return nil, io.EOF
+	}
+	c := m.msgs[0]
+	m.msgs = m.msgs[1:]
+	return c, nil
+}
+
+func TestFromChunksCopiesOneMessage(t *testing.T) {
+	src := FromChunks(&memChunks{})
+	if err := src.Send([]byte{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Fatalf("chunk %v", got)
+	}
+}
 
 func TestSessionEcho(t *testing.T) {
 	payload := bytes.Repeat([]byte("echo-bytes."), 40<<10)
@@ -62,7 +131,12 @@ func TestSessionStallDoesNotBlockOtherPipes(t *testing.T) {
 
 	// Larger than one stream window, smaller than the connection window, so a
 	// pipe nobody reads cannot stop the session's other pipes.
-	stall := openPipe(t, ctrl, "stall.test", newScript(bytes.Repeat([]byte{7}, StreamWindow+64<<10)))
+	stall := openPipe(
+		t,
+		ctrl,
+		"stall.test",
+		newScript(bytes.Repeat([]byte{7}, StreamWindow+64<<10)),
+	)
 	select {
 	case <-stall.Done():
 		t.Fatal("unread pipe ended on its own")
@@ -101,7 +175,12 @@ func TestResetUnblocksAStalledPeer(t *testing.T) {
 			t.Errorf("start: %v", err)
 		}
 	})
-	stall := openPipe(t, ctrl, "stall.test", newScript(bytes.Repeat([]byte{7}, StreamWindow+64<<10)))
+	stall := openPipe(
+		t,
+		ctrl,
+		"stall.test",
+		newScript(bytes.Repeat([]byte{7}, StreamWindow+64<<10)),
+	)
 	select {
 	case <-stall.Done():
 		t.Fatal("unread pipe ended on its own")
