@@ -41,27 +41,55 @@ const (
 )
 
 // ConnectionWindow is the inner HTTP/2 connection window for a session that
-// admits maxPipes pipes. Each pipe may park StreamWindow unread bytes, so the
-// connection window is that sum: one unread pipe cannot stop the others.
+// admits maxPipes pipes at the default per-pipe window. Each pipe may park
+// StreamWindow unread bytes, so the connection window is that sum: one unread
+// pipe cannot stop the others.
 //
 // The window is advertised when the connection starts, from this side's cap.
 // Hello may lower the pipe count afterward. HTTP/2 cannot shrink a window,
 // and the pipes that are not opened simply leave the extra allowance unused.
 func ConnectionWindow(maxPipes int) int {
+	return connectionWindow(maxPipes, StreamWindow)
+}
+
+func streamWindow(override int) int {
+	if override < 1 {
+		return StreamWindow
+	}
+	if override > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return override
+}
+
+func connectionWindow(maxPipes, perPipe int) int {
 	if maxPipes < 1 {
 		maxPipes = 1
 	}
+	if perPipe < 1 {
+		perPipe = StreamWindow
+	}
 	maxWindow := math.MaxInt32
-	if maxPipes > maxWindow/StreamWindow {
+	if maxPipes > maxWindow/perPipe {
 		return maxWindow
 	}
-	return maxPipes * StreamWindow
+	return maxPipes * perPipe
 }
 
-// ApplyOuterWindows sets the gRPC connection's receive windows to exactly one
-// outer window. The raw-tunnel client must call it: the HTTP/2 client default
-// is much larger, and bytes the application has not Recv'd stay in that window.
+// ApplyOuterWindow sets the gRPC connection's receive windows. A non-positive
+// window uses TunnelWindow. The raw-tunnel client must call it: the HTTP/2
+// client default is much larger, and bytes the application has not Recv'd
+// stay in that window.
+func ApplyOuterWindow(cfg *http.HTTP2Config, window int) {
+	if window < 1 {
+		window = TunnelWindow
+	}
+	cfg.MaxReceiveBufferPerStream = window
+	cfg.MaxReceiveBufferPerConnection = window
+}
+
+// ApplyOuterWindows sets the gRPC connection's receive windows to the default
+// outer window.
 func ApplyOuterWindows(cfg *http.HTTP2Config) {
-	cfg.MaxReceiveBufferPerStream = TunnelWindow
-	cfg.MaxReceiveBufferPerConnection = TunnelWindow
+	ApplyOuterWindow(cfg, TunnelWindow)
 }

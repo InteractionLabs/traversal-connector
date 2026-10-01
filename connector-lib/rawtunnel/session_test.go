@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -45,6 +46,15 @@ func TestSessionIdentityAndOuterWindow(t *testing.T) {
 	}
 	if got := ConnectionWindow(math.MaxInt32); got != math.MaxInt32 {
 		t.Fatalf("connection window overflowed: %d", got)
+	}
+	var custom http.HTTP2Config
+	ApplyOuterWindow(&custom, 2<<20)
+	if custom.MaxReceiveBufferPerStream != 2<<20 ||
+		custom.MaxReceiveBufferPerConnection != 2<<20 {
+		t.Fatalf("custom windows %d %d", custom.MaxReceiveBufferPerStream, custom.MaxReceiveBufferPerConnection)
+	}
+	if got := connectionWindow(4, 64<<10); got != 4*(64<<10) {
+		t.Fatalf("narrow connection window %d", got)
 	}
 	var http2cfg http.HTTP2Config
 	ConfigureHTTP2(&http2cfg)
@@ -126,7 +136,17 @@ func TestTwoPipesEcho(t *testing.T) {
 }
 
 func TestSessionStallDoesNotBlockOtherPipes(t *testing.T) {
-	ctrl := startSession(t, TunnelWindow, func(p *Pipe, open *pb.RawOpen) {
+	for _, stream := range []int{0, 64 << 10} {
+		t.Run(fmt.Sprintf("stream=%d", streamWindow(stream)), func(t *testing.T) {
+			testSessionStallDoesNotBlockOtherPipes(t, stream)
+		})
+	}
+}
+
+func testSessionStallDoesNotBlockOtherPipes(t *testing.T, stream int) {
+	t.Helper()
+	perPipe := streamWindow(stream)
+	ctrl := startSessionWindow(t, TunnelWindow, stream, func(p *Pipe, open *pb.RawOpen) {
 		local := Local(newEcho())
 		if open.GetHost() == "stall.test" {
 			local = newHold()
@@ -142,7 +162,7 @@ func TestSessionStallDoesNotBlockOtherPipes(t *testing.T) {
 		t,
 		ctrl,
 		"stall.test",
-		newScript(bytes.Repeat([]byte{7}, StreamWindow+64<<10)),
+		newScript(bytes.Repeat([]byte{7}, perPipe+64<<10)),
 	)
 	select {
 	case <-stall.Done():
@@ -253,17 +273,19 @@ func TestRefusalIsAnOpenError(t *testing.T) {
 
 func TestTunnelWindowBoundsQueuedBytes(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		outer int
-		n     int
-		size  int
+		name   string
+		outer  int
+		stream int
+		n      int
+		size   int
 	}{
-		{name: "production", outer: TunnelWindow, n: 8, size: 512 << 10},
-		{name: "outer smaller than inner", outer: 64 << 10, n: 4, size: 1 << 20},
+		{name: "production", outer: TunnelWindow, stream: 0, n: 8, size: 512 << 10},
+		{name: "outer smaller than inner", outer: 64 << 10, stream: 0, n: 4, size: 1 << 20},
+		{name: "narrow stream", outer: TunnelWindow, stream: 64 << 10, n: 4, size: 128 << 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var maxQueued func() int
-			ctrl, _, stop := startSessionObserved(t, tc.outer, func(p *Pipe, _ *pb.RawOpen) {
+			ctrl, _, stop := startSessionObserved(t, tc.outer, tc.stream, func(p *Pipe, _ *pb.RawOpen) {
 				if err := p.Start(newEcho()); err != nil {
 					t.Errorf("start: %v", err)
 				}
@@ -295,7 +317,7 @@ func TestDrainCrossesAFullConnectionWindow(t *testing.T) {
 	// 2 MiB, past the 1 MiB outer window, so this fails if the inner
 	// connection window is still the outer window.
 	const pipes = 8
-	ctrl, conn, stop := startSessionObserved(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+	ctrl, conn, stop := startSessionObserved(t, TunnelWindow, 0, func(p *Pipe, _ *pb.RawOpen) {
 		if err := p.Start(newHold()); err != nil {
 			t.Errorf("start: %v", err)
 		}
@@ -331,7 +353,7 @@ func TestDrainCrossesAFullConnectionWindow(t *testing.T) {
 }
 
 func TestCloseReturnsWhileTheWindowIsFull(t *testing.T) {
-	ctrl, _, stop := startSessionObserved(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+	ctrl, _, stop := startSessionObserved(t, TunnelWindow, 0, func(p *Pipe, _ *pb.RawOpen) {
 		if err := p.Start(newHold()); err != nil {
 			t.Errorf("start: %v", err)
 		}
@@ -480,13 +502,20 @@ func waitDone(t *testing.T, p *Pipe) {
 
 func startSession(t *testing.T, outer int, accept func(*Pipe, *pb.RawOpen)) *Mux {
 	t.Helper()
-	ctrl, _, stop := startSessionObserved(t, outer, accept, nil)
+	return startSessionWindow(t, outer, 0, accept)
+}
+
+func startSessionWindow(
+	t *testing.T, outer, stream int, accept func(*Pipe, *pb.RawOpen),
+) *Mux {
+	t.Helper()
+	ctrl, _, stop := startSessionObserved(t, outer, stream, accept, nil)
 	t.Cleanup(stop)
 	return ctrl
 }
 
 func startSessionObserved(
-	t *testing.T, outer int, accept func(*Pipe, *pb.RawOpen), queued *func() int,
+	t *testing.T, outer, stream int, accept func(*Pipe, *pb.RawOpen), queued *func() int,
 ) (*Mux, *Mux, func()) {
 	t.Helper()
 	left, right, maxQueued := newWindowPair(outer)
@@ -504,6 +533,7 @@ func startSessionObserved(
 		Role:         RoleController,
 		TunnelID:     "550e8400-e29b-41d4-a716-446655440000",
 		MaxPipes:     32,
+		StreamWindow: stream,
 		IdleTimeout:  time.Hour,
 		MaxLifetime:  time.Hour,
 		PingInterval: time.Hour,
@@ -516,6 +546,7 @@ func startSessionObserved(
 	conn, err := New(Config{
 		Role:         RoleConnector,
 		MaxPipes:     32,
+		StreamWindow: stream,
 		IdleTimeout:  time.Hour,
 		MaxLifetime:  time.Hour,
 		PingInterval: time.Hour,
@@ -708,6 +739,48 @@ func (s windowStream) Close() error {
 	s.out.close()
 	s.in.close()
 	return nil
+}
+
+func TestDrainIsQueuedWhenControlRecordsAreDropped(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	drops := 0
+	_, right, _ := newWindowPair(TunnelWindow)
+	mux, err := New(Config{
+		Role:     RoleConnector,
+		MaxPipes: 1,
+		Hello: &pb.RawConnectorHello{
+			SupportedProtocolVersions: []uint32{ProtocolVersion},
+			Hostname:                  "edge-1",
+			MaxPipes:                  1,
+			SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+		},
+		Abort: cancel,
+		Accept: func(*Pipe, *pb.RawOpen) {
+		},
+		OnControlDrop: func() { drops++ },
+	}, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST)
+	capacity := cap(mux.controlOut)
+	for range capacity {
+		mux.sendControl([]byte{1})
+	}
+	if drops != 0 {
+		t.Fatalf("drops = %d before the buffer was full", drops)
+	}
+	mux.sendControl([]byte{1})
+	if drops != 1 {
+		t.Fatalf("drops = %d, want 1", drops)
+	}
+	mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_SHUTDOWN)
+	select {
+	case <-mux.drainOut:
+	default:
+		t.Fatal("drain was dropped with the control buffer full")
+	}
 }
 
 func newWindowPair(window int) (left, right Stream, maxQueued func() int) {

@@ -90,9 +90,16 @@ type Config struct {
 	// OnReset is called when this side resets a pipe or the tunnel drops it.
 	// origin is "sent" or "received". It must not block or use the Mux.
 	OnReset func(origin, phase string, reason pb.RawCloseReason)
-	// OnSendStall is unused. HTTP/2 paces a pipe that has no window; the field
-	// remains so callers can keep the hook they already pass.
-	OnSendStall func()
+	// OnControlDrop is called when a connector control record other than
+	// drain is discarded because the send buffer is full. It must not block
+	// or use the Mux. Drain has its own slot and is not counted here.
+	OnControlDrop func()
+	// StreamWindow is this side's per-pipe HTTP/2 receive window. Zero uses
+	// the package default. The connection window is this value times MaxPipes.
+	StreamWindow int
+	// OuterWindow is this side's outer gRPC receive window. Zero uses the
+	// package default. ApplyOuterWindow is what sets it on the gRPC connection.
+	OuterWindow int
 }
 
 // Mux is one raw tunnel: an HTTP/2 session carried on the outer gRPC stream.
@@ -116,6 +123,8 @@ type Mux struct {
 
 	cc *http2.ClientConn
 	tr *http.Transport
+
+	drainOut chan []byte
 
 	controlOut chan []byte
 	controlMu  sync.Mutex
@@ -202,6 +211,7 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 		draining:     make(chan struct{}),
 		drained:      make(chan struct{}),
 		controlOut:   make(chan []byte, cfg.MaxPipes+8),
+		drainOut:     make(chan []byte, 1),
 		pipes:        make(map[uint64]*Pipe),
 		seen:         make(map[uint64]struct{}),
 		handlersIdle: make(chan struct{}),
@@ -352,7 +362,9 @@ func (m *Mux) Drain(reason pb.RawDrainReason) {
 		}()
 		return
 	}
-	m.sendControl(body)
+	// The connector cannot open its own request. Drain uses a reserved slot
+	// so a buffer full of resets cannot drop the shutdown signal.
+	m.sendDrain(body)
 }
 
 // waitDrainPosted lets the controller's drain request finish before Close
@@ -528,13 +540,14 @@ func (m *Mux) shutdown(err error) {
 
 func (m *Mux) serve() error {
 	// ConnectionWindow caps at MaxInt32, so the conversion cannot overflow.
-	uploadWindow := int32(ConnectionWindow(m.cfg.MaxPipes)) //nolint:gosec // G115
+	streamWindow := streamWindow(m.cfg.StreamWindow)
+	uploadWindow := int32(connectionWindow(m.cfg.MaxPipes, streamWindow)) //nolint:gosec // G115
 	srv := &http2.Server{
 		// Pipes, the control stream, and one drain request. The drain must still
 		// open after every pipe slot is taken.
 		// MaxPipes is validated to a small limit, so the cap fits in uint32.
 		MaxConcurrentStreams:         uint32(m.cfg.MaxPipes + 3), //nolint:gosec // G115
-		MaxUploadBufferPerStream:     StreamWindow,
+		MaxUploadBufferPerStream:     int32(streamWindow),        //nolint:gosec // G115
 		MaxUploadBufferPerConnection: uploadWindow,
 		MaxReadFrameSize:             maxChunk,
 		IdleTimeout:                  0,
@@ -588,19 +601,38 @@ func (m *Mux) handleControl(w http.ResponseWriter, r *http.Request) {
 		m.readControl(r.Body)
 		close(bodyDone)
 	}()
+	writer := recordWriter{w: w, flush: func() { flush(w) }}
 	for {
-		select {
-		case msg := <-m.controlOut:
-			if err := (recordWriter{w: w, flush: func() { flush(w) }}).frame(msg); err != nil {
-				return
-			}
-		case <-bodyDone:
-			return
-		case <-r.Context().Done():
-			return
-		case <-m.done:
+		msg, ok := m.nextControl(bodyDone, r.Context().Done())
+		if !ok {
 			return
 		}
+		if err := writer.frame(msg); err != nil {
+			return
+		}
+	}
+}
+
+// nextControl prefers a queued drain over ordinary control records. Drain is
+// how shutdown reaches the controller, so it must not wait behind a full
+// buffer of resets.
+func (m *Mux) nextControl(bodyDone, reqDone <-chan struct{}) ([]byte, bool) {
+	select {
+	case msg := <-m.drainOut:
+		return msg, true
+	default:
+	}
+	select {
+	case msg := <-m.drainOut:
+		return msg, true
+	case msg := <-m.controlOut:
+		return msg, true
+	case <-bodyDone:
+		return nil, false
+	case <-reqDone:
+		return nil, false
+	case <-m.done:
+		return nil, false
 	}
 }
 
@@ -703,9 +735,10 @@ func (m *Mux) dial(ctx context.Context) error {
 		return err
 	}
 	h2.AllowHTTP = true
+	streamWindow := streamWindow(m.cfg.StreamWindow)
 	tr.HTTP2 = &http.HTTP2Config{
-		MaxReceiveBufferPerStream:     StreamWindow,
-		MaxReceiveBufferPerConnection: ConnectionWindow(m.cfg.MaxPipes),
+		MaxReceiveBufferPerStream:     streamWindow,
+		MaxReceiveBufferPerConnection: connectionWindow(m.cfg.MaxPipes, streamWindow),
 		MaxReadFrameSize:              maxChunk,
 		SendPingTimeout:               m.cfg.PingInterval,
 		PingTimeout:                   m.cfg.PingTimeout,
@@ -822,6 +855,18 @@ func (m *Mux) sendControl(body []byte) {
 	case m.controlOut <- body:
 	case <-m.done:
 	default:
+		if m.cfg.OnControlDrop != nil {
+			m.cfg.OnControlDrop()
+		}
+	}
+}
+
+func (m *Mux) sendDrain(body []byte) {
+	select {
+	case m.drainOut <- body:
+	case <-m.done:
+	default:
+		// A drain is already queued. The controller only needs one.
 	}
 }
 
