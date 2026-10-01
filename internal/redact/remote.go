@@ -150,6 +150,8 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 	if l.etag != "" {
 		req.Header.Set("If-None-Match", l.etag)
 	}
+	// config.Load restricts this operator-configured URL to the controller origin.
+	// #nosec G704 -- Same-origin endpoint; redirects are disabled by the loader.
 	resp, err := l.client.Do(req)
 	if err != nil {
 		// net/url errors can contain proxy credentials; avoid logging them.
