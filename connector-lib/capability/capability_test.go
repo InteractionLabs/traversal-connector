@@ -486,7 +486,9 @@ func TestUnknownClaimIsIgnoredOnlyWhenAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	strict := newVerifier(t, func() time.Time { return testNow })
-	if _, err := strict.Verify(token, connectorExpected()); codeOf(err) != capability.CodeMalformed {
+	if _, err := strict.Verify(token, connectorExpected()); codeOf(
+		err,
+	) != capability.CodeMalformed {
 		t.Fatalf("strict verify = %v, want malformed", err)
 	}
 	loose, err := capability.NewVerifier(capability.VerifierConfig{
@@ -517,7 +519,9 @@ func TestUnknownClaimIsIgnoredOnlyWhenAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loose.Verify(broken, connectorExpected()); codeOf(err) != capability.CodeMalformed {
+	if _, err := loose.Verify(broken, connectorExpected()); codeOf(
+		err,
+	) != capability.CodeMalformed {
 		t.Fatalf("missing claim = %v, want malformed", err)
 	}
 }
