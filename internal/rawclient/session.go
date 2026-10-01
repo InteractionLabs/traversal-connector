@@ -31,9 +31,10 @@ const (
 )
 
 type connectorHello struct {
-	hostname string
-	maxPipes uint32
-	keyIDs   []string
+	hostname             string
+	maxPipes             uint32
+	keyIDs               []string
+	redactionBlocksPipes bool
 }
 
 func helloFrom(cfg *config.Config) connectorHello {
@@ -65,6 +66,7 @@ func (h connectorHello) message() *pb.RawConnectorHello {
 		Hostname:                  h.hostname,
 		MaxPipes:                  h.maxPipes,
 		TrustedKeyIds:             h.keyIDs,
+		RedactionBlocksPipes:      h.redactionBlocksPipes,
 		SupportedModes: []pb.RawPipeMode{
 			pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
 		},

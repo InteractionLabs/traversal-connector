@@ -411,6 +411,8 @@ Because that dot is removed before matching, the hostname a pattern is compared 
 
 Case-insensitivity uses Unicode case folding, so it applies to non-ASCII hostnames too.
 
+A raw pipe cannot run these rules, because the connector forwards the destination bytes unchanged. A rule with no `hosts` filter matches every destination: while raw tunnels are enabled the connector refuses every raw pipe, logs that at startup, and sets `redaction_blocks_pipes` on its hello so the controller can keep the inspected path. A rule that lists hosts does not match an IP literal. Those destinations are refused too, since the rule cannot be applied to whichever name the address would resolve from.
+
 A non-ASCII hostname is converted to its IDNA ASCII (punycode) form before matching, because that is the form the connection itself uses. **Write the pattern in that ASCII form**, `xn--bcher-kva\.example` rather than `bücher\.example`, since a pattern in the Unicode form matches nothing. Both spellings of one name then select the same rules: a request to `bücher.example` and a request to `xn--bcher-kva.example` are the same host. As with the trailing dot, the pattern text is never converted in turn, because it is a regex and rewriting it could change what it matches. A hostname that is already ASCII is matched as it arrived and is not validated, so a name the conversion would reject, such as one carrying an underscore, still matches a pattern written for it.
 
 `regex-structured-data` rules additionally accept:

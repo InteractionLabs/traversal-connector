@@ -399,8 +399,11 @@ type RawConnectorHello struct {
 	TrustedKeyIds []string `protobuf:"bytes,4,rep,name=trusted_key_ids,json=trustedKeyIds,proto3" json:"trusted_key_ids,omitempty"`
 	// Pipe modes the connector can open.
 	SupportedModes []RawPipeMode `protobuf:"varint,5,rep,packed,name=supported_modes,json=supportedModes,proto3,enum=connector.v1.RawPipeMode" json:"supported_modes,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// True when a redaction rule has no host filter. Every raw destination is
+	// then refused, and the controller should keep the inspected path.
+	RedactionBlocksPipes bool `protobuf:"varint,6,opt,name=redaction_blocks_pipes,json=redactionBlocksPipes,proto3" json:"redaction_blocks_pipes,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *RawConnectorHello) Reset() {
@@ -466,6 +469,13 @@ func (x *RawConnectorHello) GetSupportedModes() []RawPipeMode {
 		return x.SupportedModes
 	}
 	return nil
+}
+
+func (x *RawConnectorHello) GetRedactionBlocksPipes() bool {
+	if x != nil {
+		return x.RedactionBlocksPipes
+	}
+	return false
 }
 
 // RawControllerHello opens a raw tunnel. The controller sends it and assigns
@@ -731,14 +741,15 @@ const file_connector_v1_raw_tunnel_proto_rawDesc = "" +
 	"\n" +
 	"\x1dconnector/v1/raw_tunnel.proto\x12\fconnector.v1\x1a\x1bbuf/validate/validate.proto\"1\n" +
 	"\x0eRawTunnelChunk\x12\x1f\n" +
-	"\x04data\x18\x01 \x01(\fB\v\xbaH\bz\x06\x10\x01\x18\x80\x80\x01R\x04data\"\xbf\x02\n" +
+	"\x04data\x18\x01 \x01(\fB\v\xbaH\bz\x06\x10\x01\x18\x80\x80\x01R\x04data\"\xf5\x02\n" +
 	"\x11RawConnectorHello\x12J\n" +
 	"\x1bsupported_protocol_versions\x18\x01 \x03(\rB\n" +
 	"\xbaH\a\x92\x01\x04\b\x01\x10\x10R\x19supportedProtocolVersions\x12$\n" +
 	"\bhostname\x18\x02 \x01(\tB\b\xbaH\x05r\x03\x18\xfd\x01R\bhostname\x12$\n" +
 	"\tmax_pipes\x18\x03 \x01(\rB\a\xbaH\x04*\x02 \x00R\bmaxPipes\x129\n" +
 	"\x0ftrusted_key_ids\x18\x04 \x03(\tB\x11\xbaH\x0e\x92\x01\v\x10\x10\"\ar\x05\x10\x01\x18\x80\x01R\rtrustedKeyIds\x12W\n" +
-	"\x0fsupported_modes\x18\x05 \x03(\x0e2\x19.connector.v1.RawPipeModeB\x13\xbaH\x10\x92\x01\r\b\x01\x10\b\"\a\x82\x01\x04\x10\x01 \x00R\x0esupportedModes\"o\n" +
+	"\x0fsupported_modes\x18\x05 \x03(\x0e2\x19.connector.v1.RawPipeModeB\x13\xbaH\x10\x92\x01\r\b\x01\x10\b\"\a\x82\x01\x04\x10\x01 \x00R\x0esupportedModes\x124\n" +
+	"\x16redaction_blocks_pipes\x18\x06 \x01(\bR\x14redactionBlocksPipes\"o\n" +
 	"\x12RawControllerHello\x122\n" +
 	"\x10protocol_version\x18\x01 \x01(\rB\a\xbaH\x04*\x02 \x00R\x0fprotocolVersion\x12%\n" +
 	"\ttunnel_id\x18\x02 \x01(\tB\b\xbaH\x05r\x03\xb0\x01\x01R\btunnelId\"\xd3\x01\n" +

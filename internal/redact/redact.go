@@ -189,6 +189,37 @@ func (r *Redactor) HasRulesForHost(host string) bool {
 	return false
 }
 
+// HasUnscopedRule reports a rule with no host filter. That rule matches every
+// destination, including ones a raw pipe would open.
+func (r *Redactor) HasUnscopedRule() bool {
+	if r == nil {
+		return false
+	}
+	rules := *r.rules.Load()
+	for i := range rules {
+		if rules[i].hostMatchers == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// HasHostScopedRule reports a rule that only matches some hostnames. An IP
+// literal never matches that pattern, so a raw dial to the address would skip
+// the rule.
+func (r *Redactor) HasHostScopedRule() bool {
+	if r == nil {
+		return false
+	}
+	rules := *r.rules.Load()
+	for i := range rules {
+		if rules[i].hostMatchers != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
 // ancestor paths, appears in set. "" never matches unless "" is in set.
 // E.g. for field="body|message|inner" the prefixes checked are "body",

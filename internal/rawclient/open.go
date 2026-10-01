@@ -68,9 +68,10 @@ func newVerifier(cfg *config.Config) (*capability.Verifier, error) {
 		keys[cfg.RawTunnel.NextKeyID] = next
 	}
 	return capability.NewVerifier(capability.VerifierConfig{
-		Keys:            keys,
-		Issuer:          cfg.RawTunnel.Issuer,
-		AllowedSubjects: cfg.RawTunnel.AllowedSubjects,
+		Keys:               keys,
+		Issuer:             cfg.RawTunnel.Issuer,
+		AllowedSubjects:    cfg.RawTunnel.AllowedSubjects,
+		AllowUnknownClaims: true,
 	})
 }
 
@@ -102,7 +103,18 @@ func newPolicy(cfg *config.Config, redactor *redact.Redactor) (*dialpolicy.Polic
 	return dialpolicy.New(dialpolicy.Config{
 		Forbidden: prefixes,
 		RequiresInspection: func(host string, _ uint16) bool {
-			return redactor != nil && redactor.HasRulesForHost(host)
+			if redactor == nil {
+				return false
+			}
+			if redactor.HasRulesForHost(host) {
+				return true
+			}
+			// A host-scoped rule does not match an IP literal, so the pipe
+			// would skip inspection. Refuse the address instead.
+			if _, err := netip.ParseAddr(host); err == nil && redactor.HasHostScopedRule() {
+				return true
+			}
+			return false
 		},
 		AllowDelegatedProxyChecks: cfg.RawTunnel.AllowDelegatedProxyChecks,
 	})
@@ -190,6 +202,7 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 	})
 	if err != nil {
 		o.pipes.release()
+		o.logDial(err)
 		o.refuse(tunnelID, open, p, nil, openFailure(err), failureDetail(err))
 		return
 	}
@@ -210,6 +223,7 @@ func (o *opener) accept(tunnelID string, p *rawtunnel.Pipe, open *pb.RawOpen) {
 		if p.Context().Err() != nil && !errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
+		o.logDial(err)
 		o.refuse(tunnelID, open, p, &verified.Claims, dialFailure(err), dialDetail(err))
 		return
 	}
@@ -350,9 +364,35 @@ func failureDetail(err error) string {
 	}
 	var refusal *dialpolicy.Refusal
 	if errors.As(err, &refusal) {
-		return refusal.Error()
+		return refusalDetail(refusal)
 	}
 	return "dial failed"
+}
+
+// refusalDetail is the fixed explanation on the wire. The wrapped error can
+// name a resolved address, a DNS server, or a proxy response, and that stays
+// in the local log.
+func refusalDetail(r *dialpolicy.Refusal) string {
+	switch r.Code {
+	case dialpolicy.CodeResolveFailed:
+		return "name did not resolve"
+	case dialpolicy.CodeForbiddenAddress, dialpolicy.CodeProxyChecksDelegated:
+		return "address forbidden by policy"
+	case dialpolicy.CodeInspectionRequired:
+		return "destination requires inspection"
+	case dialpolicy.CodeInvalidDestination:
+		return "destination is invalid"
+	default:
+		return "dial failed"
+	}
+}
+
+func (o *opener) logDial(err error) {
+	var refusal *dialpolicy.Refusal
+	if errors.As(err, &refusal) {
+		o.log.Warn("raw dial refused", "code", string(refusal.Code), "err", refusal.Unwrap())
+		return
+	}
 }
 
 func dialDetail(err error) string {

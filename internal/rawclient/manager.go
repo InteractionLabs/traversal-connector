@@ -104,6 +104,12 @@ func newManager(
 		return nil, err
 	}
 	m.opener = opener
+	if redactor != nil && redactor.HasUnscopedRule() {
+		m.hello.redactionBlocksPipes = true
+		logger.Warn(
+			"redaction rule has no host filter; raw pipes are refused for every destination",
+		)
+	}
 	return m, nil
 }
 

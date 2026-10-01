@@ -53,6 +53,9 @@ message RawConnectorHello {
       }
     }
   }];
+  // True when a redaction rule has no host filter. Every raw destination is
+  // then refused, and the controller should keep the inspected path.
+  bool redaction_blocks_pipes = 6;
 }
 
 // RawControllerHello opens a raw tunnel. The controller sends it and assigns
