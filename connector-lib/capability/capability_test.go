@@ -459,6 +459,69 @@ func FuzzVerify(f *testing.F) {
 	})
 }
 
+func TestUnknownClaimIsIgnoredOnlyWhenAllowed(t *testing.T) {
+	payload, err := json.Marshal(validClaims(testNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["agent_id"] = json.RawMessage(`"agent-1"`)
+	extra, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := json.Marshal(capability.Header{
+		Algorithm: capability.Algorithm,
+		KeyID:     currentKID,
+		Type:      capability.TokenType,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := capabilitytest.SignRaw(currentKey, header, extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := newVerifier(t, func() time.Time { return testNow })
+	if _, err := strict.Verify(token, connectorExpected()); codeOf(err) != capability.CodeMalformed {
+		t.Fatalf("strict verify = %v, want malformed", err)
+	}
+	loose, err := capability.NewVerifier(capability.VerifierConfig{
+		Issuer: testIssuer,
+		Keys: map[string]*ecdsa.PublicKey{
+			currentKID: &currentKey.PublicKey,
+		},
+		AllowedSubjects:    []string{testSubject},
+		Now:                func() time.Time { return testNow },
+		AllowUnknownClaims: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := loose.Verify(token, connectorExpected())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Claims != validClaims(testNow) {
+		t.Fatalf("claims = %+v", got.Claims)
+	}
+	delete(fields, "connector_id")
+	missing, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken, err := capabilitytest.SignRaw(currentKey, header, missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loose.Verify(broken, connectorExpected()); codeOf(err) != capability.CodeMalformed {
+		t.Fatalf("missing claim = %v, want malformed", err)
+	}
+}
+
 func TestModeClaim(t *testing.T) {
 	if got, ok := capability.ModeClaim(pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH); !ok ||
 		got != capability.ModePassthrough {

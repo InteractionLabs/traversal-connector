@@ -3,10 +3,13 @@
 // exact destination.
 //
 // The token format is deliberately narrower than general JWT. The header has
-// exactly alg "ES256", typ TokenType, and kid; the payload has exactly the
-// Claims fields, each present once with the exact key spelling and type, and a
-// canonical host. Anything else is rejected, so every validator reads the same
-// claims from the same bytes. Validators never report the token itself.
+// exactly alg "ES256", typ TokenType, and kid. A strict verifier also requires
+// the payload to contain exactly the Claims fields, each present once with the
+// exact key spelling and type. A verifier with AllowUnknownClaims still
+// requires those fields and still rejects duplicates, case variants of them,
+// invalid UTF-8, and trailing data, but it ignores payload keys it does not
+// know. The connector uses that so a later claim does not force a customer
+// upgrade. Validators never report the token itself.
 package capability
 
 import (
@@ -167,16 +170,21 @@ type VerifierConfig struct {
 	AllowedSubjects []string
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// AllowUnknownClaims ignores payload keys this verifier does not know.
+	// Required claims are still required. The connector sets this. The
+	// controller leaves it false so a token and a strict parser cannot disagree.
+	AllowUnknownClaims bool
 }
 
 // Verifier checks capabilities and counts authorized attempts per capability
 // on this instance. It is safe for concurrent use.
 type Verifier struct {
-	issuer   string
-	keys     map[string]*ecdsa.PublicKey
-	subjects map[string]bool
-	now      func() time.Time
-	opens    *openCounter
+	issuer       string
+	keys         map[string]*ecdsa.PublicKey
+	subjects     map[string]bool
+	now          func() time.Time
+	opens        *openCounter
+	allowUnknown bool
 }
 
 // NewVerifier validates cfg and returns a Verifier.
@@ -206,11 +214,12 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 		now = time.Now
 	}
 	return &Verifier{
-		issuer:   cfg.Issuer,
-		keys:     keys,
-		subjects: subjects,
-		now:      now,
-		opens:    newOpenCounter(),
+		issuer:       cfg.Issuer,
+		keys:         keys,
+		subjects:     subjects,
+		now:          now,
+		opens:        newOpenCounter(),
+		allowUnknown: cfg.AllowUnknownClaims,
 	}, nil
 }
 
@@ -297,7 +306,7 @@ func (v *Verifier) parse(token string) (*Claims, error) {
 		return nil, fail(CodeMalformed, "token is not a compact JWS")
 	}
 	var header Header
-	if err := decodeSegment(parts[0], headerKeys, &header); err != nil {
+	if err := decodeSegment(parts[0], headerKeys, false, &header); err != nil {
 		return nil, fail(CodeMalformed, "header: "+err.Error())
 	}
 	if header.Algorithm != Algorithm || header.Type != TokenType {
@@ -320,7 +329,7 @@ func (v *Verifier) parse(token string) (*Claims, error) {
 		return nil, fail(CodeInvalidSignature, "signature does not verify")
 	}
 	var claims Claims
-	if err := decodeSegment(parts[1], claimKeys, &claims); err != nil {
+	if err := decodeSegment(parts[1], claimKeys, v.allowUnknown, &claims); err != nil {
 		return nil, fail(CodeMalformed, "claims: "+err.Error())
 	}
 	return &claims, nil
@@ -390,10 +399,12 @@ func checkShape(c *Claims) error {
 }
 
 // decodeSegment decodes one base64url JSON segment into v. The object must
-// contain exactly the keys in want, each once and spelled exactly, because
-// encoding/json would otherwise accept duplicates (last wins) and match keys
+// contain every key in want, each once and spelled exactly. Unknown keys are
+// rejected unless allowUnknown is set, in which case they are ignored and are
+// not passed to encoding/json. Duplicates stay rejected either way, because
+// encoding/json would otherwise keep the last value and match keys
 // case-insensitively, letting two parsers read different claims.
-func decodeSegment(segment string, want map[string]bool, v any) error {
+func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v any) error {
 	raw, err := decodeBase64(segment)
 	if err != nil {
 		return errors.New("invalid base64url")
@@ -414,7 +425,14 @@ func decodeSegment(segment string, want map[string]bool, v any) error {
 		}
 		key, _ := tok.(string)
 		if !want[key] {
-			return errors.New("unexpected field")
+			if !allowUnknown {
+				return errors.New("unexpected field")
+			}
+			var skipped json.RawMessage
+			if err := dec.Decode(&skipped); err != nil {
+				return errors.New("invalid JSON")
+			}
+			continue
 		}
 		if _, dup := fields[key]; dup {
 			return errors.New("duplicate field")
@@ -434,7 +452,13 @@ func decodeSegment(segment string, want map[string]bool, v any) error {
 	if len(fields) != len(want) {
 		return errors.New("missing field")
 	}
-	if err := json.Unmarshal(raw, v); err != nil {
+	// Unmarshal only the known keys. The original object can contain keys
+	// encoding/json would fold onto a known field by case.
+	known, err := json.Marshal(fields)
+	if err != nil {
+		return errors.New("invalid JSON")
+	}
+	if err := json.Unmarshal(known, v); err != nil {
 		return errors.New("field has the wrong type")
 	}
 	return nil
