@@ -462,12 +462,23 @@ func (m *Manager) shutdown() {
 	m.mu.Lock()
 	sessions = append([]*session(nil), m.sessions...)
 	m.mu.Unlock()
-	for _, sess := range sessions {
-		sess.mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+	// Close waits out a short flush, then returns. If it does not, the peer
+	// has stopped reading and the TCP connection has to be cancelled anyway:
+	// waiting here spends the rest of the pod's termination grace.
+	closed := make(chan struct{})
+	go func() {
+		for _, sess := range sessions {
+			sess.mux.Close(pb.RawCloseReason_RAW_CLOSE_REASON_CONNECTOR_TERMINATING)
+		}
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(closeAttemptTimeout):
+		if cancel != nil {
+			cancel()
+		}
 	}
-	// A healthy peer reads the close frames and the tunnel ends. A peer that
-	// has stopped reading cannot; cancelling the call unblocks Send, and the
-	// pipes already carry connector_terminating from Close.
 	m.waitDone(sessions, closeFlushTimeout)
 	if cancel != nil {
 		cancel()
@@ -479,6 +490,10 @@ func (m *Manager) shutdown() {
 }
 
 const closeFlushTimeout = time.Second
+
+// closeAttemptTimeout covers Close's own flush waits. Past this, cancel the
+// call instead of blocking process exit.
+const closeAttemptTimeout = 5 * time.Second
 
 func (m *Manager) waitDone(sessions []*session, limit time.Duration) {
 	deadline := time.NewTimer(limit)
