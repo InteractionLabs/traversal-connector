@@ -282,8 +282,8 @@ func rejectHello(
 		return err
 	}
 	defer func() {
-		cc.Close()
-		conn.Close()
+		_ = cc.Close()
+		_ = conn.Close()
 	}()
 	body, err := proto.Marshal(&pb.RawControllerHello{
 		ProtocolVersion: version,
@@ -302,6 +302,6 @@ func rejectHello(
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
