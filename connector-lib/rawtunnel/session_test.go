@@ -262,6 +262,33 @@ func TestCloseReturnsWhileTheWindowIsFull(t *testing.T) {
 	}
 }
 
+func TestResetDuringAcceptIsNotAnOpen(t *testing.T) {
+	started := make(chan struct{})
+	ctrl := startSession(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+		close(started)
+		<-p.Context().Done()
+	})
+	pipe, err := ctrl.Open("token", "dial.test", 443, pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not accept")
+	}
+	pipe.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = pipe.WaitOpened(ctx)
+	if err == nil {
+		t.Fatal("reset during dial was reported as an open")
+	}
+	if got := pipe.Result().Reason; got != pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED {
+		t.Fatalf("reason %s", got)
+	}
+}
+
 func TestConcurrentFramesStayIntact(t *testing.T) {
 	pr, pw := io.Pipe()
 	payload := bytes.Repeat([]byte{0x11}, 100)

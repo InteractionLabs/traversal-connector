@@ -131,6 +131,10 @@ type Mux struct {
 	slots      int
 	localDrain bool
 	peerDrain  bool
+	// drainPosted is closed after the controller's drain request finishes.
+	// Close waits for it before ending the control stream, or the connector
+	// sees the tunnel drop and backs off instead of rotating.
+	drainPosted chan struct{}
 
 	handlerMu      sync.Mutex
 	handlerN       int
@@ -298,6 +302,9 @@ func (m *Mux) Close(reason pb.RawCloseReason) {
 	// chance to read it. A second Close can run after the pipe has left the
 	// map, so the wait is on the handler, not on map membership.
 	m.waitHandlers()
+	// The drain request is not on the control stream. Ending that stream first
+	// drops the tunnel before the connector has observed the drain.
+	m.waitDrainPosted()
 	m.closeControl()
 	if m.cfg.Role == RoleController {
 		timer := time.NewTimer(2 * time.Second)
@@ -327,17 +334,44 @@ func (m *Mux) Drain(reason pb.RawDrainReason) {
 		return
 	}
 	m.localDrain = true
+	var posted chan struct{}
+	if m.cfg.Role == RoleController {
+		posted = make(chan struct{})
+		m.drainPosted = posted
+	}
 	m.signalDraining()
 	m.checkDrainedLocked()
 	m.mu.Unlock()
 	// Pipe data can fill the connection window. A drain carried as a DATA
 	// frame then waits behind it. HEADERS are not flow-controlled, so the
 	// controller sends the drain as a header on its own request.
-	if m.cfg.Role == RoleController {
-		go m.postDrain(body)
+	if posted != nil {
+		go func() {
+			defer close(posted)
+			m.postDrain(body)
+		}()
 		return
 	}
 	m.sendControl(body)
+}
+
+// waitDrainPosted lets the controller's drain request finish before Close
+// ends the control stream. A full connection window does not block it: the
+// request is headers only. A peer that never answers does not pin Close.
+func (m *Mux) waitDrainPosted() {
+	m.mu.Lock()
+	posted := m.drainPosted
+	m.mu.Unlock()
+	if posted == nil {
+		return
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-posted:
+	case <-timer.C:
+	case <-m.done:
+	}
 }
 
 // Open asks the connector to open one pipe. It is valid only for RoleController.
@@ -605,8 +639,12 @@ func (m *Mux) handlePipe(w http.ResponseWriter, r *http.Request) {
 	if local == nil {
 		if refusal != nil {
 			writeOpenError(w, refusal)
+			return
 		}
-		return
+		// Reset, tunnel loss, or shutdown can finish the pipe while Accept is
+		// still dialing. Returning without a status makes net/http answer 200,
+		// which the controller treats as an open.
+		panic(http.ErrAbortHandler)
 	}
 	w.Header().Set("Trailer", trailerClose)
 	w.WriteHeader(http.StatusOK)

@@ -251,16 +251,24 @@ func (p *Pipe) roundTrip() {
 		var oe pb.RawOpenError
 		if proto.Unmarshal(body, &oe) == nil && protovalidate.Validate(&oe) == nil {
 			p.mu.Lock()
-			p.openErr = &oe
+			if !p.finished {
+				p.openErr = &oe
+			}
 			p.mu.Unlock()
 		}
 		p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_UNSPECIFIED, "")
 		return
 	}
 	p.mu.Lock()
-	p.wasOpened = true
-	p.resp = resp
+	finished := p.finished
+	if !finished {
+		p.wasOpened = true
+		p.resp = resp
+	}
 	p.mu.Unlock()
+	if finished {
+		resp.Body.Close()
+	}
 }
 
 func (p *Pipe) copyToPeer() {
