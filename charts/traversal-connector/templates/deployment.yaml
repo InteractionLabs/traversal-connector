@@ -62,8 +62,12 @@
 {{- $rawLife := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.maxLifetime" "value" .Values.rawTunnel.maxLifetime) | trim | atoi }}
 {{- $rawOpen := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.openTimeout" "value" .Values.rawTunnel.openTimeout) | trim | atoi }}
 {{- $rawPing := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.pingInterval" "value" .Values.rawTunnel.pingInterval) | trim | atoi }}
+{{- $rawRotation := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.rotationDeadline" "value" .Values.rawTunnel.rotationDeadline) | trim | atoi }}
 {{- if or (le $rawOpen 0) (le $rawPing 0) }}
 {{- fail "rawTunnel.openTimeout and rawTunnel.pingInterval must be at least 1s" }}
+{{- end }}
+{{- if le $rawRotation 0 }}
+{{- fail "rawTunnel.rotationDeadline must be at least 1s" }}
 {{- end }}
 {{- if gt $rawIdle $rawLife }}
 {{- fail "rawTunnel.idleTimeout must not exceed rawTunnel.maxLifetime" }}
@@ -316,6 +320,8 @@ spec:
               value: {{ .Values.rawTunnel.pingInterval | quote }}
             - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS
               value: {{ .Values.rawTunnel.shutdownGraceSeconds | quote }}
+            - name: RAW_TUNNEL_ROTATION_DEADLINE
+              value: {{ .Values.rawTunnel.rotationDeadline | quote }}
             - name: RAW_TUNNEL_ISSUER
               value: {{ .Values.rawTunnel.issuer | quote }}
             - name: RAW_TUNNEL_ALLOWED_SUBJECTS

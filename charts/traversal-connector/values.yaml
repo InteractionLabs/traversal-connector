@@ -227,6 +227,11 @@ rawTunnel:
   pingInterval: 30s
   shutdownGraceSeconds: 30
   terminationGraceSeconds: 45
+  # How long a drained tunnel keeps pipes that are still open. Keep this
+  # shorter than the controller tunnel lifetime (default 20m) so the extra
+  # session slot frees before the next rotation. Pod shutdown uses
+  # shutdownGraceSeconds, which must stay under terminationGraceSeconds.
+  rotationDeadline: 15m
   issuer: ""
   allowedSubjects: []
   currentKeyID: ""
