@@ -372,6 +372,48 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 	}
 }
 
+func TestRepeatedRotationWithALivePipeStaysBounded(t *testing.T) {
+	ctrl := newStickyDrainCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	ln := listen(t)
+	cfg := baseConfig(srv.url)
+	cfg.RawTunnel.MaxTunnels = 1
+	cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+	cfg.RawTunnel.RotationDeadline = time.Hour
+	m := startManager(t, cfg, dialLocal(t, ln))
+	t.Cleanup(m.Shutdown)
+
+	dstCh := acceptOne(ln)
+	current := recvMux(t, ctrl.ready)
+	pipe, _ := openPipe(t, current, sign(t, "jti-held"))
+	dst := <-dstCh
+	t.Cleanup(func() { _ = dst.Close() })
+
+	bound := 2 // sessionBound = 2 * MaxTunnels
+	for i := range 4 {
+		current.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+		current = recvMux(t, ctrl.ready)
+		waitFor(t, 3*time.Second, func() bool {
+			active, draining, sessions, connecting := m.snapshot()
+			return active == 1 && connecting == 0 &&
+				sessions <= bound && active+draining+connecting <= bound
+		})
+		select {
+		case <-pipe.Done():
+			t.Fatalf("rotation %d closed the live pipe", i+1)
+		default:
+		}
+		active, draining, sessions, connecting := m.snapshot()
+		if active+draining+connecting > bound || sessions > bound {
+			t.Fatalf(
+				"rotation %d: active=%d draining=%d connecting=%d sessions=%d",
+				i+1, active, draining, connecting, sessions,
+			)
+		}
+	}
+}
+
 // stickyDrainCtrl speaks the mux and leaves drained streams open until the
 // connector retires them. That is the unbounded-accumulation case.
 type stickyDrainCtrl struct {

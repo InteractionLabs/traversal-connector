@@ -751,6 +751,11 @@ func (r RawTunnelConfig) validate() error {
 	if r.RotationDeadline < time.Second {
 		return errors.New("raw tunnel timeouts must be at least 1s")
 	}
+	if r.RotationDeadline > r.MaxLifetime {
+		return errors.New(
+			"RAW_TUNNEL_ROTATION_DEADLINE must not exceed RAW_TUNNEL_MAX_LIFETIME",
+		)
+	}
 	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||
 		r.CurrentKeyID == "" || r.CurrentPublicKeyPEM == "" {
 		return errors.New(

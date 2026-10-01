@@ -312,6 +312,25 @@ func TestRotationDeadlineClosesALivePipe(t *testing.T) {
 	}
 }
 
+func TestLivePipeOutlivesShutdownGrace(t *testing.T) {
+	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
+		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
+		cfg.RawTunnel.RotationDeadline = time.Hour
+	})
+	t.Cleanup(m.Shutdown)
+	dstCh := acceptOne(ln)
+	mux := recvMux(t, ctrl.ready)
+	pipe, _ := openPipe(t, mux, sign(t, "jti-grace"))
+	dst := <-dstCh
+	t.Cleanup(func() { _ = dst.Close() })
+	mux.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+	select {
+	case <-pipe.Done():
+		t.Fatal("rotation closed the pipe on the shutdown grace")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestShutdownClosesPipesWithConnectorTerminating(t *testing.T) {
 	ctrl, m, ln := running(t, nil, func(cfg *config.Config) {
 		cfg.RawTunnel.ShutdownGrace = 40 * time.Millisecond
