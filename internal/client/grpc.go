@@ -185,12 +185,11 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 		var perr error
 		egressProxyURL, perr = url.Parse(*cfg.EgressProxyURL)
 		if perr != nil {
-			slog.Error("invalid EGRESS_PROXY_URL, proceeding with direct TLS connection",
-				"egress_proxy_url", *cfg.EgressProxyURL, "error", perr)
+			slog.Error("invalid EGRESS_PROXY_URL, proceeding with direct TLS connection")
 			egressProxyURL = nil
 		} else {
 			slog.Info("using forward proxy for controller connection",
-				"egress_proxy_url", *cfg.EgressProxyURL)
+				"proxy_host", egressProxyURL.Host)
 		}
 	}
 

@@ -8,6 +8,9 @@ const (
 
 // Metric names emitted by the traversal connector.
 const (
+	MetricConfigRefreshTotal               = "connector.config_refresh_total"
+	MetricConfigRuleCount                  = "connector.config_rule_count"
+	MetricConfigStaleness                  = "connector.config_staleness_seconds"
 	MetricStreamsActive                    = "connector.streams_active"
 	MetricUpstreamRequestsTotal            = "connector.upstream_requests_total"
 	MetricUpstreamLatency                  = "connector.upstream_latency"

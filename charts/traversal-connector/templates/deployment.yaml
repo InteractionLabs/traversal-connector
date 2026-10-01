@@ -2,8 +2,10 @@
 {{- $upstreamSecret  := default (printf "%s-upstream-tls"  (include "traversal-connector.fullname" .)) .Values.upstreamTLS.existingSecret -}}
 {{- $hasControllerTLS := or .Values.controllerTLS.existingSecret .Values.controllerTLS.certPEM .Values.controllerTLS.keyPEM .Values.controllerTLS.caPEM -}}
 {{- $hasUpstreamTLS  := or .Values.upstreamTLS.existingSecret  .Values.upstreamTLS.caPEM -}}
-{{- $legacyContent := .Values.redactionRules | default "" -}}
-{{- $redactionEnabled := or .Values.redaction.enabled (ne $legacyContent "") -}}
+{{- $oldRedaction := .Values.redaction | default dict -}}
+{{- if or (.Values.redactionRules | default "") ($oldRedaction.enabled | default false) ($oldRedaction.rulesContent | default "") ($oldRedaction.existingConfigMap | default "") ($oldRedaction.existingSecret | default "") -}}
+{{- fail "Local redaction configuration is no longer supported; publish rules remotely and set configUpdates.endpoint before upgrading." -}}
+{{- end -}}
 {{- $sidecar := .Values.otel.sidecar -}}
 {{- /* Any non-bool — a quoted "false", a --set-string, a null — is truthy to
        Helm, so an unguarded read would silence telemetry while the values file
@@ -241,9 +243,11 @@ spec:
             - name: UPSTREAM_TLS_CA_FILE
               value: {{ . | quote }}
             {{- end }}
-            {{- if $redactionEnabled }}
-            - name: REDACTION_RULES_FILE
-              value: /etc/traversal/redaction-rules.toml
+            {{- with .Values.configUpdates.endpoint }}
+            - name: TRAVERSAL_CONFIG_ENDPOINT
+              value: {{ . | quote }}
+            - name: TRAVERSAL_CONFIG_REFRESH_INTERVAL
+              value: {{ $.Values.configUpdates.refreshInterval | quote }}
             {{- end }}
           ports:
             - name: http
@@ -272,12 +276,6 @@ spec:
               port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
-          {{- end }}
-          {{- if $redactionEnabled }}
-          volumeMounts:
-            - name: redaction-rules
-              mountPath: /etc/traversal
-              readOnly: true
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -379,18 +377,8 @@ spec:
             seccompProfile:
               type: RuntimeDefault
         {{- end }}
-      {{- if or $redactionEnabled $sidecarEnabled }}
+      {{- if $sidecarEnabled }}
       volumes:
-        {{- if $redactionEnabled }}
-        - name: redaction-rules
-          {{- if not (empty .Values.redaction.existingConfigMap) }}
-          configMap:
-            name: {{ .Values.redaction.existingConfigMap }}
-          {{- else }}
-          configMap:
-            name: {{ include "traversal-connector.fullname" . }}-redaction-rules
-          {{- end }}
-        {{- end }}
         {{- if $sidecarEnabled }}
         - name: telemetry-sidecar-data
           emptyDir: {}

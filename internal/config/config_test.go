@@ -91,7 +91,7 @@ func TestLoad(t *testing.T) {
 				OTELServiceName:              "traversal-connector",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
-				RedactionReloadInterval:      10 * time.Second,
+				ConfigRefreshInterval:        30 * time.Second,
 			},
 		},
 		{
@@ -119,7 +119,7 @@ func TestLoad(t *testing.T) {
 				OTELServiceName:              "traversal-connector",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
-				RedactionReloadInterval:      10 * time.Second,
+				ConfigRefreshInterval:        30 * time.Second,
 			},
 		},
 		{
@@ -166,7 +166,7 @@ func TestLoad(t *testing.T) {
 				OTLPProtocol:                 "grpc",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
-				RedactionReloadInterval:      10 * time.Second,
+				ConfigRefreshInterval:        30 * time.Second,
 			},
 		},
 		{
@@ -194,7 +194,7 @@ func TestLoad(t *testing.T) {
 				OTELServiceName:              "traversal-connector",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
-				RedactionReloadInterval:      10 * time.Second,
+				ConfigRefreshInterval:        30 * time.Second,
 			},
 		},
 		{
@@ -225,7 +225,7 @@ func TestLoad(t *testing.T) {
 				OTELServiceName:              "traversal-connector",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
-				RedactionReloadInterval:      10 * time.Second,
+				ConfigRefreshInterval:        30 * time.Second,
 			},
 		},
 	}
@@ -1014,6 +1014,8 @@ func clearEnv() {
 	envVars := []string{
 		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
 		"TRAVERSAL_CONTROLLER_CONNECT_TO", "EGRESS_PROXY_URL",
+		"TRAVERSAL_CONFIG_ENDPOINT", "TRAVERSAL_CONFIG_REFRESH_INTERVAL",
+		"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL",
 		"RECONNECT_INTERVAL", "MAX_BACKOFF_DELAY", "REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "MAX_RESPONSE_BODY_SIZE_MB",
 		"MAX_DECODED_RESPONSE_BODY_SIZE_MB",

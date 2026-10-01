@@ -34,10 +34,10 @@ const (
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
 	// Default timeout and interval durations.
-	defaultReconnectInterval       = 5 * time.Second
-	defaultMaxBackoffDelay         = 60 * time.Second
-	defaultRequestTimeout          = 60 * time.Second
-	defaultRedactionReloadInterval = 10 * time.Second
+	defaultReconnectInterval     = 5 * time.Second
+	defaultMaxBackoffDelay       = 60 * time.Second
+	defaultRequestTimeout        = 60 * time.Second
+	defaultConfigRefreshInterval = 30 * time.Second
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -154,13 +154,11 @@ type Config struct {
 	// (raw or base64-encoded PEM) or UPSTREAM_TLS_CA_FILE. Additional roots are
 	// appended to the system trust store.
 	UpstreamTLSCA *string
-	// RedactionRulesFile is the optional path to a TOML file containing redaction
-	// rules applied to all upstream response bodies before they leave the customer
-	// network. Read from REDACTION_RULES_FILE. When unset, no redaction is applied.
-	RedactionRulesFile *string
-	// RedactionReloadInterval is how often the redaction rules file is checked for
-	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
-	RedactionReloadInterval time.Duration
+	// ConfigEndpoint is an opt-in config base URL on the controller's origin.
+	// ConnectorID is appended by ConfigURL. Empty disables OTA polling.
+	ConfigEndpoint string
+	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
+	ConfigRefreshInterval time.Duration
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -282,15 +280,25 @@ func Load() (Config, error) {
 			"MAX_CONCURRENT_REQUESTS",
 			defaultMaxConcurrentRequests,
 		),
-		UpstreamTLSVerify:  env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
-		UpstreamTLSCA:      upstreamTLSCA,
-		RedactionRulesFile: env.GetEnvOptionalString("REDACTION_RULES_FILE"),
-		RedactionReloadInterval: env.GetEnvDuration(
-			"REDACTION_RELOAD_INTERVAL",
-			defaultRedactionReloadInterval,
+		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
+		UpstreamTLSCA:     upstreamTLSCA,
+		ConfigEndpoint:    env.GetEnvString("TRAVERSAL_CONFIG_ENDPOINT", ""),
+		ConfigRefreshInterval: env.GetEnvDuration(
+			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
 	}
 
+	for _, name := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL"} {
+		if os.Getenv(name) != "" {
+			return Config{}, fmt.Errorf(
+				"%s is no longer supported; publish rules remotely and set TRAVERSAL_CONFIG_ENDPOINT before upgrading",
+				name,
+			)
+		}
+	}
+	if err := validateRemoteConfig(cfg); err != nil {
+		return Config{}, err
+	}
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
 	}

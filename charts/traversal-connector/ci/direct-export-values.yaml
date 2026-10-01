@@ -1,6 +1,6 @@
 envName: ci
 controllerURL: https://controller.example.invalid
-connectorID: ci
+connectorID: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 otel:
   sidecar:
@@ -9,11 +9,6 @@ otel:
   tracesEndpoint: https://telemetry.example.invalid/v1/traces
   logsEndpoint: https://telemetry.example.invalid/v1/logs
 
-redaction:
-  enabled: true
-  rulesContent: |
-    version = "1"
-    [[rules]]
-    name = "synthetic-token"
-    type = "regex"
-    pattern = 'token-[0-9]+'
+configUpdates:
+  endpoint: https://controller.example.invalid/v1/config
+  refreshInterval: 30s

@@ -340,60 +340,78 @@ HTTP_PROXY=http://proxy.corp.example.com:3128
 NO_PROXY=.corp.example.com,10.0.0.0/8
 ```
 
-### Redaction
+### Redaction via remote configuration
 
-The connector can redact sensitive values from upstream response bodies before
-they leave the customer network.
+Enable OTA redaction using `TRAVERSAL_CONFIG_ENDPOINT`, for example
+`https://edge.traversal.com/v1/config` (`configUpdates.endpoint` in Helm).
+The connector appends its ID. The endpoint must use the **same origin** as
+`TRAVERSAL_CONTROLLER_URL`: no new hostname or port needs allowlisting.
+When OTA is enabled, the connector ID must be a canonical lowercase UUID,
+matching the published object key.
+The config HTTP client reuses controller mTLS, additional trust roots,
+`EGRESS_PROXY_URL` and `TRAVERSAL_CONTROLLER_CONNECT_TO`; ambient proxy variables
+are not used and redirects are refused.
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDACTION_RULES_FILE` | (none) | Path to a TOML file containing redaction rules. When unset, no redaction is applied. The file is periodically reloaded. |
+| `TRAVERSAL_CONFIG_ENDPOINT` | (none) | Opt-in config base URL; connector ID is appended. |
+| `TRAVERSAL_CONFIG_REFRESH_INTERVAL` | `30s` | Poll interval, with up to 10% jitter; positive and at most 24h. |
 
-The rules file uses the following format:
+Startup fetch completes **before opening any tunnels**. A 404 means no rules
+and startup continues; other errors (including 403, 5xx, invalid TOML/regexes)
+fail startup. Runtime errors or deletion retain the last-known-good rules
+**in memory** and emit warnings; there is no persistent local cache. A restart
+with a 404 follows the startup policy again. ETags avoid downloading unchanged
+configs; unchanged bodies do not recompile rules. Responses are limited to 1 MiB
+and requests time out after 15 seconds. To disable redaction intentionally,
+publish `schema_version = 1` and `[redaction] rules = []`; do not delete the object.
+
+Publish through `ingestion-configs` at
+`connector/<env>/<certificate-org-id>/<connector-id>.toml`; the gateway proxies
+`connector/<certificate-org-id>/<connector-id>.toml` from S3. No default object
+is required. A config created later is picked up by polling.
 
 ```toml
-version = "1"
-default_replacement = "[REDACTED]"   # optional; defaults to "[REDACTED]"
+schema_version = 1
 
-[[rules]]
-name   = "ssn"
-type   = "regex"
-pattern     = '\b\d{3}-\d{2}-(\d{4})\b'
+[redaction]
+default_replacement = "[REDACTED]"
+
+[[redaction.rules]]
+name = "ssn"
+type = "regex"
+pattern = '\b\d{3}-\d{2}-(\d{4})\b'
 replacement = "***-**-$1"
 
-[[rules]]
-name   = "api-key"
-type   = "regex"
-pattern     = '(?i)(api[_-]?key\s*[:=]\s*)\S+'
-replacement = '$1[REDACTED]'
-
-# Per-field rule for JSON response bodies. Email is only redacted when it
-# appears in `body.message`. On non-JSON bodies the rule is skipped; a body
-# that claims to be JSON but is not one complete document is dropped.
-[[rules]]
-name   = "email"
-type   = "regex-structured-data"
-pattern       = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
+[[redaction.rules]]
+name = "email"
+type = "regex-structured-data"
+pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
-# replacement omitted -> falls back to default_replacement
-
-# Host-scoped rule: this token pattern is only redacted for responses from
-# GitHub hostnames. Requests to any other upstream pass through untouched.
-[[rules]]
-name    = "github-token"
-type    = "regex"
-pattern = 'gh[pousr]_[A-Za-z0-9]{36}'
-hosts   = ['.*github\.com']
 ```
 
-Top-level fields:
-- `version` — schema version label (informational only).
-- `default_replacement` — fallback replacement string for rules that omit `replacement`. Defaults to `"[REDACTED]"`.
-- `rules` — ordered list of redaction rules.
+Only schema version **1** is supported. Unknown keys, unsupported rule types,
+missing `redaction.rules`, empty patterns and duplicate/empty names are rejected.
+Rule field filters are only accepted for `regex-structured-data`. Metric
+`connector.config_refresh_total` records bounded outcomes (`applied`, `unchanged`,
+`missing`, `error`); `connector.config_rule_count` and
+`connector.config_staleness_seconds` expose active rules and time since the last
+successful fetch. Applied ETags are logged, not used as metric labels.
+
+**Breaking migration:** local rule files, `REDACTION_RULES_FILE`,
+`REDACTION_RELOAD_INTERVAL`, and the Helm `redaction` / `redactionRules` sources
+are removed. Active deprecated settings fail with a migration error instead of
+silently disabling redaction. Before upgrading, wrap the old rules in the
+versioned document above, publish it remotely, set `configUpdates.endpoint`,
+and remove the old settings/mounts. The endpoint is opt-in; do not upgrade a
+redacting deployment without completing this migration.
+Replace the old `version` header with integer `schema_version = 1`, move
+`default_replacement` under `[redaction]`, and rename `[[rules]]` tables to
+`[[redaction.rules]]`.
 
 Each rule requires:
 - `name` — human-readable label used in log output.
-- `type` — `"regex"` for byte-level redaction over the full response body, or `"regex-structured-data"` for per-field redaction over JSON response bodies. Unrecognised types are logged and skipped.
+- `type` — `"regex"` for byte-level redaction over the full response body, or `"regex-structured-data"` for per-field redaction over JSON response bodies. Unsupported types reject the entire remote update.
 - `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
 - `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
