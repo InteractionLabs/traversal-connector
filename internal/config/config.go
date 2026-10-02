@@ -154,9 +154,8 @@ type Config struct {
 	// (raw or base64-encoded PEM) or UPSTREAM_TLS_CA_FILE. Additional roots are
 	// appended to the system trust store.
 	UpstreamTLSCA *string
-	// ConfigEndpoint is an opt-in config base URL on the controller's origin.
-	// ConnectorID is appended by ConfigURL. Empty disables OTA polling.
-	ConfigEndpoint string
+	// ConfigEnabled opts in to OTA polling on the controller's origin.
+	ConfigEnabled bool
 	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
 	ConfigRefreshInterval time.Duration
 }
@@ -232,6 +231,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	configEnabled := false
+	if raw := os.Getenv("TRAVERSAL_CONFIG_ENABLED"); raw != "" {
+		var err error
+		configEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("TRAVERSAL_CONFIG_ENABLED must be a boolean")
+		}
+	}
+
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL:       *traversalControllerURL,
@@ -282,16 +290,16 @@ func Load() (Config, error) {
 		),
 		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
 		UpstreamTLSCA:     upstreamTLSCA,
-		ConfigEndpoint:    env.GetEnvString("TRAVERSAL_CONFIG_ENDPOINT", ""),
+		ConfigEnabled:     configEnabled,
 		ConfigRefreshInterval: env.GetEnvDuration(
 			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
 	}
 
-	for _, name := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL"} {
+	for _, name := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL", "TRAVERSAL_CONFIG_ENDPOINT"} {
 		if os.Getenv(name) != "" {
 			return Config{}, fmt.Errorf(
-				"%s is no longer supported; publish rules remotely and set TRAVERSAL_CONFIG_ENDPOINT before upgrading",
+				"%s is no longer supported; publish rules remotely and set TRAVERSAL_CONFIG_ENABLED=true before upgrading",
 				name,
 			)
 		}

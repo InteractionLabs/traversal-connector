@@ -64,6 +64,19 @@ func ParseConfig(data []byte) (*RulesFile, error) {
 	}, nil
 }
 
+// ValidateConfig uses the same parser and compiler as RemoteLoader/Update,
+// without creating metrics or applying rules. Diagnostics omit rule contents.
+func ValidateConfig(data []byte) error {
+	rules, err := ParseConfig(data)
+	if err != nil {
+		return err
+	}
+	if _, err = compileRules(rules); err != nil {
+		return errors.New("redaction pattern or host expression failed to compile")
+	}
+	return nil
+}
+
 // remoteStatus is immutable after publication; metric callbacks may read it
 // concurrently with the single polling goroutine.
 type remoteStatus struct {
@@ -150,7 +163,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 	if l.etag != "" {
 		req.Header.Set("If-None-Match", l.etag)
 	}
-	// config.Load restricts this operator-configured URL to the controller origin.
+	// ConfigURL derives this URL solely from the validated controller origin.
 	// #nosec G704 -- Same-origin endpoint; redirects are disabled by the loader.
 	resp, err := l.client.Do(req)
 	if err != nil {

@@ -169,7 +169,7 @@ func main() {
 	defer cancel()
 
 	redactor := redact.NewRedactor()
-	if cfg.ConfigEndpoint != "" {
+	if cfg.ConfigEnabled {
 		httpClient, clientErr := client.NewConfigHTTPClient(&cfg)
 		if clientErr != nil {
 			slog.Error("failed to build config transport", "error", clientErr)

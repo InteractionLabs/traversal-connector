@@ -342,10 +342,11 @@ NO_PROXY=.corp.example.com,10.0.0.0/8
 
 ### Redaction via remote configuration
 
-Enable OTA redaction using `TRAVERSAL_CONFIG_ENDPOINT`, for example
-`https://edge.traversal.com/v1/config` (`configUpdates.endpoint` in Helm).
-The connector appends its ID. The endpoint must use the **same origin** as
-`TRAVERSAL_CONTROLLER_URL`: no new hostname or port needs allowlisting.
+Enable OTA redaction using `TRAVERSAL_CONFIG_ENABLED=true`
+(`configUpdates.enabled: true` in Helm). The URL is derived from the validated
+controller's scheme, hostname and port, with the absolute path
+`/v1/config/<connector-id>`. Controller path prefixes, credentials, queries and
+fragments are not copied. There is no endpoint override or new network destination.
 When OTA is enabled, the connector ID must be a canonical lowercase UUID,
 matching the published object key.
 The config HTTP client reuses controller mTLS, additional trust roots,
@@ -354,7 +355,7 @@ are not used and redirects are refused.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONFIG_ENDPOINT` | (none) | Opt-in config base URL; connector ID is appended. |
+| `TRAVERSAL_CONFIG_ENABLED` | `false` | Enable OTA config polling on the controller origin. |
 | `TRAVERSAL_CONFIG_REFRESH_INTERVAL` | `30s` | Poll interval, with up to 10% jitter; positive and at most 24h. |
 
 Startup fetch completes **before opening any tunnels**. A 404 means no rules
@@ -390,6 +391,12 @@ pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
 ```
 
+Validate a document locally with `go run ./cmd/validate-config < config.toml`.
+This uses the same parser and compiler as the running connector, including every
+`hosts` expression even when the list also contains `.*`. CI/publication must
+pin this validator to a reviewed connector revision. Invalid regexes (including
+lookbehind) are rejected without printing rule contents.
+
 Only schema version **1** is supported. Unknown keys, unsupported rule types,
 missing `redaction.rules`, empty patterns and duplicate/empty names are rejected.
 Rule field filters are only accepted for `regex-structured-data`. Metric
@@ -402,8 +409,8 @@ successful fetch. Applied ETags are logged, not used as metric labels.
 `REDACTION_RELOAD_INTERVAL`, and the Helm `redaction` / `redactionRules` sources
 are removed. Active deprecated settings fail with a migration error instead of
 silently disabling redaction. Before upgrading, wrap the old rules in the
-versioned document above, publish it remotely, set `configUpdates.endpoint`,
-and remove the old settings/mounts. The endpoint is opt-in; do not upgrade a
+versioned document above, publish it remotely, set `configUpdates.enabled: true`,
+and remove the old settings/mounts. Polling is opt-in; do not upgrade a
 redacting deployment without completing this migration.
 Replace the old `version` header with integer `schema_version = 1`, move
 `default_replacement` under `[redaction]`, and rename `[[rules]]` tables to

@@ -140,11 +140,10 @@ otel:
         memory: 256Mi
 
 # ─── Remote configuration (opt-in) ──────────────────────────────────────────
-# The endpoint must use the controller's existing scheme, host and port.
-# Example: https://edge.traversal.com/v1/config (connectorID is appended).
+# Uses the controller origin and /v1/config/<connectorID>; no endpoint override.
 # Publish migrated rules before enabling; no local-file source is supported.
 configUpdates:
-  endpoint: ""
+  enabled: false
   refreshInterval: "30s"
 
 # ─── Health probes ───────────────────────────────────────────────────────────

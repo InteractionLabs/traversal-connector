@@ -234,6 +234,16 @@ func NewRedactor() *Redactor {
 //     "regex-structured-data" rules; if set on a "regex" rule a warning is
 //     logged and the filters are ignored (since "regex" has no field concept).
 func (r *Redactor) Update(f *RulesFile) error {
+	compiled, err := compileRules(f)
+	if err != nil {
+		return err
+	}
+	r.rules.Store(&compiled)
+	return nil
+}
+
+// compileRules is shared by runtime updates and offline config validation.
+func compileRules(f *RulesFile) ([]compiledRule, error) {
 	defaultReplacement := f.DefaultReplacement
 	if defaultReplacement == "" {
 		defaultReplacement = defaultDefaultReplacement
@@ -261,7 +271,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 
 		re, err := regexp.Compile(rule.Pattern)
 		if err != nil {
-			return fmt.Errorf("rule %q: invalid pattern: %w", rule.Name, err)
+			return nil, fmt.Errorf("rule %q: invalid pattern: %w", rule.Name, err)
 		}
 
 		replacement := rule.Replacement
@@ -271,7 +281,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 
 		hostMatchers, err := compileHostMatchers(rule.Hosts)
 		if err != nil {
-			return fmt.Errorf("rule %q: %w", rule.Name, err)
+			return nil, fmt.Errorf("rule %q: %w", rule.Name, err)
 		}
 
 		cr := compiledRule{
@@ -287,8 +297,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 		}
 		compiled = append(compiled, cr)
 	}
-	r.rules.Store(&compiled)
-	return nil
+	return compiled, nil
 }
 
 // compileHostMatchers compiles each host pattern into a fully-anchored regexp
@@ -300,10 +309,13 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 		return nil, nil
 	}
 	matchers := make([]*regexp.Regexp, 0, len(patterns))
+	matchAll := false
 	for _, p := range patterns {
 		if p == ".*" {
-			// Matches everything; equivalent to no filter at all.
-			return nil, nil
+			// Keep validating the remaining patterns: a wildcard must not hide
+			// invalid expressions or make validation depend on list order.
+			matchAll = true
+			continue
 		}
 		// Anchor to the whole hostname. The group keeps any top-level
 		// alternation in p from binding only the first/last branch to the
@@ -323,6 +335,9 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
 		}
 		matchers = append(matchers, m)
+	}
+	if matchAll {
+		return nil, nil
 	}
 	return matchers, nil
 }

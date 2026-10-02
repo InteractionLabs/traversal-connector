@@ -10,5 +10,5 @@ otel:
   logsEndpoint: https://telemetry.example.invalid/v1/logs
 
 configUpdates:
-  endpoint: https://controller.example.invalid/v1/config
+  enabled: true
   refreshInterval: 30s
