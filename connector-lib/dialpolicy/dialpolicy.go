@@ -203,13 +203,15 @@ func (p *Policy) Dial(ctx context.Context, host string, port uint16) (Conn, Rout
 		port == 0 {
 		return nil, Route{}, refuse(CodeInvalidDestination, errors.New("host is not canonical"))
 	}
-	if p.inspect != nil && p.inspect(host, port) {
-		return nil, Route{}, refuse(CodeInspectionRequired, nil)
-	}
+	// The deny list comes first so a forbidden destination reports itself
+	// whatever redaction rules are loaded.
 	literal, err := netip.ParseAddr(host)
 	isLiteral := err == nil
 	if isLiteral && p.forbidden(literal) || forbiddenName(host) {
 		return nil, Route{}, refuse(CodeForbiddenAddress, nil)
+	}
+	if p.inspect != nil && p.inspect(host, port) {
+		return nil, Route{}, refuse(CodeInspectionRequired, nil)
 	}
 	proxy, err := p.proxy(host, port)
 	if err != nil {

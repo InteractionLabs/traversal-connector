@@ -413,7 +413,9 @@ func TestDialActiveAttemptsNeverExceedCap(t *testing.T) {
 }
 
 func TestDialRefusals(t *testing.T) {
-	inspected := func(host string, _ uint16) bool { return host == "pci.internal" }
+	inspected := func(host string, _ uint16) bool {
+		return host == "pci.internal" || host == "127.0.0.1"
+	}
 	for _, tc := range []struct {
 		name      string
 		host      string
@@ -430,6 +432,7 @@ func TestDialRefusals(t *testing.T) {
 		{"zero port", "db.internal", 0, nil, CodeInvalidDestination, false},
 		{"inspection", "pci.internal", 5432, []string{"192.0.2.10"}, CodeInspectionRequired, false},
 		{"forbidden literal", "169.254.169.254", 80, nil, CodeForbiddenAddress, false},
+		{"forbidden literal needing inspection", "127.0.0.1", 5432, nil, CodeForbiddenAddress, false},
 		{"localhost", "localhost", 80, []string{"192.0.2.10"}, CodeForbiddenAddress, false},
 		{"metadata name", "metadata.google.internal", 80, []string{"192.0.2.10"},
 			CodeForbiddenAddress, false},

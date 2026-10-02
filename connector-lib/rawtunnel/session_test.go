@@ -322,6 +322,63 @@ func TestResetReachesThePeer(t *testing.T) {
 	}
 }
 
+func TestFullTunnelReopensRightAfterAMassReset(t *testing.T) {
+	const pipes = 32
+	ctrl := startSession(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
+		if err := p.Start(newHold()); err != nil {
+			t.Errorf("start: %v", err)
+		}
+	})
+	held := make([]*Pipe, 0, pipes)
+	for range pipes {
+		held = append(held, openPipe(t, ctrl, "hold.test", newHold()))
+	}
+	for round := range 20 {
+		for _, p := range held {
+			p.Reset(pb.RawCloseReason_RAW_CLOSE_REASON_CANCELLED)
+		}
+		for _, p := range held {
+			waitDone(t, p)
+		}
+		held = held[:0]
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for range pipes {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				p, err := ctrl.Open(
+					"token",
+					"hold.test",
+					443,
+					pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+				)
+				if err != nil {
+					t.Errorf("round %d: open: %v", round, err)
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := p.WaitOpened(ctx); err != nil {
+					t.Errorf("round %d: a free slot failed to open: %v", round, err)
+					return
+				}
+				if err := p.Start(newHold()); err != nil {
+					t.Errorf("round %d: start: %v", round, err)
+					return
+				}
+				mu.Lock()
+				held = append(held, p)
+				mu.Unlock()
+			}()
+		}
+		wg.Wait()
+		if t.Failed() {
+			return
+		}
+	}
+}
+
 func TestRefusalIsAnOpenError(t *testing.T) {
 	ctrl := startSession(t, TunnelWindow, func(p *Pipe, _ *pb.RawOpen) {
 		if err := p.Refuse(
@@ -878,4 +935,45 @@ func newWindowPair(window int) (left, right Stream, maxQueued func() int) {
 		return b.maxQueued
 	}
 	return left, right, maxQueued
+}
+
+// A tunnel that carries many pipes keeps only recent pipe ids, and an id
+// below that window is still refused as a replay.
+func TestPipeIDsStayBoundedOverATunnelsLife(t *testing.T) {
+	_, right, _ := newWindowPair(TunnelWindow)
+	m, err := New(Config{
+		Role:     RoleConnector,
+		MaxPipes: 4,
+		Hello: &pb.RawConnectorHello{
+			SupportedProtocolVersions: []uint32{ProtocolVersion},
+			Hostname:                  "edge-1",
+			MaxPipes:                  4,
+			SupportedModes:            []pb.RawPipeMode{pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH},
+		},
+		Abort:  func() {},
+		Accept: func(*Pipe, *pb.RawOpen) {},
+	}, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close(pb.RawCloseReason_RAW_CLOSE_REASON_TUNNEL_LOST)
+	window := m.pipeIDWindow()
+	for id := uint64(1); id <= 50*window; id++ {
+		p, refused := m.admit(t.Context(), &pb.RawOpen{PipeId: id})
+		if refused != nil {
+			t.Fatalf("pipe %d refused: %v", id, refused.GetDetail())
+		}
+		m.release(p)
+	}
+	m.mu.Lock()
+	held := uint64(len(m.seen))
+	m.mu.Unlock()
+	if held > 2*window+1 {
+		t.Fatalf("seen holds %d ids, want at most %d", held, 2*window+1)
+	}
+	for _, id := range []uint64{1, 50*window - window, 50 * window} {
+		if _, refused := m.admit(t.Context(), &pb.RawOpen{PipeId: id}); refused == nil {
+			t.Fatalf("pipe id %d was reused", id)
+		}
+	}
 }

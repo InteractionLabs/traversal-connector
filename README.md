@@ -17,9 +17,8 @@ The wire protocol is defined in
 [`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
 [`raw_tunnel.proto`](connector-lib/proto/connector/v1/raw_tunnel.proto) defines
 `RawTunnel`, which carries one HTTP/2 session. Each pipe is a stream inside
-that session, and
-[`connector-lib/proto/stream/v1/stream.proto`](connector-lib/proto/stream/v1/stream.proto)
-defines the controller's private, cluster-internal `OpenStream` API for those pipes.
+that session. Traversal services open pipes through a private,
+cluster-internal Controller API that is not part of this repository.
 
 ## Setup
 
@@ -291,9 +290,11 @@ legacy request/response behavior with raw disabled and with raw enabled but
 incompatible or draining, including unchanged concurrency advertisement and
 readiness.
 
-Pipes are checked in order: capability, exact host and port, redaction, DNS,
-forbidden addresses, then dial. A destination covered by any redaction rule is
-refused with `inspection_required` and is not dialed. The customer forward
+Pipes are checked in order: capability, exact host and port, forbidden
+addresses and names, redaction, DNS, forbidden resolved addresses, then dial.
+A forbidden destination is refused with `forbidden_address` whatever redaction
+rules are loaded. A destination covered by any redaction rule is refused with
+`inspection_required` and is not dialed. The customer forward
 proxy for those dials is `HTTPS_PROXY` / `NO_PROXY`, which is separate from
 `EGRESS_PROXY_URL`. Proxied hostnames are refused unless
 `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS=true`.
@@ -306,24 +307,33 @@ exhaust the process: at most 64 active raw tunnels, 2048 pipes per tunnel, and
 finish. Ping, idle, and lifetime must be at least one second, and idle must not
 be longer than the lifetime. The next key id must differ from the current one.
 `RAW_TUNNEL_OPEN_TIMEOUT` bounds dial and forward-proxy handshake before the
-pipe is OPENED. Pipe lifetime starts at OPENED, not at OPEN. Active,
-connecting, and draining sessions together stay within twice
-`RAW_TUNNEL_MAX_TUNNELS`: each active tunnel may keep one drained predecessor
-while its replacement connects. Empty drained tunnels are closed locally, and
-SIGTERM waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` before closing pipes that
-remain. The pod's termination grace must be longer than that wait.
+pipe is OPENED. Pipe lifetime starts at OPENED, not at OPEN.
+
+When the Controller rotates a tunnel, the connector opens a replacement right
+away and the drained tunnel keeps its pipes for up to
+`RAW_TUNNEL_ROTATION_DEADLINE`. A drained tunnel closes as soon as its last
+pipe ends, and its pipes count toward `RAW_TUNNEL_MAX_PIPES_PER_POD`, so pipes
+bound how many drained tunnels stay open. The Controller rotates a tunnel about
+every 20 minutes, so a pipe lives at most about 20 minutes plus the rotation
+deadline, 35 minutes by default. A Controller rollout ends pipes sooner, about
+25 seconds after the Controller pod gets SIGTERM. SIGTERM on the connector
+waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` before closing pipes that remain. The
+pod's termination grace must be longer than that wait.
 
 | Variable | Default | Description |
 |---|---|---|
 | `RAW_TUNNEL_ENABLED` | `false` | Open raw tunnels alongside the legacy ones. |
-| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Active, connecting, and draining sessions together stay within twice this value. |
+| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Drained tunnels that still carry pipes do not count. |
 | `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel (hard max 2048). |
 | `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels (hard max 4096). |
 | `RAW_TUNNEL_IDLE_TIMEOUT` | `15m` | Close a pipe that moves no bytes for this long. |
 | `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. Lifetime starts when the pipe is OPENED, not when OPEN is sent. |
 | `RAW_TUNNEL_OPEN_TIMEOUT` | `30s` | Bound on dial and forward-proxy handshake before the pipe is OPENED. Expiry is reported as `open_timeout`. |
-| `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. An unanswered ping does not close it. |
+| `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. A ping unanswered for 10s closes the tunnel. |
 | `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` | `30` | How long SIGTERM waits for pipes before closing them. |
+| `RAW_TUNNEL_ROTATION_DEADLINE` | `15m` | How long a tunnel the Controller rotated keeps its open pipes. Remaining pipes then close with `rotation_deadline`. At most `RAW_TUNNEL_MAX_LIFETIME`. |
+| `RAW_TUNNEL_STREAM_WINDOW` | `262144` | Per-pipe receive window in bytes, from 16384 to 16777216. One stalled pipe holds at most this much unread data. |
+| `RAW_TUNNEL_OUTER_WINDOW` | `1048576` | Receive window of each raw tunnel's outer gRPC stream in bytes, from 16384 to 16777216. Caps bytes in flight for all pipes on that tunnel together. |
 | `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. The chart sets it from `rawTunnel.environment`. |
 | `RAW_TUNNEL_ALLOWED_SUBJECTS` | **required when enabled** | Comma-separated `sub` claims allowed to open pipes. |
 | `RAW_TUNNEL_CURRENT_KEY_ID` | **required when enabled** | `kid` of the current ES256 public key. |

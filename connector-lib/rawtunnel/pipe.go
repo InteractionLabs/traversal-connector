@@ -447,13 +447,14 @@ func (p *Pipe) finish(reason pb.RawCloseReason, origin string) {
 	local := p.local
 	report := origin != "" && p.result.Reason != pb.RawCloseReason_RAW_CLOSE_REASON_COMPLETED
 	reported := p.result.Reason
+	idle, life := p.idle, p.life
 	p.mu.Unlock()
 
-	if p.idle != nil {
-		p.idle.Stop()
+	if idle != nil {
+		idle.Stop()
 	}
-	if p.life != nil {
-		p.life.Stop()
+	if life != nil {
+		life.Stop()
 	}
 	// Connector dials are bound to the pipe context. The controller's HTTP/2
 	// request is not: cancelling it resets the stream and can drop a close
@@ -528,8 +529,15 @@ func (p *Pipe) signalDecided() {
 	p.decidedOnce.Do(func() { close(p.decided) })
 }
 
+// armTimers holds the lock so a finish that wins the race sees the timers and
+// stops them, or this sees finished and arms none.
 func (p *Pipe) armTimers() {
 	p.last.Store(time.Now().UnixNano())
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.finished {
+		return
+	}
 	p.idle = time.AfterFunc(p.m.cfg.IdleTimeout, p.onIdle)
 	p.life = time.AfterFunc(p.m.cfg.MaxLifetime, func() {
 		p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_MAX_LIFETIME, "sent")
@@ -539,7 +547,11 @@ func (p *Pipe) armTimers() {
 func (p *Pipe) onIdle() {
 	idle := time.Duration(time.Now().UnixNano() - p.last.Load())
 	if idle < p.m.cfg.IdleTimeout {
-		p.idle.Reset(p.m.cfg.IdleTimeout - idle)
+		p.mu.Lock()
+		if !p.finished {
+			p.idle.Reset(p.m.cfg.IdleTimeout - idle)
+		}
+		p.mu.Unlock()
 		return
 	}
 	p.finish(pb.RawCloseReason_RAW_CLOSE_REASON_IDLE_TIMEOUT, "sent")

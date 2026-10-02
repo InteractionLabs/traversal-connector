@@ -103,6 +103,9 @@ func NewIsolatedClient(
 		connect.WithGRPC(),
 		connect.WithReadMaxBytes(rawFrameMaxBytes),
 		connect.WithSendMaxBytes(rawFrameMaxBytes),
+		// Raw frames carry pipe bytes that are usually already encrypted, so
+		// gzip on the controller costs CPU for no size reduction.
+		connect.WithAcceptCompression("gzip", nil, nil),
 		connect.WithInterceptors(
 			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
 		),

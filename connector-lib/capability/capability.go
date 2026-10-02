@@ -398,12 +398,22 @@ func checkShape(c *Claims) error {
 	return nil
 }
 
+func caseVariant(key string, want map[string]bool) bool {
+	for known := range want {
+		if strings.EqualFold(key, known) {
+			return true
+		}
+	}
+	return false
+}
+
 // decodeSegment decodes one base64url JSON segment into v. The object must
 // contain every key in want, each once and spelled exactly. Unknown keys are
 // rejected unless allowUnknown is set, in which case they are ignored and are
-// not passed to encoding/json. Duplicates stay rejected either way, because
-// encoding/json would otherwise keep the last value and match keys
-// case-insensitively, letting two parsers read different claims.
+// not passed to encoding/json. Duplicates and case variants of a wanted key
+// stay rejected either way, because encoding/json would otherwise keep the
+// last value and match keys case-insensitively, letting two parsers read
+// different claims.
 func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v any) error {
 	raw, err := decodeBase64(segment)
 	if err != nil {
@@ -425,7 +435,7 @@ func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v an
 		}
 		key, _ := tok.(string)
 		if !want[key] {
-			if !allowUnknown {
+			if !allowUnknown || caseVariant(key, want) {
 				return errors.New("unexpected field")
 			}
 			var skipped json.RawMessage

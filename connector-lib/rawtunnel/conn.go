@@ -41,6 +41,9 @@ type ChunkConn struct {
 	maxHeld    int
 	closed     bool
 	lost       bool
+	// readErr is the first Receive failure that Close did not cause, such as
+	// a TLS or dial error on the outer stream.
+	readErr error
 	// interrupt unblocks a Receive that Close cannot cancel itself. The gRPC
 	// stream behind FromChunks is not an io.Closer.
 	interrupt func()
@@ -74,6 +77,9 @@ func (c *ChunkConn) Read(p []byte) (int, error) {
 		c.rmu.Lock()
 		if err != nil {
 			c.lost = true
+			if !c.closed && c.readErr == nil {
+				c.readErr = err
+			}
 		}
 		if c.closed {
 			c.rmu.Unlock()
@@ -145,6 +151,13 @@ func (c *ChunkConn) Close() error {
 	})
 	<-c.closedDone
 	return nil
+}
+
+// Err is the first outer-stream read failure that Close did not cause.
+func (c *ChunkConn) Err() error {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	return c.readErr
 }
 
 // Lost reports that a read failed or Close has started. Callers use it to

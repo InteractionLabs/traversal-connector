@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
@@ -35,6 +36,9 @@ type Manager struct {
 	opener  *opener
 	metrics *rawMetrics
 	hello   connectorHello
+	// redactor's rules can hot-reload, so each new tunnel's hello reads them.
+	redactor    *redact.Redactor
+	blocksPipes atomic.Bool
 	// backoff is copied into each slot. Slots do not share its counter, so one
 	// raw tunnel's failures cannot delay the others or the legacy tunnels.
 	backoff backoff
@@ -51,15 +55,6 @@ type Manager struct {
 	started      chan struct{}
 	wg           sync.WaitGroup
 	shutdownOnce sync.Once
-}
-
-// sessionBound caps active + connecting + draining. MaxTunnels active slots
-// may each keep one drained predecessor while its replacement connects, so
-// the bound is 2×MaxTunnels. Empty drained tunnels are closed locally and
-// RotationDeadline force-closes ones that still have pipes, so the draining
-// set cannot grow without limit across repeated controller DRAINs.
-func (m *Manager) sessionBound() int {
-	return 2 * m.cfg.RawTunnel.MaxTunnels
 }
 
 // New builds a manager. When raw tunnels are disabled it does not dial and
@@ -87,14 +82,15 @@ func newManager(
 		logger = slog.Default()
 	}
 	m := &Manager{
-		cfg:     cfg,
-		enabled: cfg.RawTunnel.Enabled,
-		newRPC:  factory,
-		metrics: metrics,
-		hello:   helloFrom(cfg),
-		backoff: newBackoff(),
-		log:     logger,
-		started: make(chan struct{}),
+		cfg:      cfg,
+		enabled:  cfg.RawTunnel.Enabled,
+		newRPC:   factory,
+		metrics:  metrics,
+		hello:    helloFrom(cfg),
+		redactor: redactor,
+		backoff:  newBackoff(),
+		log:      logger,
+		started:  make(chan struct{}),
 	}
 	if !cfg.RawTunnel.Enabled {
 		return m, nil
@@ -106,13 +102,22 @@ func newManager(
 		return nil, err
 	}
 	m.opener = opener
-	if redactor != nil && redactor.HasUnscopedRule() {
-		m.hello.redactionBlocksPipes = true
-		logger.Warn(
+	m.currentHello()
+	return m, nil
+}
+
+// currentHello is the hello for a tunnel opening now. The controller learns
+// about a rules reload when the connector next opens a tunnel.
+func (m *Manager) currentHello() *pb.RawConnectorHello {
+	hello := m.hello
+	hello.redactionBlocksPipes = m.redactor.HasUnscopedRule()
+	if m.blocksPipes.Swap(hello.redactionBlocksPipes) != hello.redactionBlocksPipes &&
+		hello.redactionBlocksPipes {
+		m.log.Warn(
 			"redaction rule has no host filter; raw pipes are refused for every destination",
 		)
 	}
-	return m, nil
+	return hello.message()
 }
 
 // Start launches the raw tunnels and returns once they are running, or
@@ -284,7 +289,7 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 		IdleTimeout:   m.cfg.RawTunnel.IdleTimeout,
 		MaxLifetime:   m.cfg.RawTunnel.MaxLifetime,
 		PingInterval:  m.cfg.RawTunnel.PingInterval,
-		Hello:         m.hello.message(),
+		Hello:         m.currentHello(),
 		OnControlDrop: m.metrics.controlDrop,
 		OnReset:       m.metrics.reset,
 		Abort: func() {
@@ -339,15 +344,17 @@ func (m *Manager) openSession(ctx context.Context) (*session, error) {
 	return sess, nil
 }
 
-// reserveSession claims one connecting slot under the session bound so a
-// replacement cannot open while drained-but-open tunnels already fill it.
+// reserveSession claims one connecting slot. Draining tunnels do not count:
+// one closes as soon as its last pipe ends, and its pipes count against
+// MaxPipesPerPod, so pipes already bound how many drain and what they buffer.
+// Counting them here would let long pipes on every tunnel block replacements.
 func (m *Manager) reserveSession() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.shuttingDown {
 		return errShutdown
 	}
-	if m.active+m.connecting+m.draining >= m.sessionBound() {
+	if m.active+m.connecting >= m.cfg.RawTunnel.MaxTunnels {
 		return errSessionCapacity
 	}
 	m.connecting++

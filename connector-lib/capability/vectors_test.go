@@ -67,6 +67,9 @@ type tokenVector struct {
 	Expected expectedVector `json:"expected"`
 	// Result is "ok" or the capability.Code the validator must report.
 	Result string `json:"result"`
+	// LooseResult is the same for a verifier that ignores unknown claims, as
+	// the connector's does.
+	LooseResult string `json:"loose_result,omitempty"`
 }
 
 type expectedVector struct {
@@ -88,6 +91,9 @@ type tokenCase struct {
 	sign   func(t testing.TB, c capability.Claims) string
 	result capability.Code
 }
+
+// looseAccepts names the tokens a verifier that ignores unknown claims accepts.
+var looseAccepts = map[string]bool{"extra claim": true}
 
 func mutated(mutate func(*capability.Claims)) func(testing.TB, capability.Claims) string {
 	return func(t testing.TB, c capability.Claims) string {
@@ -207,6 +213,9 @@ var tokenCases = []tokenCase{
 	{"claim in another case", rawPayload(func(p string) string {
 		return strings.Replace(p, `"connector_id"`, `"Connector_ID"`, 1)
 	}), capability.CodeMalformed},
+	{"case variant beside the claim", rawPayload(func(p string) string {
+		return strings.Replace(p, "{", `{"Connector_ID":"other",`, 1)
+	}), capability.CodeMalformed},
 	{"port as string", rawPayload(func(p string) string {
 		return strings.Replace(p, `"port":5432`, `"port":"5432"`, 1)
 	}), capability.CodeMalformed},
@@ -273,11 +282,16 @@ func generateVectors(t *testing.T) vectorFile {
 		if result == "" {
 			result = "ok"
 		}
+		loose := result
+		if looseAccepts[tc.name] {
+			loose = "ok"
+		}
 		f.Tokens = append(f.Tokens, tokenVector{
-			Name:     tc.name,
-			Token:    tc.sign(t, validClaims(testNow)),
-			Expected: vectorExpected(),
-			Result:   result,
+			Name:        tc.name,
+			Token:       tc.sign(t, validClaims(testNow)),
+			Expected:    vectorExpected(),
+			Result:      result,
+			LooseResult: loose,
 		})
 	}
 	return f
@@ -371,28 +385,38 @@ func verifyTokens(t *testing.T, file vectorFile, tokens []tokenVector) {
 		keys[k.KID] = key
 	}
 	for _, tv := range tokens {
-		v, err := capability.NewVerifier(capability.VerifierConfig{
-			Issuer:          file.Issuer,
-			Keys:            keys,
-			AllowedSubjects: file.AllowedSubjects,
-			Now:             func() time.Time { return time.Unix(file.Now, 0) },
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = v.Verify(tv.Token, capability.Expected{
-			ConnectorID:    tv.Expected.ConnectorID,
-			OrganizationID: tv.Expected.OrganizationID,
-			Host:           tv.Expected.Host,
-			Port:           tv.Expected.Port,
-			Mode:           pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
-		})
-		got := string(codeOf(err))
-		if err == nil {
-			got = "ok"
-		}
-		if got != tv.Result {
-			t.Errorf("token %q: got %s (%v), want %s", tv.Name, got, err, tv.Result)
+		for _, loose := range []bool{false, true} {
+			v, err := capability.NewVerifier(capability.VerifierConfig{
+				Issuer:             file.Issuer,
+				Keys:               keys,
+				AllowedSubjects:    file.AllowedSubjects,
+				Now:                func() time.Time { return time.Unix(file.Now, 0) },
+				AllowUnknownClaims: loose,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = v.Verify(tv.Token, capability.Expected{
+				ConnectorID:    tv.Expected.ConnectorID,
+				OrganizationID: tv.Expected.OrganizationID,
+				Host:           tv.Expected.Host,
+				Port:           tv.Expected.Port,
+				Mode:           pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+			})
+			got := string(codeOf(err))
+			if err == nil {
+				got = "ok"
+			}
+			// Signer vectors carry only the strict result, and they are valid
+			// tokens either way.
+			want := tv.Result
+			if loose && tv.LooseResult != "" {
+				want = tv.LooseResult
+			}
+			if got != want {
+				t.Errorf("token %q (loose %v): got %s (%v), want %s",
+					tv.Name, loose, got, err, want)
+			}
 		}
 	}
 }

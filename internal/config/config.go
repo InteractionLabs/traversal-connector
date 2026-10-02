@@ -202,10 +202,10 @@ type RawTunnelConfig struct {
 	ShutdownGrace time.Duration
 	// RotationDeadline is how long a drained tunnel may keep pipes that are
 	// still open. When it elapses those pipes close with rotation_deadline.
-	// It is separate from ShutdownGrace: a pipe can outlast pod termination,
-	// and the deadline must stay shorter than the controller tunnel lifetime
-	// (default 20 minutes) so the extra session slot frees before the next
-	// rotation.
+	// It is separate from ShutdownGrace. The controller rotates a tunnel after
+	// its lifetime (20 minutes plus jitter by default), so a pipe lives at
+	// most that lifetime plus this deadline. A controller rollout ends pipes
+	// sooner: the controller closes them about 25s after SIGTERM.
 	RotationDeadline          time.Duration
 	Issuer                    string
 	AllowedSubjects           []string

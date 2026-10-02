@@ -345,9 +345,9 @@ spec:
             - name: RAW_TUNNEL_ROTATION_DEADLINE
               value: {{ .Values.rawTunnel.rotationDeadline | quote }}
             - name: RAW_TUNNEL_STREAM_WINDOW
-              value: {{ .Values.rawTunnel.streamWindowBytes | quote }}
+              value: {{ printf "%d" (int64 .Values.rawTunnel.streamWindowBytes) | quote }}
             - name: RAW_TUNNEL_OUTER_WINDOW
-              value: {{ .Values.rawTunnel.outerWindowBytes | quote }}
+              value: {{ printf "%d" (int64 .Values.rawTunnel.outerWindowBytes) | quote }}
             {{- $rawKeys := include "traversal-connector.rawTunnelKeys" . | fromYaml }}
             - name: RAW_TUNNEL_ISSUER
               value: {{ printf "traversal-raw-tunnel/%s" .Values.rawTunnel.environment | quote }}

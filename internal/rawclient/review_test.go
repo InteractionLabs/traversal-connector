@@ -58,8 +58,17 @@ func TestHostScopedRuleRefusesIPLiteral(t *testing.T) {
 }
 
 func TestUnscopedRuleAdvertisesBlockedRawPipes(t *testing.T) {
-	redactor := loadRules(t, "version = \"v1\"\n[[rules]]\nname = \"email\"\n"+
-		"type = \"regex\"\npattern = \"a\"\n")
+	const unscoped = "version = \"v1\"\n[[rules]]\nname = \"email\"\n" +
+		"type = \"regex\"\npattern = \"a\"\n"
+	path := filepath.Join(t.TempDir(), "rules.toml")
+	if err := os.WriteFile(path, []byte(unscoped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	redactor := redact.NewRedactor()
+	loader := redact.NewFileLoader(path, redactor, time.Second)
+	if err := loader.LoadInitial(); err != nil {
+		t.Fatal(err)
+	}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	cfg := baseConfig("http://127.0.0.1:9")
@@ -67,11 +76,21 @@ func TestUnscopedRuleAdvertisesBlockedRawPipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !m.hello.message().GetRedactionBlocksPipes() {
+	if !m.currentHello().GetRedactionBlocksPipes() {
 		t.Fatal("hello did not say raw pipes are blocked")
 	}
 	if !strings.Contains(buf.String(), "no host filter") {
 		t.Fatalf("log %q", buf.String())
+	}
+	scoped := unscoped + "hosts = ['db\\\\.internal']\n"
+	if err := os.WriteFile(path, []byte(scoped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loader.LoadInitial(); err != nil {
+		t.Fatal(err)
+	}
+	if m.currentHello().GetRedactionBlocksPipes() {
+		t.Fatal("hello still says raw pipes are blocked after the rules reloaded")
 	}
 }
 

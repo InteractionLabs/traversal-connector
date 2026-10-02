@@ -211,10 +211,10 @@ affinity: {}
 # rawTunnel.httpsProxy (HTTPS_PROXY and NO_PROXY on the connector container),
 # not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
 # allowDelegatedProxyChecks is true. Prefer existingSecret over url. The
-# per-pod pipe cap counts pipes on
-# draining tunnels, so a rotation cannot grow memory without a bound. Active,
-# connecting, and draining sessions together stay within 2× maxTunnels. The pod
-# cap must be at least the per-tunnel cap. Hard ceilings match the process:
+# per-pod pipe cap counts pipes on draining tunnels, so a rotation cannot grow
+# memory without a bound, and it also bounds how many drained tunnels stay
+# open. maxTunnels counts active tunnels only. The pod cap must be at least
+# the per-tunnel cap. Hard ceilings match the process:
 # maxTunnels ≤ 64, maxPipesPerTunnel ≤ 2048, maxPipesPerPod ≤ 4096.
 # openTimeout bounds dial and proxy handshake before OPENED; pipe lifetime
 # starts at OPENED, not at OPEN.
@@ -229,10 +229,10 @@ rawTunnel:
   pingInterval: 30s
   shutdownGraceSeconds: 30
   terminationGraceSeconds: 45
-  # How long a drained tunnel keeps pipes that are still open. Keep this
-  # shorter than the controller tunnel lifetime (default 20m) so the extra
-  # session slot frees before the next rotation. Pod shutdown uses
-  # shutdownGraceSeconds, which must stay under terminationGraceSeconds.
+  # How long a tunnel the controller rotated keeps pipes that are still open.
+  # The controller rotates about every 20m, so a pipe lives at most about 20m
+  # plus this deadline. Pod shutdown uses shutdownGraceSeconds, which must stay
+  # under terminationGraceSeconds.
   rotationDeadline: 15m
   # Receive windows in bytes. Zero uses the library defaults: 256KiB per pipe
   # and 1MiB on the outer gRPC stream. Set only to raise a window.
@@ -242,7 +242,10 @@ rawTunnel:
   # It selects the issuer, traversal-raw-tunnel/<environment>, and that
   # environment's entry in trustedKeys.
   environment: ""
-  allowedSubjects: []
+  # Capability sub claims allowed to open pipes. Traversal's integration proxy
+  # signs as integration-proxy.
+  allowedSubjects:
+    - integration-proxy
   # Each environment's capability-signer public keys, as PEM PUBLIC KEY
   # blocks, identified by kid: the bare KMS key ID, not its ARN. Traversal
   # ships them with each chart release; do not override them, or upgrades stop

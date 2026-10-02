@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,6 +158,47 @@ func TestIsolatedClientSpeaksTLS(t *testing.T) {
 		active, _, _, _ := m.snapshot()
 		return active == 1
 	})
+}
+
+// An untrusted controller certificate must reach the log as the TLS error.
+func TestTLSFailureReportsItsCause(t *testing.T) {
+	certPEM, keyPEM := serverCert(t)
+	otherCA, _ := serverCert(t)
+	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{
+		Handler: http.NotFoundHandler(), ReadHeaderTimeout: time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{pair},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"h2"},
+		},
+	}
+	go func() { _ = srv.Serve(tls.NewListener(ln, srv.TLSConfig)) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	cfg := baseConfig("https://" + ln.Addr().String())
+	cfg.TLSCert = &certPEM
+	cfg.TLSKey = &keyPEM
+	cfg.TLSCA = &otherCA
+	m, err := newManager(cfg, redact.NewRedactor(), func() (
+		connectorconnect.ConnectorServiceClient, func(), error,
+	) {
+		return client.NewIsolatedClient(cfg)
+	}, discardLogs(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.openSession(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("open error = %v, want the certificate failure", err)
+	}
 }
 
 func serverCert(t *testing.T) (string, string) {
@@ -509,7 +552,7 @@ func TestRepeatedDrainKeepsSessionsBounded(t *testing.T) {
 	m := startManager(t, cfg, nil)
 	t.Cleanup(m.Shutdown)
 
-	bound := 2 // sessionBound = 2 * MaxTunnels
+	bound := 2 // one active tunnel and the drained one closing
 	first := recvMux(t, ctrl.ready)
 	for i := range 6 {
 		first.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
@@ -564,7 +607,7 @@ func TestRepeatedRotationWithALivePipeStaysBounded(t *testing.T) {
 	dst := <-dstCh
 	t.Cleanup(func() { _ = dst.Close() })
 
-	bound := 2 // sessionBound = 2 * MaxTunnels
+	bound := 2 // one active tunnel and the drained one holding the pipe
 	for i := range 4 {
 		current.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
 		current = recvMux(t, ctrl.ready)
@@ -584,6 +627,45 @@ func TestRepeatedRotationWithALivePipeStaysBounded(t *testing.T) {
 				"rotation %d: active=%d draining=%d connecting=%d sessions=%d",
 				i+1, active, draining, connecting, sessions,
 			)
+		}
+	}
+}
+
+// Every rotation leaves a long pipe on the drained tunnel. The replacement must
+// still open each time, as it does when the controller rotates faster than
+// RotationDeadline.
+func TestRotationWithLongPipesOnEveryTunnelKeepsOpening(t *testing.T) {
+	ctrl := newStickyDrainCtrl()
+	srv := serveH2C(t, ctrl)
+	t.Cleanup(srv.close)
+	ln := listen(t)
+	cfg := baseConfig(srv.url)
+	cfg.RawTunnel.MaxTunnels = 1
+	cfg.RawTunnel.RotationDeadline = time.Hour
+	m := startManager(t, cfg, dialLocal(t, ln))
+	t.Cleanup(m.Shutdown)
+
+	current := recvMux(t, ctrl.ready)
+	const rotations = 4
+	pipes := make([]*rawtunnel.Pipe, 0, rotations)
+	for i := range rotations {
+		dstCh := acceptOne(ln)
+		pipe, _ := openPipe(t, current, sign(t, fmt.Sprintf("jti-long-%d", i)))
+		dst := <-dstCh
+		t.Cleanup(func() { _ = dst.Close() })
+		pipes = append(pipes, pipe)
+		current.Drain(pb.RawDrainReason_RAW_DRAIN_REASON_ROTATION)
+		current = recvMux(t, ctrl.ready)
+		waitFor(t, 3*time.Second, func() bool {
+			active, draining, _, connecting := m.snapshot()
+			return active == 1 && connecting == 0 && draining == i+1
+		})
+	}
+	for i, pipe := range pipes {
+		select {
+		case <-pipe.Done():
+			t.Fatalf("rotation closed long pipe %d", i)
+		default:
 		}
 	}
 }

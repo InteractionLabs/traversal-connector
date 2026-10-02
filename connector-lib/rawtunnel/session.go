@@ -144,6 +144,8 @@ type Mux struct {
 	// Close waits for it before ending the control stream, or the connector
 	// sees the tunnel drop and backs off instead of rotating.
 	drainPosted chan struct{}
+	// slotFreed is closed and replaced whenever a pipe releases its slot.
+	slotFreed chan struct{}
 
 	handlerMu      sync.Mutex
 	handlerN       int
@@ -214,6 +216,7 @@ func New(cfg Config, stream Stream) (*Mux, error) {
 		drainOut:     make(chan []byte, 1),
 		pipes:        make(map[uint64]*Pipe),
 		seen:         make(map[uint64]struct{}),
+		slotFreed:    make(chan struct{}),
 		handlersIdle: make(chan struct{}),
 		tunnelID:     cfg.TunnelID,
 	}
@@ -250,7 +253,7 @@ func (m *Mux) Run(ctx context.Context) error {
 	go func() {
 		select {
 		case <-runCtx.Done():
-			m.shutdown(runCtx.Err())
+			m.shutdown(m.transportCause(runCtx.Err()))
 		case <-m.done:
 		}
 	}()
@@ -465,6 +468,8 @@ func (m *Mux) release(p *Pipe) {
 	if m.slots > 0 {
 		m.slots--
 	}
+	close(m.slotFreed)
+	m.slotFreed = make(chan struct{})
 	m.checkDrainedLocked()
 }
 
@@ -488,6 +493,20 @@ func (m *Mux) markPeerDrain() {
 	m.signalDraining()
 	m.checkDrainedLocked()
 	m.mu.Unlock()
+}
+
+// transportCause reports the connector's outer read failure, such as a TLS
+// error, in place of the cancel that failure triggers on its way out. After
+// hello the tunnel's own close reasons describe the end better. The controller
+// keeps the cancel: shutdown closes the conn only for a cancel before hello.
+func (m *Mux) transportCause(err error) error {
+	if m.cfg.Role != RoleConnector {
+		return err
+	}
+	if readErr := m.conn.Err(); readErr != nil && !m.establishedClosed() {
+		return readErr
+	}
+	return err
 }
 
 func (m *Mux) establishedClosed() bool {
@@ -529,8 +548,8 @@ func (m *Mux) shutdown(err error) {
 		keepStatus := m.cfg.Role == RoleController && !m.establishedClosed() &&
 			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 		if !keepStatus {
-			if m.cc != nil {
-				_ = m.cc.Close()
+			if cc := m.client(); cc != nil {
+				_ = cc.Close()
 			}
 			_ = m.conn.Close()
 		}
@@ -561,6 +580,9 @@ func (m *Mux) serve() error {
 	mux.HandleFunc("POST "+pipePath, m.handlePipe)
 	srv.ServeConn(m.conn, &http2.ServeConnOpts{Handler: mux, Context: m.ctx})
 	if err := m.ctx.Err(); err != nil {
+		return m.transportCause(err)
+	}
+	if err := m.conn.Err(); err != nil && !m.establishedClosed() {
 		return err
 	}
 	return ErrClosed
@@ -655,7 +677,7 @@ func (m *Mux) handlePipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer m.untrackHandler()
-	p, admitErr := m.admit(open)
+	p, admitErr := m.admit(r.Context(), open)
 	if admitErr != nil {
 		writeOpenError(w, admitErr)
 		return
@@ -688,12 +710,19 @@ func (m *Mux) handlePipe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(trailerClose, closeReasonToken(p.Result().Reason))
 }
 
-func (m *Mux) admit(open *pb.RawOpen) (*Pipe, *pb.RawOpenError) {
+// slotReleaseWait is how long an open waits for a slot on a full tunnel. The
+// controller frees a slot as soon as it resets a pipe, and this side frees it
+// only once that pipe's handler unwinds, so an open right after a reset can
+// find every slot still held here.
+const slotReleaseWait = time.Second
+
+func (m *Mux) admit(ctx context.Context, open *pb.RawOpen) (*Pipe, *pb.RawOpenError) {
 	fail := func(reason pb.RawOpenFailureReason, detail string) (*Pipe, *pb.RawOpenError) {
 		return nil, &pb.RawOpenError{PipeId: open.GetPipeId(), Reason: reason, Detail: detail}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.waitForSlotLocked(ctx)
 	switch {
 	case m.err != nil:
 		return fail(pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR, "tunnel closed")
@@ -715,17 +744,60 @@ func (m *Mux) admit(open *pb.RawOpen) (*Pipe, *pb.RawOpenError) {
 	}
 	// Opens arrive on concurrent HTTP/2 streams, so admission order is not
 	// allocation order. Uniqueness is what keeps a pipe id from being reused.
-	if _, ok := m.seen[open.GetPipeId()]; ok {
+	// The peer has at most MaxPipes opens in flight, so an id further than
+	// pipeIDWindow below the highest one is a replay, and seen only needs
+	// the ids inside that window.
+	id := open.GetPipeId()
+	window := m.pipeIDWindow()
+	_, dup := m.seen[id]
+	if dup || m.lastID > window && id <= m.lastID-window {
 		return fail(
 			pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_PROTOCOL_ERROR,
 			"pipe id is not increasing",
 		)
 	}
-	m.seen[open.GetPipeId()] = struct{}{}
-	if open.GetPipeId() > m.lastID {
-		m.lastID = open.GetPipeId()
+	m.seen[id] = struct{}{}
+	m.lastID = max(m.lastID, id)
+	if uint64(len(m.seen)) > 2*window {
+		for old := range m.seen {
+			if old+window <= m.lastID {
+				delete(m.seen, old)
+			}
+		}
 	}
 	return m.newPipeLocked(open), nil
+}
+
+// waitForSlotLocked returns once a slot is free, the tunnel stops admitting,
+// or slotReleaseWait passes. It drops m.mu while it waits.
+func (m *Mux) waitForSlotLocked(ctx context.Context) {
+	timer := time.NewTimer(slotReleaseWait)
+	defer timer.Stop()
+	for m.slots >= m.cfg.MaxPipes && m.err == nil && !m.localDrain && !m.peerDrain {
+		freed := m.slotFreed
+		m.mu.Unlock()
+		select {
+		case <-freed:
+		case <-timer.C:
+			m.mu.Lock()
+			return
+		case <-ctx.Done():
+			m.mu.Lock()
+			return
+		case <-m.draining:
+			m.mu.Lock()
+			return
+		case <-m.done:
+			m.mu.Lock()
+			return
+		}
+		m.mu.Lock()
+	}
+}
+
+func (m *Mux) pipeIDWindow() uint64 {
+	const reorderSlack = 64
+	return uint64(4*m.cfg.MaxPipes + reorderSlack) //nolint:gosec // MaxPipes is small and positive
 }
 
 func (m *Mux) dial(ctx context.Context) error {
@@ -735,6 +807,10 @@ func (m *Mux) dial(ctx context.Context) error {
 		return err
 	}
 	h2.AllowHTTP = true
+	// The tunnel is the only connection. Reset streams count against the
+	// peer's stream limit until a PING ack, so without strict mode an open into
+	// a free pipe slot fails right after a burst of resets.
+	h2.StrictMaxConcurrentStreams = true
 	streamWindow := streamWindow(m.cfg.StreamWindow)
 	tr.HTTP2 = &http.HTTP2Config{
 		MaxReceiveBufferPerStream:     streamWindow,
@@ -747,8 +823,10 @@ func (m *Mux) dial(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
 	m.tr = tr
 	m.cc = cc
+	m.mu.Unlock()
 	if err := m.exchangeHello(ctx); err != nil {
 		return err
 	}
@@ -885,18 +963,27 @@ func (m *Mux) writeControlBytes(body []byte) {
 	}()
 }
 
+func (m *Mux) client() *http2.ClientConn {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cc
+}
+
 func (m *Mux) postDrain(body []byte) {
-	if m.cc == nil {
+	m.mu.Lock()
+	cc, ctx := m.cc, m.ctx
+	m.mu.Unlock()
+	if cc == nil {
 		return
 	}
 	req, err := http.NewRequestWithContext(
-		m.ctx, http.MethodPost, "http://tunnel"+drainPath, nil,
+		ctx, http.MethodPost, "http://tunnel"+drainPath, nil,
 	)
 	if err != nil {
 		return
 	}
 	req.Header.Set(headerDrain, base64.StdEncoding.EncodeToString(body))
-	resp, err := m.cc.RoundTrip(req)
+	resp, err := cc.RoundTrip(req)
 	if err != nil {
 		return
 	}

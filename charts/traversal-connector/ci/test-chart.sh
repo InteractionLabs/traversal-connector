@@ -131,6 +131,17 @@ assert_not_contains "$tmp_dir/raw-on.yaml" 'name: HTTPS_PROXY'
 assert_not_contains "$tmp_dir/raw-on.yaml" 'name: NO_PROXY'
 assert_not_contains "$tmp_dir/raw-on.yaml" 'RAW_TUNNEL_NEXT_KEY_ID'
 
+render raw-default-subject "$fixtures/direct-export-values.yaml" \
+  --set rawTunnel.enabled=true \
+  --set-string rawTunnel.environment=ci \
+  --set rawTunnel.streamWindowBytes=16777216 \
+  --set rawTunnel.outerWindowBytes=16777216 \
+  --set-string rawTunnel.trustedKeys.ci.current.kid=k1 \
+  --set-string rawTunnel.trustedKeys.ci.current.publicKeyPEM="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
+assert_contains "$tmp_dir/raw-default-subject.yaml" $'            - name: RAW_TUNNEL_ALLOWED_SUBJECTS\n              value: "integration-proxy"'
+assert_contains "$tmp_dir/raw-default-subject.yaml" $'            - name: RAW_TUNNEL_STREAM_WINDOW\n              value: "16777216"'
+assert_contains "$tmp_dir/raw-default-subject.yaml" $'            - name: RAW_TUNNEL_OUTER_WINDOW\n              value: "16777216"'
+
 current_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'abc' '-----END PUBLIC KEY-----')"
 next_pem="$(printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'next' '-----END PUBLIC KEY-----')"
 current_b64=$(printf '%s' "$current_pem" | base64 | tr -d '\n')
