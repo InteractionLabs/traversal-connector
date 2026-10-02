@@ -3,20 +3,17 @@ package redact
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 	"unicode"
 
-	"github.com/pelletier/go-toml/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/net/idna"
@@ -237,6 +234,16 @@ func NewRedactor() *Redactor {
 //     "regex-structured-data" rules; if set on a "regex" rule a warning is
 //     logged and the filters are ignored (since "regex" has no field concept).
 func (r *Redactor) Update(f *RulesFile) error {
+	compiled, err := compileRules(f)
+	if err != nil {
+		return err
+	}
+	r.rules.Store(&compiled)
+	return nil
+}
+
+// compileRules is shared by runtime updates and offline config validation.
+func compileRules(f *RulesFile) ([]compiledRule, error) {
 	defaultReplacement := f.DefaultReplacement
 	if defaultReplacement == "" {
 		defaultReplacement = defaultDefaultReplacement
@@ -264,7 +271,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 
 		re, err := regexp.Compile(rule.Pattern)
 		if err != nil {
-			return fmt.Errorf("rule %q: invalid pattern: %w", rule.Name, err)
+			return nil, fmt.Errorf("rule %q: invalid pattern: %w", rule.Name, err)
 		}
 
 		replacement := rule.Replacement
@@ -274,7 +281,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 
 		hostMatchers, err := compileHostMatchers(rule.Hosts)
 		if err != nil {
-			return fmt.Errorf("rule %q: %w", rule.Name, err)
+			return nil, fmt.Errorf("rule %q: %w", rule.Name, err)
 		}
 
 		cr := compiledRule{
@@ -290,8 +297,7 @@ func (r *Redactor) Update(f *RulesFile) error {
 		}
 		compiled = append(compiled, cr)
 	}
-	r.rules.Store(&compiled)
-	return nil
+	return compiled, nil
 }
 
 // compileHostMatchers compiles each host pattern into a fully-anchored regexp
@@ -303,10 +309,13 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 		return nil, nil
 	}
 	matchers := make([]*regexp.Regexp, 0, len(patterns))
+	matchAll := false
 	for _, p := range patterns {
 		if p == ".*" {
-			// Matches everything; equivalent to no filter at all.
-			return nil, nil
+			// Keep validating the remaining patterns: a wildcard must not hide
+			// invalid expressions or make validation depend on list order.
+			matchAll = true
+			continue
 		}
 		// Anchor to the whole hostname. The group keeps any top-level
 		// alternation in p from binding only the first/last branch to the
@@ -326,6 +335,9 @@ func compileHostMatchers(patterns []string) ([]*regexp.Regexp, error) {
 			return nil, fmt.Errorf("invalid host pattern %q: %w", p, err)
 		}
 		matchers = append(matchers, m)
+	}
+	if matchAll {
+		return nil, nil
 	}
 	return matchers, nil
 }
@@ -600,103 +612,4 @@ func (r *Redactor) applyOneRule(
 		}
 	}
 	return out, changed
-}
-
-// FileLoader watches a TOML redaction rules file at a configurable interval and
-// updates the provided Redactor whenever the file changes.
-type FileLoader struct {
-	path                string
-	redactor            *Redactor
-	reloadInterval      time.Duration
-	lastHash            [sha256.Size]byte
-	consecutiveFailures int
-}
-
-// NewFileLoader returns a FileLoader that will watch path and push updates to r
-// every interval.
-func NewFileLoader(path string, r *Redactor, interval time.Duration) *FileLoader {
-	return &FileLoader{path: path, redactor: r, reloadInterval: interval}
-}
-
-// LoadInitial performs the first load of the rules file. Returns an error if
-// the file does not exist, cannot be parsed, or contains invalid patterns.
-// Must be called before Run; on success the rules are live immediately.
-func (l *FileLoader) LoadInitial() error {
-	data, err := os.ReadFile(l.path)
-	if err != nil {
-		return fmt.Errorf("redaction rules file %q: %w", l.path, err)
-	}
-
-	var f RulesFile
-	if err = toml.Unmarshal(data, &f); err != nil {
-		return fmt.Errorf("redaction rules file %q: parse error: %w", l.path, err)
-	}
-
-	if err = l.redactor.Update(&f); err != nil {
-		return fmt.Errorf("redaction rules file %q: %w", l.path, err)
-	}
-
-	l.lastHash = sha256.Sum256(data)
-	slog.Info("redaction rules loaded", "path", l.path, "rules", len(f.Rules))
-	return nil
-}
-
-// Run reloads the rules file on the configured interval until ctx is cancelled.
-// Call LoadInitial before Run to ensure rules are applied from the start.
-// Each reload error is logged; after 3 consecutive failures the process exits.
-func (l *FileLoader) Run(ctx context.Context) {
-	ticker := time.NewTicker(l.reloadInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			l.tryLoad()
-		}
-	}
-}
-
-const maxConsecutiveFailures = 3
-
-func (l *FileLoader) tryLoad() {
-	data, err := os.ReadFile(l.path)
-	if err != nil {
-		l.recordFailure("could not read redaction rules file", err)
-		return
-	}
-
-	hash := sha256.Sum256(data)
-	if hash == l.lastHash {
-		l.consecutiveFailures = 0
-		return
-	}
-
-	var f RulesFile
-	if err = toml.Unmarshal(data, &f); err != nil {
-		l.recordFailure("failed to parse redaction rules file", err)
-		return
-	}
-
-	if err = l.redactor.Update(&f); err != nil {
-		l.recordFailure("failed to compile redaction rules", err)
-		return
-	}
-
-	l.consecutiveFailures = 0
-	l.lastHash = hash
-	slog.Info("redaction rules reloaded", "path", l.path, "rules", len(f.Rules))
-}
-
-func (l *FileLoader) recordFailure(msg string, err error) {
-	l.consecutiveFailures++
-	slog.Error(msg, "path", l.path, "error", err, "consecutive_failures", l.consecutiveFailures)
-	// Maybe they are swapping out the file and it doesn't exist at this instant, or there is a transient IO error.
-	// Log and retry on the next tick. If we fail 3 times in a row, something is really wrong and we should exit to avoid
-	// running with stale rules indefinitely.
-	if l.consecutiveFailures >= maxConsecutiveFailures {
-		slog.Error("too many consecutive redaction rule failures, exiting", "path", l.path)
-		os.Exit(1)
-	}
 }

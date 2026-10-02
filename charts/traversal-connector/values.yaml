@@ -139,36 +139,12 @@ otel:
       limits:
         memory: 256Mi
 
-# ─── Redaction (optional) ────────────────────────────────────────────────────
-# Set enabled: true and configure exactly one rules source.
-# See https://github.com/InteractionLabs/traversal-connector for TOML syntax.
-#
-# DEPRECATED: redactionRules (plain string) is still accepted for backwards
-# compatibility but will be removed in a future chart version. Migrate to the
-# redaction stanza below.
-redactionRules: ""
-
-redaction:
+# ─── Remote configuration (opt-in) ──────────────────────────────────────────
+# Uses the controller origin and /v1/config/<connectorID>; no endpoint override.
+# Publish migrated rules before enabling; no local-file source is supported.
+configUpdates:
   enabled: false
-
-  # Option A: provide TOML rules inline — the chart creates a ConfigMap for you.
-  # Mutually exclusive with existingConfigMap and existingSecret.
-  rulesContent: ""
-  # Example:
-  # rulesContent: |
-  #   version = "1"
-  #   [[rules]]
-  #   name = "ssn"
-  #   type = "regex"
-  #   pattern = '\b\d{3}-\d{2}-(\d{4})\b'
-  #   replacement = "***-**-$1"
-
-  # Option B: reference a ConfigMap you manage externally.
-  # The ConfigMap must contain a key named `redaction-rules.toml`.
-  # Mutually exclusive with rulesContent.
-  existingConfigMap: ""
-
-
+  refreshInterval: "30s"
 
 # ─── Health probes ───────────────────────────────────────────────────────────
 # Connector exposes /healthz (always 200 once HTTP server is up) and /readyz

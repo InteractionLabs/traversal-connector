@@ -41,8 +41,10 @@ assert_render_fails() {
 render direct "$fixtures/direct-export-values.yaml"
 assert_contains "$tmp_dir/direct.yaml" 'value: "https://telemetry.example.invalid/v1/metrics"'
 assert_not_contains "$tmp_dir/direct.yaml" 'name: telemetry-sidecar'
-assert_contains "$tmp_dir/direct.yaml" 'kind: ConfigMap'
-assert_contains "$tmp_dir/direct.yaml" 'synthetic-token'
+assert_not_contains "$tmp_dir/direct.yaml" 'redaction-rules'
+assert_not_contains "$tmp_dir/direct.yaml" 'REDACTION_RULES_FILE'
+assert_contains "$tmp_dir/direct.yaml" 'name: TRAVERSAL_CONFIG_ENABLED'
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_CONFIG_ENDPOINT'
 assert_contains "$tmp_dir/direct.yaml" 'image: "traversalext/traversal-connector:dev"'
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_CONTROLLER_CONNECT_TO'
 assert_not_contains "$tmp_dir/direct.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
@@ -133,5 +135,14 @@ assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${commo
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
+
+assert_render_fails local-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set redaction.enabled=true
+assert_render_fails legacy-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set-string redactionRules=old-rules
+assert_render_fails mounted-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set-string redaction.existingConfigMap=old-rules
+
+render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
+assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
+assert_render_fails config-boolean 'configUpdates.enabled must be a boolean' "${common[@]}" --set-string configUpdates.enabled=false
+assert_render_fails config-override 'configUpdates.endpoint is no longer supported' "${common[@]}" --set-string configUpdates.endpoint=https://other.example.invalid
 
 echo "All chart tests passed."

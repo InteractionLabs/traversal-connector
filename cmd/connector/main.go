@@ -169,15 +169,33 @@ func main() {
 	defer cancel()
 
 	redactor := redact.NewRedactor()
-	if cfg.RedactionRulesFile != nil {
-		loader := redact.NewFileLoader(
-			*cfg.RedactionRulesFile,
+	if cfg.ConfigEnabled {
+		httpClient, clientErr := client.NewConfigHTTPClient(&cfg)
+		if clientErr != nil {
+			slog.Error("failed to build config transport", "error", clientErr)
+			os.Exit(1)
+		}
+		endpoint, endpointErr := cfg.ConfigURL()
+		if endpointErr != nil {
+			slog.Error("invalid config endpoint", "error", endpointErr)
+			os.Exit(1)
+		}
+		loader, loaderErr := redact.NewRemoteLoader(
+			httpClient,
+			endpoint,
 			redactor,
-			cfg.RedactionReloadInterval,
+			cfg.ConfigRefreshInterval,
 		)
-		if err = loader.LoadInitial(); err != nil {
-			slog.Error("failed to load redaction rules", "err", err)
-			return
+		if loaderErr == nil {
+			loaderErr = loader.LoadInitial(ctx)
+		}
+		if loaderErr != nil {
+			slog.Error(
+				"failed to load initial remote config; refusing to start unredacted",
+				"error",
+				loaderErr,
+			)
+			os.Exit(1)
 		}
 		go loader.Run(ctx)
 	}
