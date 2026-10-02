@@ -95,3 +95,33 @@ https://telemetry.traversal.com:4317
 https://telemetry.traversal.com/v1/{{ .signal }}
 {{- end -}}
 {{- end -}}
+
+{{/*
+goDurationSeconds parses a single-unit Go duration (30s, 15m, 4h) into seconds.
+Sub-second units fail. The connector process rejects those timeouts at startup,
+so the chart rejects them at render.
+*/}}
+{{- define "traversal-connector.goDurationSeconds" -}}
+{{- $name := .name -}}
+{{- $v := .value | toString -}}
+{{- if not (regexMatch "^[1-9][0-9]*(ns|us|µs|ms|s|m|h)$" $v) -}}
+{{- fail (printf "%s must be a positive duration with one unit (examples: 30s, 15m, 4h), got %q" $name $v) -}}
+{{- end -}}
+{{- $n := regexFind "^[0-9]+" $v | atoi -}}
+{{- $unit := regexFind "(ns|us|µs|ms|s|m|h)$" $v -}}
+{{- if or (eq $unit "ns") (eq $unit "us") (eq $unit "µs") (eq $unit "ms") -}}
+{{- fail (printf "%s must be at least 1s, got %q" $name $v) -}}
+{{- else if eq $unit "h" -}}
+{{- mul $n 3600 -}}
+{{- else if eq $unit "m" -}}
+{{- mul $n 60 -}}
+{{- else -}}
+{{- $n -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* The trusted keys packaged for rawTunnel.environment, as YAML, or an
+       empty map when the chart has none for it. */}}
+{{- define "traversal-connector.rawTunnelKeys" -}}
+{{- get (.Values.rawTunnel.trustedKeys | default dict) (.Values.rawTunnel.environment | default "") | default dict | toYaml -}}
+{{- end -}}

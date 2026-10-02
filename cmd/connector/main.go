@@ -13,6 +13,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
+	"github.com/InteractionLabs/traversal-connector/internal/rawclient"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
@@ -187,6 +188,12 @@ func main() {
 		slog.Error("failed to create connection manager", "err", err)
 		return
 	}
+	rawMgr, err := rawclient.New(&cfg, redactor)
+	if err != nil {
+		slog.Error("failed to create raw tunnel manager", "err", err)
+		return
+	}
+	rawMgr.Start()
 
 	slog.InfoContext(ctx, "traversal connector service starting",
 		"controller_logical_url", cfg.TraversalControllerURL,
@@ -196,6 +203,12 @@ func main() {
 		),
 		"max_tunnels", cfg.MaxTunnelsAllowed,
 		"env", cfg.EnvName)
+	if cfg.RawTunnel.Enabled {
+		slog.InfoContext(ctx, "raw tunnels enabled",
+			"max_tunnels", cfg.RawTunnel.MaxTunnels,
+			"max_pipes_per_tunnel", cfg.RawTunnel.MaxPipesPerTunnel,
+			"max_pipes_per_pod", cfg.RawTunnel.MaxPipesPerPod)
+	}
 
 	// Run a TLS connectivity test (equivalent to grpcurl -insecure -cert -key ... list).
 	if err = client.TestConnectivity(&cfg); err != nil {
@@ -227,10 +240,17 @@ func main() {
 		}
 	}()
 
+	// Begin raw drain when the signal arrives, alongside the legacy tunnels,
+	// so the grace period is the pod's grace period. A second call waits.
+	go func() {
+		<-ctx.Done()
+		rawMgr.Shutdown()
+	}()
 	if err = cm.Run(ctx); err != nil {
 		slog.ErrorContext(ctx,
 			"connection manager exited with error", "err", err)
 	}
+	rawMgr.Shutdown()
 
 	slog.InfoContext(ctx, "traversal connector service shutting down")
 }

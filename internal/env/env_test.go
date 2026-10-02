@@ -160,6 +160,24 @@ func TestGetEnvOptionalString(t *testing.T) {
 	}
 }
 
+func TestParseRejectsPresentGarbage(t *testing.T) {
+	t.Setenv("RAW_TUNNEL_ENABLED", "tru")
+	if _, err := ParseBool("RAW_TUNNEL_ENABLED", false); err == nil ||
+		err.Error() != "RAW_TUNNEL_ENABLED is not a valid bool" {
+		t.Fatalf("ParseBool() = %v", err)
+	}
+	t.Setenv("RAW_TUNNEL_MAX_TUNNELS", "abc")
+	if _, err := ParseInt("RAW_TUNNEL_MAX_TUNNELS", 2); err == nil ||
+		err.Error() != "RAW_TUNNEL_MAX_TUNNELS is not a valid integer" {
+		t.Fatalf("ParseInt() = %v", err)
+	}
+	t.Setenv("RAW_TUNNEL_IDLE_TIMEOUT", "nope")
+	if _, err := ParseDuration("RAW_TUNNEL_IDLE_TIMEOUT", time.Minute); err == nil ||
+		err.Error() != "RAW_TUNNEL_IDLE_TIMEOUT is not a valid duration" {
+		t.Fatalf("ParseDuration() = %v", err)
+	}
+}
+
 func ptrStr(s string) *string {
 	return &s
 }

@@ -38,6 +38,23 @@ const (
 	defaultMaxBackoffDelay         = 60 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
+	defaultRawMaxTunnels           = 2
+	defaultRawMaxPipesPerTunnel    = 100
+	defaultRawMaxPipesPerPod       = 200
+	defaultRawIdleTimeout          = 15 * time.Minute
+	defaultRawMaxLifetime          = 4 * time.Hour
+	defaultRawOpenTimeout          = 30 * time.Second
+	defaultRawPingInterval         = 30 * time.Second
+	defaultRawRotationDeadline     = 15 * time.Minute
+	defaultRawShutdownGrace        = 30 * time.Second
+	minRawWindowBytes              = 16 << 10
+	maxRawWindowBytes              = 16 << 20
+	// Hard ceilings grounded in per-tunnel goroutine, HTTP/2 connection, and
+	// pipe buffer cost. Defaults stay far below these; they only reject
+	// configs that would exhaust the process before any useful load.
+	maxRawTunnels        = 64
+	maxRawPipesPerTunnel = 2048
+	maxRawPipesPerPod    = 4096
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -161,6 +178,49 @@ type Config struct {
 	// RedactionReloadInterval is how often the redaction rules file is checked for
 	// changes. Read from REDACTION_RELOAD_INTERVAL. Defaults to 10s.
 	RedactionReloadInterval time.Duration
+	// RawTunnel configures the raw pipe tunnels. Disabled by default, and when
+	// disabled it changes nothing about the legacy tunnels.
+	RawTunnel RawTunnelConfig
+}
+
+// RawTunnelConfig is the raw-tunnel feature. Zero values are the defaults
+// applied by Load; Enabled is the only switch that turns the feature on.
+type RawTunnelConfig struct {
+	Enabled           bool
+	MaxTunnels        int
+	MaxPipesPerTunnel int
+	MaxPipesPerPod    int
+	IdleTimeout       time.Duration
+	MaxLifetime       time.Duration
+	// OpenTimeout bounds dial and forward-proxy handshake before OPENED.
+	// Maximum pipe lifetime (MaxLifetime) begins at OPENED / Start, not OPEN.
+	OpenTimeout  time.Duration
+	PingInterval time.Duration
+	// ShutdownGrace is how long process shutdown waits before closing
+	// remaining pipes with connector_terminating. It must stay shorter than
+	// the pod's termination grace.
+	ShutdownGrace time.Duration
+	// RotationDeadline is how long a drained tunnel may keep pipes that are
+	// still open. When it elapses those pipes close with rotation_deadline.
+	// It is separate from ShutdownGrace. The controller rotates a tunnel after
+	// its lifetime (20 minutes plus jitter by default), so a pipe lives at
+	// most that lifetime plus this deadline. A controller rollout ends pipes
+	// sooner: the controller closes them about 25s after SIGTERM.
+	RotationDeadline          time.Duration
+	Issuer                    string
+	AllowedSubjects           []string
+	CurrentKeyID              string
+	CurrentPublicKeyPEM       string
+	NextKeyID                 string
+	NextPublicKeyPEM          string
+	ForbiddenCIDRs            []string
+	AllowDelegatedProxyChecks bool
+	// StreamWindow is the per-pipe receive window in bytes. Zero uses the
+	// library default. RAW_TUNNEL_STREAM_WINDOW.
+	StreamWindow int
+	// OuterWindow is this process's outer gRPC receive window in bytes. Zero
+	// uses the library default. RAW_TUNNEL_OUTER_WINDOW.
+	OuterWindow int
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -233,6 +293,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rawTunnel, err := loadRawTunnelConfig()
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
@@ -289,8 +353,12 @@ func Load() (Config, error) {
 			"REDACTION_RELOAD_INTERVAL",
 			defaultRedactionReloadInterval,
 		),
+		RawTunnel: rawTunnel,
 	}
 
+	if err := cfg.RawTunnel.validate(); err != nil {
+		return Config{}, err
+	}
 	if err := validateControllerConnection(cfg); err != nil {
 		return Config{}, err
 	}
@@ -584,4 +652,194 @@ func decodeCertificate(encoded *string) *string {
 
 	decodedStr := string(decoded)
 	return &decodedStr
+}
+
+func loadRawTunnelConfig() (RawTunnelConfig, error) {
+	var err error
+	cfg := RawTunnelConfig{}
+	if cfg.Enabled, err = env.ParseBool("RAW_TUNNEL_ENABLED", false); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxTunnels, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_TUNNELS", defaultRawMaxTunnels,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxPipesPerTunnel, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL", defaultRawMaxPipesPerTunnel,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxPipesPerPod, err = env.ParseInt(
+		"RAW_TUNNEL_MAX_PIPES_PER_POD", defaultRawMaxPipesPerPod,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.IdleTimeout, err = env.ParseDuration(
+		"RAW_TUNNEL_IDLE_TIMEOUT", defaultRawIdleTimeout,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.MaxLifetime, err = env.ParseDuration(
+		"RAW_TUNNEL_MAX_LIFETIME", defaultRawMaxLifetime,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.OpenTimeout, err = env.ParseDuration(
+		"RAW_TUNNEL_OPEN_TIMEOUT", defaultRawOpenTimeout,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.PingInterval, err = env.ParseDuration(
+		"RAW_TUNNEL_PING_INTERVAL", defaultRawPingInterval,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	graceSeconds, err := env.ParseInt(
+		"RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS",
+		int(defaultRawShutdownGrace/time.Second),
+	)
+	if err != nil {
+		return RawTunnelConfig{}, err
+	}
+	cfg.ShutdownGrace = time.Duration(graceSeconds) * time.Second
+	if cfg.RotationDeadline, err = env.ParseDuration(
+		"RAW_TUNNEL_ROTATION_DEADLINE", defaultRawRotationDeadline,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	cfg.Issuer = env.GetEnvString("RAW_TUNNEL_ISSUER", "")
+	cfg.AllowedSubjects = splitList(env.GetEnvString(
+		"RAW_TUNNEL_ALLOWED_SUBJECTS", "",
+	))
+	cfg.CurrentKeyID = env.GetEnvString("RAW_TUNNEL_CURRENT_KEY_ID", "")
+	cfg.CurrentPublicKeyPEM = decodedPEM(env.GetEnvString(
+		"RAW_TUNNEL_CURRENT_PUBLIC_KEY", "",
+	))
+	cfg.NextKeyID = env.GetEnvString("RAW_TUNNEL_NEXT_KEY_ID", "")
+	cfg.NextPublicKeyPEM = decodedPEM(env.GetEnvString(
+		"RAW_TUNNEL_NEXT_PUBLIC_KEY", "",
+	))
+	cfg.ForbiddenCIDRs = splitList(env.GetEnvString(
+		"RAW_TUNNEL_FORBIDDEN_CIDRS", "",
+	))
+	if cfg.AllowDelegatedProxyChecks, err = env.ParseBool(
+		"RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS", false,
+	); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.StreamWindow, err = env.ParseInt("RAW_TUNNEL_STREAM_WINDOW", 0); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	if cfg.OuterWindow, err = env.ParseInt("RAW_TUNNEL_OUTER_WINDOW", 0); err != nil {
+		return RawTunnelConfig{}, err
+	}
+	return cfg, nil
+}
+
+// validate reports configuration that would admit raw pipes without the
+// identity material required to check them. Disabled tunnels skip it, so a
+// deployment that never sets the flag keeps today's startup behavior.
+func (r RawTunnelConfig) validate() error {
+	if !r.Enabled {
+		return nil
+	}
+	if r.MaxTunnels <= 0 || r.MaxPipesPerTunnel <= 0 || r.MaxPipesPerPod <= 0 {
+		return errors.New("raw tunnel limits must be positive")
+	}
+	if r.MaxTunnels > maxRawTunnels {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_TUNNELS must be at most %d", maxRawTunnels,
+		)
+	}
+	if r.MaxPipesPerTunnel > maxRawPipesPerTunnel {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL must be at most %d",
+			maxRawPipesPerTunnel,
+		)
+	}
+	if r.MaxPipesPerPod > maxRawPipesPerPod {
+		return fmt.Errorf(
+			"RAW_TUNNEL_MAX_PIPES_PER_POD must be at most %d",
+			maxRawPipesPerPod,
+		)
+	}
+	if r.MaxPipesPerPod < r.MaxPipesPerTunnel {
+		return errors.New(
+			"RAW_TUNNEL_MAX_PIPES_PER_POD must be at least " +
+				"RAW_TUNNEL_MAX_PIPES_PER_TUNNEL",
+		)
+	}
+	if r.IdleTimeout <= 0 || r.MaxLifetime <= 0 || r.OpenTimeout <= 0 ||
+		r.ShutdownGrace <= 0 || r.PingInterval <= 0 || r.RotationDeadline <= 0 {
+		return errors.New("raw tunnel timeouts must be positive")
+	}
+	if r.PingInterval < time.Second || r.OpenTimeout < time.Second ||
+		r.IdleTimeout < time.Second || r.MaxLifetime < time.Second ||
+		r.RotationDeadline < time.Second {
+		return errors.New("raw tunnel timeouts must be at least 1s")
+	}
+	if r.RotationDeadline > r.MaxLifetime {
+		return errors.New(
+			"RAW_TUNNEL_ROTATION_DEADLINE must not exceed RAW_TUNNEL_MAX_LIFETIME",
+		)
+	}
+	if r.IdleTimeout > r.MaxLifetime {
+		return errors.New(
+			"RAW_TUNNEL_IDLE_TIMEOUT must not exceed RAW_TUNNEL_MAX_LIFETIME",
+		)
+	}
+	if r.Issuer == "" || len(r.AllowedSubjects) == 0 ||
+		r.CurrentKeyID == "" || r.CurrentPublicKeyPEM == "" {
+		return errors.New(
+			"RAW_TUNNEL_ISSUER, RAW_TUNNEL_ALLOWED_SUBJECTS, " +
+				"RAW_TUNNEL_CURRENT_KEY_ID, and RAW_TUNNEL_CURRENT_PUBLIC_KEY " +
+				"are required when raw tunnels are enabled",
+		)
+	}
+	if (r.NextKeyID == "") != (r.NextPublicKeyPEM == "") {
+		return errors.New(
+			"RAW_TUNNEL_NEXT_KEY_ID and RAW_TUNNEL_NEXT_PUBLIC_KEY must be set together",
+		)
+	}
+	if r.NextKeyID != "" && r.NextKeyID == r.CurrentKeyID {
+		return errors.New(
+			"RAW_TUNNEL_NEXT_KEY_ID must differ from RAW_TUNNEL_CURRENT_KEY_ID",
+		)
+	}
+	if !rawWindowOK(r.StreamWindow) || !rawWindowOK(r.OuterWindow) {
+		return errors.New(
+			"RAW_TUNNEL_STREAM_WINDOW and RAW_TUNNEL_OUTER_WINDOW must be unset or from 16KiB to 16MiB",
+		)
+	}
+	return nil
+}
+
+func rawWindowOK(n int) bool {
+	return n == 0 || (n >= minRawWindowBytes && n <= maxRawWindowBytes)
+}
+
+func splitList(value string) []string {
+	if value == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func decodedPEM(value string) string {
+	if value == "" || strings.HasPrefix(value, pemPrefix) {
+		return value
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return value
+	}
+	return string(decoded)
 }

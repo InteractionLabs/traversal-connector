@@ -200,3 +200,77 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ─── Raw tunnels ─────────────────────────────────────────────────────────────
+# Disabled by default. Enabling does not change the customer hostname, port
+# 443, mTLS identity, or firewall rules, and it does not change legacy tunnel
+# count, readiness, or health. Hosts covered by a redaction rule are refused
+# before dial. A rule with no hosts filter refuses every raw pipe. An IP
+# literal is refused when any rule lists hosts, because that rule cannot
+# match the address. A customer forward proxy for raw destinations is
+# rawTunnel.httpsProxy (HTTPS_PROXY and NO_PROXY on the connector container),
+# not EGRESS_PROXY_URL, and proxied hostnames stay refused unless
+# allowDelegatedProxyChecks is true. Prefer existingSecret over url. The
+# per-pod pipe cap counts pipes on draining tunnels, so a rotation cannot grow
+# memory without a bound, and it also bounds how many drained tunnels stay
+# open. maxTunnels counts active tunnels only. The pod cap must be at least
+# the per-tunnel cap. Hard ceilings match the process:
+# maxTunnels ≤ 64, maxPipesPerTunnel ≤ 2048, maxPipesPerPod ≤ 4096.
+# openTimeout bounds dial and proxy handshake before OPENED; pipe lifetime
+# starts at OPENED, not at OPEN.
+rawTunnel:
+  enabled: false
+  maxTunnels: 2
+  maxPipesPerTunnel: 100
+  maxPipesPerPod: 200
+  idleTimeout: 15m
+  maxLifetime: 4h
+  openTimeout: 30s
+  pingInterval: 30s
+  shutdownGraceSeconds: 30
+  terminationGraceSeconds: 45
+  # How long a tunnel the controller rotated keeps pipes that are still open.
+  # The controller rotates about every 20m, so a pipe lives at most about 20m
+  # plus this deadline. Pod shutdown uses shutdownGraceSeconds, which must stay
+  # under terminationGraceSeconds.
+  rotationDeadline: 15m
+  # Receive windows in bytes. Zero uses the library defaults: 256KiB per pipe
+  # and 1MiB on the outer gRPC stream. Set only to raise a window.
+  streamWindowBytes: 0
+  outerWindowBytes: 0
+  # The Traversal environment whose capability signer this connector trusts.
+  # It selects the issuer, traversal-raw-tunnel/<environment>, and that
+  # environment's entry in trustedKeys.
+  environment: ""
+  # Capability sub claims allowed to open pipes. Traversal's integration proxy
+  # signs as integration-proxy.
+  allowedSubjects:
+    - integration-proxy
+  # Each environment's capability-signer public keys, as PEM PUBLIC KEY
+  # blocks, identified by kid: the bare KMS key ID, not its ARN. Traversal
+  # ships them with each chart release; do not override them, or upgrades stop
+  # delivering rotations. Rotation is a chart upgrade, never a connector binary
+  # change: ship the new key as next, let the signer switch to it, then promote
+  # it to current and drop the old key. Capabilities signed by a dropped key are
+  # refused only once this chart is rolled out, so revoke a compromised key on
+  # the controller first. See "Raw tunnel signing keys" in the README.
+  trustedKeys:
+    dev:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    staging:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    prod:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+  forbiddenCIDRs: []
+  allowDelegatedProxyChecks: false
+  # Forward proxy for raw destinations. Rendered as HTTPS_PROXY and NO_PROXY
+  # on the connector container only. url and existingSecret are mutually
+  # exclusive; existingSecret is the one to use outside tests.
+  httpsProxy:
+    url: ""
+    existingSecret: ""
+    secretKey: url
+    noProxy: ""

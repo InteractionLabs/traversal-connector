@@ -24,6 +24,81 @@
 {{- if and .Values.proxyURL (or .Values.controllerConnectTo (and $telemetryEnabled .Values.otel.connectTo)) }}
 {{- fail "proxyURL cannot be combined with controllerConnectTo or otel.connectTo; fixed socket routing and forward proxy routing are mutually exclusive." }}
 {{- end }}
+{{- if .Values.rawTunnel.enabled }}
+{{- if ge (int .Values.rawTunnel.shutdownGraceSeconds) (int .Values.rawTunnel.terminationGraceSeconds) }}
+{{- fail "rawTunnel.shutdownGraceSeconds must be less than rawTunnel.terminationGraceSeconds so the connector can close pipes before Kubernetes sends SIGKILL" }}
+{{- end }}
+{{- $rawEnv := .Values.rawTunnel.environment | default "" }}
+{{- if not (regexMatch `^[a-z0-9][a-z0-9-]{0,31}$` $rawEnv) }}
+{{- fail "rawTunnel.environment is required when rawTunnel.enabled is true and must be a lowercase environment name such as prod" }}
+{{- end }}
+{{- if not .Values.rawTunnel.allowedSubjects }}
+{{- fail "rawTunnel.allowedSubjects is required when rawTunnel.enabled is true" }}
+{{- end }}
+{{- $rawKeys := include "traversal-connector.rawTunnelKeys" . | fromYaml }}
+{{- if or (not (dig "current" "kid" "" $rawKeys)) (not (dig "current" "publicKeyPEM" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.current needs a kid and publicKeyPEM; this chart packages no signing key for that environment yet" $rawEnv) }}
+{{- end }}
+{{- if ne (not (dig "next" "kid" "" $rawKeys)) (not (dig "next" "publicKeyPEM" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.next needs both kid and publicKeyPEM, or neither" $rawEnv) }}
+{{- end }}
+{{- if and (dig "next" "kid" "" $rawKeys) (eq (dig "next" "kid" "" $rawKeys) (dig "current" "kid" "" $rawKeys)) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.next.kid must differ from current.kid" $rawEnv) }}
+{{- end }}
+{{- range $slot := list "current" "next" }}
+{{- $kid := dig $slot "kid" "" $rawKeys }}
+{{- if or (hasPrefix "arn:" $kid) (hasPrefix "alias/" $kid) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.%s.kid must be the bare KMS key ID, not an ARN or alias" $rawEnv $slot) }}
+{{- end }}
+{{- if and $kid (not (contains "-----BEGIN PUBLIC KEY-----" (dig $slot "publicKeyPEM" "" $rawKeys))) }}
+{{- fail (printf "rawTunnel.trustedKeys.%s.%s.publicKeyPEM must be a PEM PUBLIC KEY block" $rawEnv $slot) }}
+{{- end }}
+{{- end }}
+{{- if lt (int .Values.rawTunnel.maxPipesPerPod) (int .Values.rawTunnel.maxPipesPerTunnel) }}
+{{- fail "rawTunnel.maxPipesPerPod must be at least rawTunnel.maxPipesPerTunnel" }}
+{{- end }}
+{{- if or (le (int .Values.rawTunnel.maxTunnels) 0) (gt (int .Values.rawTunnel.maxTunnels) 64) }}
+{{- fail "rawTunnel.maxTunnels must be from 1 to 64" }}
+{{- end }}
+{{- if or (le (int .Values.rawTunnel.maxPipesPerTunnel) 0) (gt (int .Values.rawTunnel.maxPipesPerTunnel) 2048) }}
+{{- fail "rawTunnel.maxPipesPerTunnel must be from 1 to 2048" }}
+{{- end }}
+{{- if or (le (int .Values.rawTunnel.maxPipesPerPod) 0) (gt (int .Values.rawTunnel.maxPipesPerPod) 4096) }}
+{{- fail "rawTunnel.maxPipesPerPod must be from 1 to 4096" }}
+{{- end }}
+{{- if le (int .Values.rawTunnel.shutdownGraceSeconds) 0 }}
+{{- fail "rawTunnel.shutdownGraceSeconds must be positive" }}
+{{- end }}
+{{- $rawIdle := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.idleTimeout" "value" .Values.rawTunnel.idleTimeout) | trim | atoi }}
+{{- $rawLife := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.maxLifetime" "value" .Values.rawTunnel.maxLifetime) | trim | atoi }}
+{{- $rawOpen := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.openTimeout" "value" .Values.rawTunnel.openTimeout) | trim | atoi }}
+{{- $rawPing := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.pingInterval" "value" .Values.rawTunnel.pingInterval) | trim | atoi }}
+{{- $rawRotation := include "traversal-connector.goDurationSeconds" (dict "name" "rawTunnel.rotationDeadline" "value" .Values.rawTunnel.rotationDeadline) | trim | atoi }}
+{{- if or (le $rawOpen 0) (le $rawPing 0) }}
+{{- fail "rawTunnel.openTimeout and rawTunnel.pingInterval must be at least 1s" }}
+{{- end }}
+{{- if le $rawRotation 0 }}
+{{- fail "rawTunnel.rotationDeadline must be at least 1s" }}
+{{- end }}
+{{- if gt $rawRotation $rawLife }}
+{{- fail "rawTunnel.rotationDeadline must not exceed rawTunnel.maxLifetime" }}
+{{- end }}
+{{- if gt $rawIdle $rawLife }}
+{{- fail "rawTunnel.idleTimeout must not exceed rawTunnel.maxLifetime" }}
+{{- end }}
+{{- $rawStream := int .Values.rawTunnel.streamWindowBytes }}
+{{- $rawOuter := int .Values.rawTunnel.outerWindowBytes }}
+{{- if and (ne $rawStream 0) (or (lt $rawStream 16384) (gt $rawStream 16777216)) }}
+{{- fail "rawTunnel.streamWindowBytes must be 0 or from 16KiB to 16MiB" }}
+{{- end }}
+{{- if and (ne $rawOuter 0) (or (lt $rawOuter 16384) (gt $rawOuter 16777216)) }}
+{{- fail "rawTunnel.outerWindowBytes must be 0 or from 16KiB to 16MiB" }}
+{{- end }}
+{{- $rawProxy := .Values.rawTunnel.httpsProxy | default dict }}
+{{- if and $rawProxy.url $rawProxy.existingSecret }}
+{{- fail "rawTunnel.httpsProxy.url and rawTunnel.httpsProxy.existingSecret are mutually exclusive" }}
+{{- end }}
+{{- end }}
 {{- if $telemetryEnabled }}
 {{- range $signal := list "metrics" "traces" "logs" }}
 {{- $_ := set $otlp $signal (include "traversal-connector.otlpEndpoint" (dict "root" $ "signal" $signal)) }}
@@ -104,6 +179,9 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      {{- if .Values.rawTunnel.enabled }}
+      terminationGracePeriodSeconds: {{ .Values.rawTunnel.terminationGraceSeconds }}
+      {{- end }}
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
@@ -244,6 +322,69 @@ spec:
             {{- if $redactionEnabled }}
             - name: REDACTION_RULES_FILE
               value: /etc/traversal/redaction-rules.toml
+            {{- end }}
+            {{- if .Values.rawTunnel.enabled }}
+            - name: RAW_TUNNEL_ENABLED
+              value: "true"
+            - name: RAW_TUNNEL_MAX_TUNNELS
+              value: {{ .Values.rawTunnel.maxTunnels | quote }}
+            - name: RAW_TUNNEL_MAX_PIPES_PER_TUNNEL
+              value: {{ .Values.rawTunnel.maxPipesPerTunnel | quote }}
+            - name: RAW_TUNNEL_MAX_PIPES_PER_POD
+              value: {{ .Values.rawTunnel.maxPipesPerPod | quote }}
+            - name: RAW_TUNNEL_IDLE_TIMEOUT
+              value: {{ .Values.rawTunnel.idleTimeout | quote }}
+            - name: RAW_TUNNEL_MAX_LIFETIME
+              value: {{ .Values.rawTunnel.maxLifetime | quote }}
+            - name: RAW_TUNNEL_OPEN_TIMEOUT
+              value: {{ .Values.rawTunnel.openTimeout | quote }}
+            - name: RAW_TUNNEL_PING_INTERVAL
+              value: {{ .Values.rawTunnel.pingInterval | quote }}
+            - name: RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS
+              value: {{ .Values.rawTunnel.shutdownGraceSeconds | quote }}
+            - name: RAW_TUNNEL_ROTATION_DEADLINE
+              value: {{ .Values.rawTunnel.rotationDeadline | quote }}
+            - name: RAW_TUNNEL_STREAM_WINDOW
+              value: {{ printf "%d" (int64 .Values.rawTunnel.streamWindowBytes) | quote }}
+            - name: RAW_TUNNEL_OUTER_WINDOW
+              value: {{ printf "%d" (int64 .Values.rawTunnel.outerWindowBytes) | quote }}
+            {{- $rawKeys := include "traversal-connector.rawTunnelKeys" . | fromYaml }}
+            - name: RAW_TUNNEL_ISSUER
+              value: {{ printf "traversal-raw-tunnel/%s" .Values.rawTunnel.environment | quote }}
+            - name: RAW_TUNNEL_ALLOWED_SUBJECTS
+              value: {{ join "," .Values.rawTunnel.allowedSubjects | quote }}
+            - name: RAW_TUNNEL_CURRENT_KEY_ID
+              value: {{ $rawKeys.current.kid | quote }}
+            - name: RAW_TUNNEL_CURRENT_PUBLIC_KEY
+              value: {{ $rawKeys.current.publicKeyPEM | b64enc | quote }}
+            {{- with (dig "next" "kid" "" $rawKeys) }}
+            - name: RAW_TUNNEL_NEXT_KEY_ID
+              value: {{ . | quote }}
+            - name: RAW_TUNNEL_NEXT_PUBLIC_KEY
+              value: {{ $rawKeys.next.publicKeyPEM | b64enc | quote }}
+            {{- end }}
+            {{- with .Values.rawTunnel.forbiddenCIDRs }}
+            - name: RAW_TUNNEL_FORBIDDEN_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS
+              value: {{ .Values.rawTunnel.allowDelegatedProxyChecks | quote }}
+            {{- $rawProxy := .Values.rawTunnel.httpsProxy | default dict }}
+            {{- if or $rawProxy.url $rawProxy.existingSecret }}
+            - name: HTTPS_PROXY
+              {{- if $rawProxy.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $rawProxy.existingSecret | quote }}
+                  key: {{ $rawProxy.secretKey | default "url" | quote }}
+              {{- else }}
+              value: {{ $rawProxy.url | quote }}
+              {{- end }}
+            {{- with $rawProxy.noProxy }}
+            - name: NO_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           ports:
             - name: http

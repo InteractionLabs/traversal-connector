@@ -337,7 +337,78 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 	}
 }
 
+type holdTunnelController struct {
+	connectorconnect.UnimplementedConnectorServiceHandler
+	got chan struct{}
+}
+
+func (c holdTunnelController) Tunnel(
+	ctx context.Context,
+	stream *connect.BidiStream[pb.ConnectorMessage, pb.ControllerMessage],
+) error {
+	if _, err := stream.Receive(); err != nil {
+		return err
+	}
+	close(c.got)
+	<-ctx.Done()
+	return nil
+}
+
+func TestRunReturnsWhenTheTunnelReceiveIgnoresCancel(t *testing.T) {
+	got := make(chan struct{})
+	path, handler := connectorconnect.NewConnectorServiceHandler(holdTunnelController{got: got})
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	server := httptest.NewUnstartedServer(mux)
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	server.Config.Protocols = protocols
+	server.Start()
+	t.Cleanup(server.Close)
+
+	metrics, err := initConnectionMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpcClient, err := NewClient(&config.Config{
+		TraversalControllerURL: server.URL,
+		ConnectorID:            "test-connector",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &ConnectionManager{
+		config: &config.Config{
+			TraversalControllerURL: server.URL,
+			MaxTunnelsAllowed:      1,
+		},
+		client:      rpcClient,
+		connections: []*StreamConnection{},
+		metrics:     metrics,
+	}
+	cm.tunnelFunc = cm.RunTunnel
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = cm.Run(ctx)
+	}()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tunnel did not establish")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connection manager did not return after cancel")
+	}
+}
+
 type fixedBodyController struct {
+	connectorconnect.UnimplementedConnectorServiceHandler
 	bodySize int
 }
 
@@ -616,5 +687,38 @@ func TestHandleMessage_UnknownMessage_ReturnsErrorResponse(t *testing.T) {
 	}
 	if errResp.Code == "" {
 		t.Error("expected non-empty error code")
+	}
+}
+
+func TestOwnedConnCloseRejectsALaterDial(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+
+	owned := &ownedConn{dialFn: (&net.Dialer{}).DialContext}
+	owned.close()
+	if _, err := owned.dial(context.Background(), "tcp", ln.Addr().String()); err == nil {
+		t.Fatal("dial after close returned a connection")
+	}
+
+	select {
+	case conn := <-accepted:
+		t.Cleanup(func() { _ = conn.Close() })
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil {
+			t.Fatal("late dial stayed open after close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("late dial never reached the listener")
 	}
 }

@@ -15,6 +15,10 @@ tunnels against upstream services on the local network.
 
 The wire protocol is defined in
 [`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
+[`raw_tunnel.proto`](connector-lib/proto/connector/v1/raw_tunnel.proto) defines
+`RawTunnel`, which carries one HTTP/2 session. Each pipe is a stream inside
+that session. Traversal services open pipes through a private,
+cluster-internal Controller API that is not part of this repository.
 
 ## Setup
 
@@ -69,10 +73,12 @@ The protobuf definitions are managed with [`buf`](https://buf.build):
 ```bash
 cd connector-lib && buf lint
 cd connector-lib && buf format -w
+cd connector-lib && buf generate
 ```
 
 Generated code lives under [`connector-lib/gen/`](connector-lib/gen/) and is
-checked in.
+checked in. `buf.gen.yaml` pins each plugin to the version of its runtime library
+in `go.mod`, so regenerating an unchanged proto produces no diff.
 
 ### Prerelease test images
 
@@ -273,6 +279,111 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
+### Raw tunnels
+
+Raw tunnels are off unless `RAW_TUNNEL_ENABLED=true`. Leaving them off changes
+nothing: the same number of legacy tunnels, the same readiness and health
+behavior, and the same process exit timing. Turning them on does not change
+the customer hostname, port 443, mTLS identity, or firewall rules. A connector
+that cannot open a raw tunnel keeps serving legacy tunnels. Binary tests cover
+legacy request/response behavior with raw disabled and with raw enabled but
+incompatible or draining, including unchanged concurrency advertisement and
+readiness.
+
+Pipes are checked in order: capability, exact host and port, forbidden
+addresses and names, redaction, DNS, forbidden resolved addresses, then dial.
+A forbidden destination is refused with `forbidden_address` whatever redaction
+rules are loaded. A destination covered by any redaction rule is refused with
+`inspection_required` and is not dialed. The customer forward
+proxy for those dials is `HTTPS_PROXY` / `NO_PROXY`, which is separate from
+`EGRESS_PROXY_URL`. Proxied hostnames are refused unless
+`RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS=true`.
+
+`RAW_TUNNEL_MAX_PIPES_PER_POD` counts pipes on draining tunnels too, so a
+rotation cannot grow memory without a bound, and it must be at least
+`RAW_TUNNEL_MAX_PIPES_PER_TUNNEL`. Hard ceilings reject configs that would
+exhaust the process: at most 64 active raw tunnels, 2048 pipes per tunnel, and
+4096 pipes per pod. New pipes may be refused with `capacity` until the old ones
+finish. Ping, idle, and lifetime must be at least one second, and idle must not
+be longer than the lifetime. The next key id must differ from the current one.
+`RAW_TUNNEL_OPEN_TIMEOUT` bounds dial and forward-proxy handshake before the
+pipe is OPENED. Pipe lifetime starts at OPENED, not at OPEN.
+
+When the Controller rotates a tunnel, the connector opens a replacement right
+away and the drained tunnel keeps its pipes for up to
+`RAW_TUNNEL_ROTATION_DEADLINE`. A drained tunnel closes as soon as its last
+pipe ends, and its pipes count toward `RAW_TUNNEL_MAX_PIPES_PER_POD`, so pipes
+bound how many drained tunnels stay open. The Controller rotates a tunnel about
+every 20 minutes, so a pipe lives at most about 20 minutes plus the rotation
+deadline, 35 minutes by default. A Controller rollout ends pipes sooner, about
+25 seconds after the Controller pod gets SIGTERM. SIGTERM on the connector
+waits `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` before closing pipes that remain. The
+pod's termination grace must be longer than that wait.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RAW_TUNNEL_ENABLED` | `false` | Open raw tunnels alongside the legacy ones. |
+| `RAW_TUNNEL_MAX_TUNNELS` | `2` | Active raw tunnels per pod (hard max 64). Drained tunnels that still carry pipes do not count. |
+| `RAW_TUNNEL_MAX_PIPES_PER_TUNNEL` | `100` | Pipes accepted on one raw tunnel (hard max 2048). |
+| `RAW_TUNNEL_MAX_PIPES_PER_POD` | `200` | Pipes in the process, including ones on draining tunnels (hard max 4096). |
+| `RAW_TUNNEL_IDLE_TIMEOUT` | `15m` | Close a pipe that moves no bytes for this long. |
+| `RAW_TUNNEL_MAX_LIFETIME` | `4h` | Close a pipe after this long even if it is active. Lifetime starts when the pipe is OPENED, not when OPEN is sent. |
+| `RAW_TUNNEL_OPEN_TIMEOUT` | `30s` | Bound on dial and forward-proxy handshake before the pipe is OPENED. Expiry is reported as `open_timeout`. |
+| `RAW_TUNNEL_PING_INTERVAL` | `30s` | Keepalive on an idle raw tunnel. A ping unanswered for 10s closes the tunnel. |
+| `RAW_TUNNEL_SHUTDOWN_GRACE_SECONDS` | `30` | How long SIGTERM waits for pipes before closing them. |
+| `RAW_TUNNEL_ROTATION_DEADLINE` | `15m` | How long a tunnel the Controller rotated keeps its open pipes. Remaining pipes then close with `rotation_deadline`. At most `RAW_TUNNEL_MAX_LIFETIME`. |
+| `RAW_TUNNEL_STREAM_WINDOW` | `262144` | Per-pipe receive window in bytes, from 16384 to 16777216. One stalled pipe holds at most this much unread data. |
+| `RAW_TUNNEL_OUTER_WINDOW` | `1048576` | Receive window of each raw tunnel's outer gRPC stream in bytes, from 16384 to 16777216. Caps bytes in flight for all pipes on that tunnel together. |
+| `RAW_TUNNEL_ISSUER` | **required when enabled** | Exact `iss` claim, `traversal-raw-tunnel/<env>`. The chart sets it from `rawTunnel.environment`. |
+| `RAW_TUNNEL_ALLOWED_SUBJECTS` | **required when enabled** | Comma-separated `sub` claims allowed to open pipes. |
+| `RAW_TUNNEL_CURRENT_KEY_ID` | **required when enabled** | `kid` of the current ES256 public key. |
+| `RAW_TUNNEL_CURRENT_PUBLIC_KEY` | **required when enabled** | PKIX P-256 public key, PEM or base64-encoded PEM. |
+| `RAW_TUNNEL_NEXT_KEY_ID` | (none) | `kid` trusted during a key rotation. Set with the next public key. |
+| `RAW_TUNNEL_NEXT_PUBLIC_KEY` | (none) | Next PKIX P-256 public key, PEM or base64-encoded PEM. |
+| `RAW_TUNNEL_FORBIDDEN_CIDRS` | (none) | Extra comma-separated CIDRs a pipe must never dial. |
+| `RAW_TUNNEL_ALLOW_DELEGATED_PROXY_CHECKS` | `false` | Allow proxied dials to hostnames. Leave false unless the customer's forward proxy enforces the full direct-dial safety floor itself: connector-local interface addresses, configured `RAW_TUNNEL_FORBIDDEN_CIDRS`, loopback, link-local (including cloud metadata), multicast, unspecified/reserved ranges, NAT64-embedded forbidden IPv4, and the well-known metadata/localhost hostnames. Proxy mode is not production-canary eligible until those delegated behaviors are verified. |
+
+#### Raw tunnel signing keys
+
+Each Traversal environment signs capabilities with its own AWS KMS key. The
+Helm chart packages every environment's public keys under
+`rawTunnel.trustedKeys.<environment>`, and `rawTunnel.environment` selects one
+set. Each key is a PEM `PUBLIC KEY` block, converted from the DER that KMS
+`GetPublicKey` returns, and its kid is the bare KMS key ID, not the key's ARN.
+The chart refuses an ARN or alias as a kid and a key that is not PEM. The chart derives the issuer,
+`traversal-raw-tunnel/<environment>`, and fills the `RAW_TUNNEL_*_KEY_ID` and
+`RAW_TUNNEL_*_PUBLIC_KEY` variables. The connector refuses capabilities from
+any other issuer or key id with `unknown_key` or `invalid_capability`. The
+chart refuses to render when the selected environment has no current key.
+
+A rotation needs chart upgrades only, never a new connector binary:
+
+1. Create the next KMS key and ship its public key as `next` in a chart
+   release, and add it as `next` on the Controller. Both now trust both keys.
+2. Once connectors run that release, switch the signer to the next key.
+3. After the longest capability lifetime, ship a chart release that promotes
+   the next key to `current` and drops the old one. Do the same on the
+   Controller.
+
+Rotations reach a connector only through the chart's own `trustedKeys`, so do
+not override them in your values, and do not upgrade with
+`helm upgrade --reuse-values`, which keeps the previous release's keys. Use
+`--reset-then-reuse-values` to keep your overrides and take the new keys. At
+startup the connector logs the issuer and the kids it trusts, so you can
+confirm the fleet has the next key before the signer switches to it.
+
+Removing a key from connectors takes effect only as each customer rolls out
+the new chart, so the connector side is slow to revoke. The Controller checks
+the same keys before it forwards an open, so removing a key there blocks new
+pipes immediately. To revoke a compromised key, remove it from the Controller
+and stop the signer first. Then ship the connector chart.
+
+`connector.raw_key_loads_total` counts the trusted keys loaded at startup by
+`slot` (`current` or `next`) and `result` (`loaded` or `failed`); a failed load
+stops the connector. `connector.raw_capability_rejections_total` counts
+capabilities that failed verification by `code`, such as `unknown_key`,
+`wrong_issuer`, or `expired`. Both use closed label sets, never a kid or token.
+
 ### mTLS to the control plane
 
 mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
@@ -403,6 +514,8 @@ Matching follows DNS rather than byte equality, so one upstream cannot be reache
 Because that dot is removed before matching, the hostname a pattern is compared against never ends in one. **Write the pattern without a trailing dot** — `github\.com`, not `github\.com\.` — since a pattern in the absolute form matches nothing. The pattern text is used exactly as written and is never rewritten, because RE2 can spell a trailing dot several ways and trimming one out would corrupt some patterns rather than fix them.
 
 Case-insensitivity uses Unicode case folding, so it applies to non-ASCII hostnames too.
+
+A raw pipe cannot run these rules, because the connector forwards the destination bytes unchanged. A rule with no `hosts` filter matches every destination: while raw tunnels are enabled the connector refuses every raw pipe, logs that at startup, and sets `redaction_blocks_pipes` on its hello so the controller can keep the inspected path. A rule that lists hosts does not match an IP literal. Those destinations are refused too, since the rule cannot be applied to whichever name the address would resolve from.
 
 A non-ASCII hostname is converted to its IDNA ASCII (punycode) form before matching, because that is the form the connection itself uses. **Write the pattern in that ASCII form**, `xn--bcher-kva\.example` rather than `bücher\.example`, since a pattern in the Unicode form matches nothing. Both spellings of one name then select the same rules: a request to `bücher.example` and a request to `xn--bcher-kva.example` are the same host. As with the trailing dot, the pattern text is never converted in turn, because it is a regex and rewriting it could change what it matches. A hostname that is already ASCII is matched as it arrived and is not validated, so a name the conversion would reject, such as one carrying an underscore, still matches a pattern written for it.
 
