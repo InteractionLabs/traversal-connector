@@ -28,6 +28,10 @@ const (
 	// KMS path. They are verified against vectors.json and never regenerated
 	// here.
 	signerVectorsPath = "testdata/signer_vectors.json"
+	// proxySubject is Integration Proxy's sub and consumer_id. Its vector
+	// mirrors what the proxy mints at now: iat backdated five seconds and a
+	// two-minute lifetime from now.
+	proxySubject = "integration-proxy"
 )
 
 // vectorFile is the interoperability contract for capability signers and
@@ -185,7 +189,11 @@ var tokenCases = []tokenCase{
 	}), ""},
 	{"lifetime too long", mutated(func(c *capability.Claims) { c.ExpiresAt = c.IssuedAt + 301 }),
 		capability.CodeLifetimeTooLong},
-	{"forbidden subject", mutated(func(c *capability.Claims) { c.Subject = "integration-proxy" }),
+	{"integration proxy", mutated(func(c *capability.Claims) {
+		c.Subject, c.ConsumerID = proxySubject, proxySubject
+		c.IssuedAt, c.ExpiresAt = testNow.Unix()-5, testNow.Unix()+120
+	}), ""},
+	{"forbidden subject", mutated(func(c *capability.Claims) { c.Subject = "other-service" }),
 		capability.CodeForbiddenSubject},
 	{"wrong organization", mutated(func(c *capability.Claims) { c.OrganizationID = "org-2" }),
 		capability.CodeWrongTenant},
@@ -269,7 +277,7 @@ func generateVectors(t *testing.T) vectorFile {
 			"their seeds and are for tests only. Regenerate with: go test " +
 			"./connector-lib/capability -run TestVectors -update",
 		Issuer:          testIssuer,
-		AllowedSubjects: []string{testSubject},
+		AllowedSubjects: []string{testSubject, proxySubject},
 		Now:             testNow.Unix(),
 		Keys: []vectorKey{
 			{KID: currentKID, Seed: currentSeed, PublicKeyPEM: publicKeyPEM(t, currentKey)},

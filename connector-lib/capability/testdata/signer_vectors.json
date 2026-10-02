@@ -1,5 +1,5 @@
 {
-  "description": "Capabilities signed by the Traversal capability signer (traversal/connector_capability) through its KMS path, which converts ECDSA DER signatures to JOSE r||s. kms_der_short_integer has an r or s shorter than 32 bytes, so the conversion must left-pad it. Keys, issuer, subjects, and now are those of vectors.json.",
+  "description": "Capabilities signed by Traversal's capability issuer (traversal/connector_capability). kms_der and kms_der_short_integer come through its KMS path, which converts ECDSA DER signatures to JOSE r||s; kms_der_short_integer has an r or s shorter than 32 bytes, so the conversion must left-pad it. integration_proxy is minted by CapabilityIssuer as Integration Proxy. Keys, issuer, subjects, and now are those of vectors.json.",
   "tokens": [
     {
       "name": "kms_der",
@@ -16,6 +16,18 @@
     {
       "name": "kms_der_short_integer",
       "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imttcy1kZXItc2hvcnQtNDYiLCJpYXQiOjE3ODk5OTk5OTAsImV4cCI6MTc5MDAwMDExMH0.AICrW0rtVX0O8Qiw9etsHA1q-PbT2jfB3GDJgBu7vWLD89U5h4mA0wyKOV8grRKdSrbelAZQfpoQh1ZE-mfwvQ",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "ok"
+    },
+    {
+      "name": "integration_proxy",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJpbnRlZ3JhdGlvbi1wcm94eSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJjb25uZWN0b3JfaWQiOiJjb25uZWN0b3ItMSIsImhvc3QiOiJkYi5pbnRlcm5hbCIsInBvcnQiOjU0MzIsIm1vZGUiOiJwYXNzdGhyb3VnaCIsImNvbnN1bWVyX2lkIjoiaW50ZWdyYXRpb24tcHJveHkiLCJ0cmFmZmljX2NsYXNzIjoic3RhbmRhcmQiLCJzZXNzaW9uX2lkIjoic2Vzc2lvbi0xIiwianRpIjoiYjZmYTExZGUtMjBjMy00NTZhLWI3MjItYWM1OGIxM2ZkMTY5IiwiaWF0IjoxNzg5OTk5OTk1LCJleHAiOjE3OTAwMDAxMjB9.0JoE7giZbDKbR4Hlqzwb593u6VRrLSPCkglW36GziiY58z6mlrkDzjo69asD-aTXZLb6hgvqgMVGwIV86Uf4xw",
       "expected": {
         "connector_id": "connector-1",
         "organization_id": "org-1",
