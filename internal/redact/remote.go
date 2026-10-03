@@ -145,8 +145,8 @@ func NewRemoteLoader(
 	return l, nil
 }
 
-// LoadInitial permits only a genuine 404 to start without rules. Authentication,
-// availability and validation failures must not start an unredacted connector.
+// LoadInitial requires a valid document before startup, even if it explicitly
+// contains no rules. Missing config is an error, not permission to run unredacted.
 func (l *RemoteLoader) LoadInitial(ctx context.Context) error {
 	return l.refresh(ctx)
 }
@@ -178,7 +178,9 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 				"previously loaded config is missing; retaining last-known-good rules",
 			)
 		}
-		outcome = "missing"
+		return errors.New(
+			"config endpoint returned HTTP 404; publish a valid config before enabling OTA",
+		)
 	case http.StatusNotModified:
 		if !l.loaded || l.etag == "" {
 			return errors.New("unexpected config 304 without an accepted version")

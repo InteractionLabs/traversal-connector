@@ -142,6 +142,8 @@ otel:
 # ─── Remote configuration (opt-in) ──────────────────────────────────────────
 # Uses the controller origin and /v1/config/<connectorID>; no endpoint override.
 # Publish migrated rules before enabling; no local-file source is supported.
+# When enabled, startup requires a valid document (including explicit rules=[]);
+# a missing config or any other initial fetch failure blocks startup.
 configUpdates:
   enabled: false
   refreshInterval: "30s"
