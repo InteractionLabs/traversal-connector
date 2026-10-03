@@ -355,22 +355,33 @@ are not used and redirects are refused.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONFIG_ENABLED` | `false` | Enable OTA config polling on the controller origin. |
+| `TRAVERSAL_CONFIG_ENABLED` | `false` | Enable OTA polling and require a valid config document before startup. |
 | `TRAVERSAL_CONFIG_REFRESH_INTERVAL` | `30s` | Poll interval, with up to 10% jitter; positive and at most 24h. |
 
-Startup fetch completes **before opening any tunnels**. A 404 means no rules
-and startup continues; other errors (including 403, 5xx, invalid TOML/regexes)
-fail startup. Runtime errors or deletion retain the last-known-good rules
-**in memory** and emit warnings; there is no persistent local cache. A restart
-with a 404 follows the startup policy again. ETags avoid downloading unchanged
-configs; unchanged bodies do not recompile rules. Responses are limited to 1 MiB
-and requests time out after 15 seconds. To disable redaction intentionally,
-publish `schema_version = 1` and `[redaction] rules = []`; do not delete the object.
+When OTA is enabled, startup requires a valid config document **before opening
+any tunnels**. Any initial fetch failure (including 404, 403, 5xx, network errors,
+or invalid TOML/regexes) fails startup. Runtime errors or deletion retain the
+last-known-good rules **in memory** and emit warnings; there is no persistent
+local cache. After a restart, a missing or invalid config blocks startup again.
+ETags avoid downloading unchanged configs; unchanged bodies do not recompile
+rules. Responses are limited to 1 MiB and requests time out after 15 seconds.
+To intentionally run without redaction while retaining OTA polling, publish a
+valid empty-rules document; do not delete the object:
+
+```toml
+schema_version = 1
+[redaction]
+rules = []
+```
+
+If OTA configuration is not needed, leave `TRAVERSAL_CONFIG_ENABLED=false`
+(the default); no config fetch is performed.
 
 Publish through `ingestion-configs` at
 `connector/<env>/<certificate-org-id>/<connector-id>.toml`; the gateway proxies
-`connector/<certificate-org-id>/<connector-id>.toml` from S3. No default object
-is required. A config created later is picked up by polling.
+`connector/<certificate-org-id>/<connector-id>.toml` from S3. Publish the document
+before enabling OTA. Rules added to an initially empty document are picked up
+by polling.
 
 ```toml
 schema_version = 1
@@ -401,7 +412,7 @@ Only schema version **1** is supported. Unknown keys, unsupported rule types,
 missing `redaction.rules`, empty patterns and duplicate/empty names are rejected.
 Rule field filters are only accepted for `regex-structured-data`. Metric
 `connector.config_refresh_total` records bounded outcomes (`applied`, `unchanged`,
-`missing`, `error`); `connector.config_rule_count` and
+`error`); missing configs count as errors. `connector.config_rule_count` and
 `connector.config_staleness_seconds` expose active rules and time since the last
 successful fetch. Applied ETags are logged, not used as metric labels.
 

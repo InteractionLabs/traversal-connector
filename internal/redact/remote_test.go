@@ -46,7 +46,7 @@ func TestRemoteConfigValidation(t *testing.T) {
 }
 
 func TestRemoteLoaderLifecycle(t *testing.T) {
-	status, body, etag := http.StatusNotFound, "", ""
+	status, body, etag := http.StatusOK, remoteRules, `"good"`
 	var receivedETag string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -66,11 +66,7 @@ func TestRemoteLoaderLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err = loader.LoadInitial(ctx); err != nil || loader.loaded {
-		t.Fatalf("startup 404: %v, loaded=%v", err, loader.loaded)
-	}
-	status, body, etag = 200, remoteRules, `"good"`
-	if err = loader.refresh(ctx); err != nil {
+	if err = loader.LoadInitial(ctx); err != nil {
 		t.Fatal(err)
 	}
 	accepted := redactor.rules.Load()
@@ -128,11 +124,23 @@ func TestRemoteLoaderLifecycle(t *testing.T) {
 }
 
 func TestRemoteInitialFailures(t *testing.T) {
-	for _, status := range []int{http.StatusNotModified, 401, 403, 500} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
+	for _, failure := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusNotModified, ""},
+		{401, ""}, {403, ""}, {404, ""}, {500, ""},
+		{200, ""},
+		{200, "not toml ["},
+		{200, strings.Replace(remoteRules, "'secret'", "'['", 1)},
+		{200, strings.Repeat("x", MaxConfigBytes+1)},
+	} {
+		t.Run(fmt.Sprint(failure.status), func(t *testing.T) {
 			server := httptest.NewServer(
 				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					w.WriteHeader(status)
+					w.Header().Set("ETag", `"rejected"`)
+					w.WriteHeader(failure.status)
+					_, _ = w.Write([]byte(failure.body))
 				}),
 			)
 			defer server.Close()
@@ -143,7 +151,46 @@ func TestRemoteInitialFailures(t *testing.T) {
 			if err = loader.LoadInitial(context.Background()); err == nil {
 				t.Fatal("startup proceeded without confirmed config state")
 			}
+			if loader.loaded || loader.etag != "" || !loader.status.Load().lastSuccess.IsZero() {
+				t.Fatal("failed startup accepted a version or recorded a successful fetch")
+			}
 		})
+	}
+}
+
+func TestRemoteRestartRequiresConfig(t *testing.T) {
+	var missing atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if missing.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(remoteRules))
+	}))
+	defer server.Close()
+	redactor := NewRedactor()
+	loader, err := NewRemoteLoader(server.Client(), server.URL, redactor, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err = loader.LoadInitial(ctx); err != nil {
+		t.Fatal(err)
+	}
+	missing.Store(true)
+	if err = loader.refresh(ctx); err == nil {
+		t.Fatal("missing config was not reported as a runtime failure")
+	}
+	if got := string(applyBytes(redactor, "", []byte("secret"))); got != "[hidden]" {
+		t.Fatalf("runtime 404 discarded last-known-good rules: %s", got)
+	}
+	// A new process has no in-memory last-known-good document.
+	restarted, err := NewRemoteLoader(server.Client(), server.URL, NewRedactor(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = restarted.LoadInitial(ctx); err == nil {
+		t.Fatal("restart proceeded without a config document")
 	}
 }
 
@@ -176,11 +223,11 @@ func TestRemoteRedirectAndCancellation(t *testing.T) {
 	}
 }
 
-func TestRemoteRunDiscoversConfigCreatedAfterStartup(t *testing.T) {
-	var exists atomic.Bool
+func TestRemoteRunAppliesRulesAfterExplicitEmptyStartup(t *testing.T) {
+	var enabled atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if !exists.Load() {
-			w.WriteHeader(http.StatusNotFound)
+		if !enabled.Load() {
+			_, _ = w.Write([]byte("schema_version=1\n[redaction]\nrules=[]"))
 			return
 		}
 		_, _ = w.Write([]byte(remoteRules))
@@ -196,7 +243,11 @@ func TestRemoteRunDiscoversConfigCreatedAfterStartup(t *testing.T) {
 	if err = loader.LoadInitial(ctx); err != nil {
 		t.Fatal(err)
 	}
-	exists.Store(true)
+	if !loader.loaded || loader.status.Load().lastSuccess.IsZero() ||
+		loader.status.Load().rules != 0 || redactor.HasRulesForHost("example.com") {
+		t.Fatal("explicit empty config was not accepted as a successful no-redaction startup")
+	}
+	enabled.Store(true)
 	done := make(chan struct{})
 	go func() { loader.Run(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
@@ -207,7 +258,7 @@ func TestRemoteRunDiscoversConfigCreatedAfterStartup(t *testing.T) {
 	for {
 		select {
 		case <-deadline.C:
-			t.Fatal("poller did not apply config created after startup")
+			t.Fatal("poller did not apply rules added after explicit empty startup")
 		case <-tick.C:
 			if string(applyBytes(redactor, "", []byte("secret"))) == "[hidden]" {
 				return
