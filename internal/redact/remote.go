@@ -167,8 +167,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 	// #nosec G704 -- Same-origin endpoint; redirects are disabled by the loader.
 	resp, err := l.client.Do(req)
 	if err != nil {
-		// net/url errors can contain proxy credentials; avoid logging them.
-		return errors.New("config fetch failed")
+		return fmt.Errorf("config fetch failed: %w", telemetry.SanitizeError(err))
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
