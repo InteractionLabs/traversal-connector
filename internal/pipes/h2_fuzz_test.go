@@ -1,8 +1,8 @@
 package pipes
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"testing"
