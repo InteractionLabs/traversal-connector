@@ -86,6 +86,10 @@ type RawPipes struct {
 	// TunnelDiscoveryInterval is the mean time between discovery polls
 	// (TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL).
 	TunnelDiscoveryInterval time.Duration
+	// TunnelStreamWindow and TunnelConnectionWindow are the tunnels' HTTP/2
+	// receive windows in bytes (TRAVERSAL_TUNNEL_STREAM_WINDOW,
+	// TRAVERSAL_TUNNEL_CONNECTION_WINDOW). Zero uses the defaults.
+	TunnelStreamWindow, TunnelConnectionWindow int
 }
 
 func loadRawPipes() (RawPipes, error) {
@@ -107,6 +111,8 @@ func loadRawPipes() (RawPipes, error) {
 		TunnelsConnectTo:  env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
 		TunnelDiscoveryInterval: env.GetEnvDuration(
 			"TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL", defaultTunnelDiscoveryInterval),
+		TunnelStreamWindow:     env.GetEnvInt("TRAVERSAL_TUNNEL_STREAM_WINDOW", 0),
+		TunnelConnectionWindow: env.GetEnvInt("TRAVERSAL_TUNNEL_CONNECTION_WINDOW", 0),
 	}
 	if cfg.TunnelsPerReplica < 1 || cfg.TunnelsPerReplica > 8 {
 		return RawPipes{}, errors.New("TRAVERSAL_TUNNELS_PER_REPLICA must be between 1 and 8")

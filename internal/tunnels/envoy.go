@@ -17,11 +17,13 @@ import (
 // replica adds a listener and removing one removes only that listener, so a
 // change to the replica set never touches tunnels that are already up.
 
-// HTTP/2 windows for pipes, on the tunnels and toward core. A stalled pipe
-// holds at most one stream window, so it cannot exhaust a tunnel.
+// Default HTTP/2 windows for pipes, on the tunnels and toward core. A stalled
+// pipe holds at most one stream window, so it cannot exhaust a tunnel. A
+// pipe's throughput is at most one stream window per round trip, and a
+// tunnel's at most one connection window per round trip.
 const (
-	streamWindow     = 256 << 10
-	connectionWindow = 1 << 20
+	DefaultStreamWindow     = 256 << 10
+	DefaultConnectionWindow = 1 << 20
 )
 
 // adminAddress is the Envoy admin listener. Loopback only: nothing outside
@@ -53,6 +55,8 @@ type envoyConfig struct {
 	// perWorker is the tunnels each Envoy worker holds to each replica.
 	// Every worker dials its own, so a replica gets workers × perWorker.
 	perWorker int
+	// streamWindow and connectionWindow are the HTTP/2 windows, in bytes.
+	streamWindow, connectionWindow int
 }
 
 // replica is one Traversal tunnel endpoint the connector holds tunnels to.
@@ -123,7 +127,7 @@ func (c envoyConfig) coreCluster() map[string]any {
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": map[string]any{
 				"@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
 				"explicit_http_config": map[string]any{
-					"http2_protocol_options": http2Options(),
+					"http2_protocol_options": c.http2Options(),
 				},
 			},
 		},
@@ -151,7 +155,7 @@ func (c envoyConfig) listener(r replica) map[string]any {
 					"http_connection_manager.v3.HttpConnectionManager",
 				"stat_prefix":            "pipes",
 				"codec_type":             "HTTP2",
-				"http2_protocol_options": tunnelServerHTTP2Options(),
+				"http2_protocol_options": c.tunnelServerHTTP2Options(),
 				"upgrade_configs":        []any{map[string]any{"upgrade_type": "CONNECT"}},
 				// Pipes are long-lived and may sit idle (psql, kubectl exec).
 				// core enforces any lifetime cap.
@@ -225,8 +229,8 @@ func (c envoyConfig) cluster(r replica) map[string]any {
 // answer it by closing the tunnel with GOAWAY, cutting every pipe on it. The
 // only peer is Traversal's tunnel endpoint, authenticated by mutual TLS, so
 // the limiter is sized far above any real refusal rate instead.
-func tunnelServerHTTP2Options() map[string]any {
-	opts := http2Options()
+func (c envoyConfig) tunnelServerHTTP2Options() map[string]any {
+	opts := c.http2Options()
 	opts["stream_reset_burst"] = streamResetBurst
 	opts["stream_reset_rate"] = streamResetRate
 	return opts
@@ -238,11 +242,11 @@ const (
 	streamResetRate  = 100_000
 )
 
-func http2Options() map[string]any {
+func (c envoyConfig) http2Options() map[string]any {
 	return map[string]any{
 		"allow_connect":                  true,
-		"initial_stream_window_size":     streamWindow,
-		"initial_connection_window_size": connectionWindow,
+		"initial_stream_window_size":     c.streamWindow,
+		"initial_connection_window_size": c.connectionWindow,
 	}
 }
 

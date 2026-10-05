@@ -213,6 +213,8 @@ func tunnelConfig(cfg *config.Config) (tunnels.Config, error) {
 		DiscoveryClient:   discoveryClient,
 		DiscoveryInterval: cfg.RawPipes.TunnelDiscoveryInterval,
 		ConnectTo:         cfg.RawPipes.TunnelsConnectTo,
+		StreamWindow:      cfg.RawPipes.TunnelStreamWindow,
+		ConnectionWindow:  cfg.RawPipes.TunnelConnectionWindow,
 		CertPEM:           []byte(*cfg.TLSCert),
 		KeyPEM:            []byte(*cfg.TLSKey),
 		CAPEM:             roots,

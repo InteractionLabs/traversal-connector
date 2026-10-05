@@ -54,6 +54,11 @@ type Config struct {
 	CertPEM, KeyPEM, CAPEM []byte
 	// AdminPort is the Envoy admin port. Zero means AdminPort.
 	AdminPort int
+	// StreamWindow and ConnectionWindow are the tunnels' HTTP/2 receive
+	// windows in bytes. Zero means DefaultStreamWindow and
+	// DefaultConnectionWindow. Larger windows raise throughput to distant
+	// tunnel endpoints and let a stalled pipe hold more memory.
+	StreamWindow, ConnectionWindow int
 	// ReadyGrace is how long readiness waits for a first tunnel. A connector
 	// whose network never lets a tunnel up becomes ready after it, so raw
 	// pipes cannot hold up the legacy transport. Zero means one minute.
@@ -103,17 +108,29 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.AdminPort == 0 {
 		cfg.AdminPort = AdminPort
 	}
+	if cfg.StreamWindow == 0 {
+		cfg.StreamWindow = DefaultStreamWindow
+	}
+	if cfg.ConnectionWindow == 0 {
+		cfg.ConnectionWindow = DefaultConnectionWindow
+	}
+	if cfg.StreamWindow < 64<<10 || cfg.StreamWindow > cfg.ConnectionWindow ||
+		cfg.ConnectionWindow > 1<<30 {
+		return nil, errors.New("tunnels: windows must satisfy 64 KiB <= stream <= connection <= 1 GiB")
+	}
 	if cfg.ReadyGrace == 0 {
 		cfg.ReadyGrace = time.Minute
 	}
 	return &Manager{
 		cfg: cfg,
 		envoy: envoyConfig{
-			identity:  cfg.Identity,
-			dir:       cfg.Dir,
-			coreHost:  host,
-			corePort:  port,
-			perWorker: 1,
+			identity:         cfg.Identity,
+			dir:              cfg.Dir,
+			coreHost:         host,
+			corePort:         port,
+			perWorker:        1,
+			streamWindow:     cfg.StreamWindow,
+			connectionWindow: cfg.ConnectionWindow,
 		},
 		admin: newAdmin(cfg.AdminPort),
 		start: time.Now(),
