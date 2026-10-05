@@ -77,6 +77,7 @@ type h2conn struct {
 	cond          *sync.Cond
 	sendWin       int64 // connection send window
 	recvUsed      int64 // bytes received and not yet credited back
+	connPending   int64 // bytes consumed by handlers, not yet credited back
 	peerStreamWin int64 // peer's SETTINGS_INITIAL_WINDOW_SIZE
 	maxFrame      int
 	streams       map[uint32]*h2stream
@@ -95,6 +96,7 @@ type h2stream struct {
 
 	// Guarded by c.mu.
 	sendWin  int64
+	pending  int64 // bytes the handler consumed, not yet credited back
 	in       bytes.Buffer
 	inErr    error // io.EOF after END_STREAM; errStreamReset after RST_STREAM
 	reset    bool  // RST_STREAM sent or received: no more frames
@@ -312,7 +314,7 @@ func (c *h2conn) onData(f *http2.DataFrame) error {
 	switch {
 	case st == nil || st.inErr != nil:
 		credit = f.Length // nobody will read it
-	case int64(st.in.Len()+len(data)) > streamWindow:
+	case int64(st.in.Len()+len(data))+st.pending > streamWindow:
 		c.mu.Unlock()
 		c.resetStream(f.StreamID, http2.ErrCodeFlowControl)
 		c.mu.Lock()
@@ -376,7 +378,9 @@ func windowIncrement(n int64) uint32 {
 
 // Read returns the caller's bytes, io.EOF after its END_STREAM, or
 // errStreamReset after an abort. Consumed bytes are credited back, so a
-// destination that stops reading stops the caller.
+// destination that stops reading stops the caller. Credit is batched: a
+// WINDOW_UPDATE goes out once a quarter of a window has been consumed, not
+// for every read, which would cost two frames per read.
 func (st *h2stream) Read(p []byte) (int, error) {
 	c := st.c
 	c.mu.Lock()
@@ -389,20 +393,38 @@ func (st *h2stream) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	n, _ := st.in.Read(p)
-	open := st.inErr == nil
-	c.recvUsed -= int64(n)
-	c.mu.Unlock()
-	inc := windowIncrement(int64(n))
-	_ = c.write(func() error {
-		if open {
-			if err := c.fr.WriteWindowUpdate(st.id, inc); err != nil {
-				return err
-			}
+	var streamCredit, connCredit int64
+	if st.inErr == nil {
+		st.pending += int64(n)
+		if st.pending >= streamWindow/creditFraction {
+			streamCredit, st.pending = st.pending, 0
 		}
-		return c.fr.WriteWindowUpdate(0, inc)
-	})
+	}
+	c.connPending += int64(n)
+	if c.connPending >= connWindow/creditFraction {
+		connCredit, c.connPending = c.connPending, 0
+		c.recvUsed -= connCredit
+	}
+	c.mu.Unlock()
+	if streamCredit > 0 || connCredit > 0 {
+		_ = c.write(func() error {
+			if streamCredit > 0 {
+				if err := c.fr.WriteWindowUpdate(st.id, windowIncrement(streamCredit)); err != nil {
+					return err
+				}
+			}
+			if connCredit > 0 {
+				return c.fr.WriteWindowUpdate(0, windowIncrement(connCredit))
+			}
+			return nil
+		})
+	}
 	return n, nil
 }
+
+// creditFraction is how much of a window is consumed before it is credited
+// back: a quarter.
+const creditFraction = 4
 
 // Write sends p as DATA within both send windows.
 func (st *h2stream) Write(p []byte) (int, error) {
@@ -495,6 +517,11 @@ func (st *h2stream) finish() {
 	c := st.c
 	c.mu.Lock()
 	left := st.dropBuffered()
+	// Credit what this stream consumed but never credited, so a connection
+	// with few, short pipes does not hold the peer's window down.
+	left += int(c.connPending)
+	c.recvUsed -= c.connPending
+	c.connPending = 0
 	unfinished := !st.reset && !st.localEnd
 	delete(c.streams, st.id)
 	c.mu.Unlock()
