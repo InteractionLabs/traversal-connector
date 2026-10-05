@@ -69,6 +69,15 @@ rawPipes:
   # endpoint. TLS names are unchanged.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
 
+# Pod-level securityContext. Each raw pipe is its own TCP connection from the
+# connector, and a closed one holds its port for 60 s (TIME_WAIT), so very
+# high pipe churn to one destination can exhaust the default port range
+# (~470 new pipes/s per pod). Widening it is a safe sysctl:
+#   podSecurityContext:
+#     sysctls:
+#       - { name: net.ipv4.ip_local_port_range, value: "1024 65535" }
+podSecurityContext: {}
+
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference
 # an existing Secret with keys: tls.crt, tls.key, ca.crt.
