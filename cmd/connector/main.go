@@ -206,13 +206,17 @@ func main() {
 		return
 	}
 
+	var gates []router.ReadinessGate
 	if cfg.RawPipes.Enabled {
-		_, drainPipes, pipesErr := startRawPipes(ctx, cfg.RawPipes, cfg.ConnectorID, redactor)
+		raw, pipesErr := startRawPipes(ctx, &cfg, redactor)
 		if pipesErr != nil {
 			slog.Error("failed to start raw pipes", "err", pipesErr)
 			return
 		}
-		defer drainPipes()
+		if raw != nil {
+			gates = append(gates, raw.readiness())
+			defer raw.drain()
+		}
 	}
 
 	slog.InfoContext(ctx, "traversal connector service starting",
@@ -230,7 +234,7 @@ func main() {
 	}
 
 	// Start HTTP server for health and readiness endpoints.
-	ginRouter := router.NewRouter(cfg, cm)
+	ginRouter := router.NewRouter(cfg, cm, gates...)
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           ginRouter,

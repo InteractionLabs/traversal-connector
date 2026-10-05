@@ -1,0 +1,59 @@
+package tunnels
+
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"regexp"
+)
+
+// Identity is who this connector is to a Traversal tunnel endpoint. The
+// endpoint binds a tunnel to the connector ID and tenant in the client
+// certificate's SPIFFE URI SAN, so a connector can only ever register as
+// itself.
+type Identity struct {
+	ConnectorID string
+	TenantID    string
+}
+
+// ErrNoConnectorIdentity means the certificate names a tenant but no
+// connector. Tunnels need connector-scoped certificates; a tenant-only
+// certificate keeps the connector on the legacy transport.
+var ErrNoConnectorIdentity = errors.New(
+	"the client certificate has no connector-scoped SPIFFE ID; " +
+		"raw pipes need spiffe://traversal.com/tenant/<tenant>/<name>/connector/<connector>")
+
+const uuidPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+
+// connectorSAN matches a connector-scoped SPIFFE ID. The tunnel endpoint
+// extracts both IDs with the same pattern.
+var connectorSAN = regexp.MustCompile(
+	`^spiffe://traversal\.com/tenant/(` + uuidPattern + `)/[^/]+/connector/(` + uuidPattern + `)$`)
+
+// IdentityFromCertificate reads the connector identity from a PEM client
+// certificate and checks it names connectorID, the ID the connector already
+// presents to the legacy controller.
+func IdentityFromCertificate(certPEM []byte, connectorID string) (Identity, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return Identity{}, errors.New("client certificate is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return Identity{}, fmt.Errorf("parse client certificate: %w", err)
+	}
+	for _, uri := range cert.URIs {
+		m := connectorSAN.FindStringSubmatch(uri.String())
+		if m == nil {
+			continue
+		}
+		if m[2] != connectorID {
+			return Identity{}, fmt.Errorf(
+				"the client certificate is for connector %s, but TRAVERSAL_CONNECTOR_ID is %s",
+				m[2], connectorID)
+		}
+		return Identity{ConnectorID: m[2], TenantID: m[1]}, nil
+	}
+	return Identity{}, ErrNoConnectorIdentity
+}

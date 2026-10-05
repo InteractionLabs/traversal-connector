@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,9 @@ const (
 	// maxRawPipesMax keeps every pipe able to stall without stalling the
 	// rest: connector-core's 1 GiB connection window holds 4,096 stalled
 	// 256 KiB streams.
-	maxRawPipesMax = 4096
+	maxRawPipesMax                 = 4096
+	defaultTunnelsPerReplica       = 2
+	defaultTunnelDiscoveryInterval = 15 * time.Second
 	// Pipe limits (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT).
 	// They match the Traversal side's, so neither side ends a pipe the other
 	// would still keep.
@@ -65,6 +68,24 @@ type RawPipes struct {
 	// Nil, the default, dials every destination directly. HTTPS_PROXY and
 	// EGRESS_PROXY_URL never apply: they route the connector's own traffic.
 	EgressProxy *url.URL
+	// EnvoyPath is the Envoy binary the connector supervises
+	// (TRAVERSAL_ENVOY_PATH).
+	EnvoyPath string
+	// RunDir holds Envoy's generated configuration and a copy of the
+	// connector's credentials (TRAVERSAL_RUN_DIR). It must be private and
+	// writable.
+	RunDir string
+	// TunnelsPerReplica is W, the tunnels held to each Traversal tunnel
+	// endpoint replica (TRAVERSAL_TUNNELS_PER_REPLICA).
+	TunnelsPerReplica int
+	// TunnelsConnectTo, if set, replaces the tunnels entry point address
+	// discovery names, host:port, for PrivateLink or a fixed endpoint
+	// (TRAVERSAL_TUNNELS_CONNECT_TO). SNI and certificate checks are
+	// unchanged.
+	TunnelsConnectTo string
+	// TunnelDiscoveryInterval is the mean time between discovery polls
+	// (TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL).
+	TunnelDiscoveryInterval time.Duration
 }
 
 func loadRawPipes() (RawPipes, error) {
@@ -76,7 +97,25 @@ func loadRawPipes() (RawPipes, error) {
 		return RawPipes{}, fmt.Errorf(
 			"TRAVERSAL_RAW_PIPES must be enabled or disabled, got %q", mode)
 	}
-	cfg := RawPipes{Enabled: true, Listen: rawPipesListen}
+	cfg := RawPipes{
+		Enabled:   true,
+		Listen:    rawPipesListen,
+		EnvoyPath: env.GetEnvString("TRAVERSAL_ENVOY_PATH", "envoy"),
+		RunDir: env.GetEnvString("TRAVERSAL_RUN_DIR",
+			filepath.Join(os.TempDir(), "traversal-tunnels")),
+		TunnelsPerReplica: env.GetEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelsPerReplica),
+		TunnelsConnectTo:  env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
+		TunnelDiscoveryInterval: env.GetEnvDuration(
+			"TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL", defaultTunnelDiscoveryInterval),
+	}
+	if cfg.TunnelsPerReplica < 1 || cfg.TunnelsPerReplica > 8 {
+		return RawPipes{}, errors.New("TRAVERSAL_TUNNELS_PER_REPLICA must be between 1 and 8")
+	}
+	if cfg.TunnelsConnectTo != "" {
+		if err := validateConnectTo("TRAVERSAL_TUNNELS_CONNECT_TO", cfg.TunnelsConnectTo); err != nil {
+			return RawPipes{}, err
+		}
+	}
 	var err error
 	// A value that does not parse fails startup: a silent default would
 	// change pipe limits without anyone noticing.
