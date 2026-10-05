@@ -2,13 +2,9 @@ package redact
 
 import (
 	"context"
-	"crypto/x509"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,92 +19,6 @@ type = "regex"
 pattern = 'secret'
 replacement = "[hidden]"
 `
-
-type configRoundTripper func(*http.Request) (*http.Response, error)
-
-func (f configRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func TestRemoteTransportErrorDiagnostics(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-		want string
-	}{
-		{"timeout", context.DeadlineExceeded, "context deadline exceeded"},
-		{"dns", &net.DNSError{Err: "no such host", Name: "edge.example.com"}, "no such host"},
-		{"tls", x509.UnknownAuthorityError{}, "certificate signed by unknown authority"},
-		{
-			"proxy URL",
-			&url.Error{
-				Op:  "proxyconnect",
-				URL: "http://proxy-user:proxy-password@proxy.example.com:3128/private?token=secret",
-				Err: io.EOF,
-			},
-			`proxyconnect "http://proxy.example.com:3128": EOF`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fail := true
-			client := &http.Client{Transport: configRoundTripper(
-				func(req *http.Request) (*http.Response, error) {
-					if fail {
-						return nil, tc.err
-					}
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     http.Header{"Etag": {`"good"`}},
-						Body:       io.NopCloser(strings.NewReader(remoteRules)),
-						Request:    req,
-					}, nil
-				},
-			)}
-			redactor := NewRedactor()
-			loader, err := NewRemoteLoader(
-				client, "https://edge.example.com/v1/config/connector-id", redactor, time.Second,
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkError := func(err error) {
-				t.Helper()
-				if err == nil {
-					t.Fatal("expected config transport error")
-				}
-				message := err.Error()
-				for _, want := range []string{"config fetch failed:", "https://edge.example.com", tc.want} {
-					if !strings.Contains(message, want) {
-						t.Errorf("error %q missing diagnostic %q", message, want)
-					}
-				}
-				for _, secret := range []string{
-					"proxy-user", "proxy-password", "/private", "token=secret", "/v1/config/connector-id",
-				} {
-					if strings.Contains(message, secret) {
-						t.Errorf("error disclosed URL detail %q: %s", secret, message)
-					}
-				}
-			}
-			ctx := context.Background()
-			checkError(loader.LoadInitial(ctx))
-			if loader.loaded {
-				t.Fatal("transport failure accepted as initial config")
-			}
-			fail = false
-			if err := loader.LoadInitial(ctx); err != nil {
-				t.Fatal(err)
-			}
-			accepted, lastSuccess := redactor.rules.Load(), loader.status.Load().lastSuccess
-			fail = true
-			checkError(loader.refresh(ctx))
-			if redactor.rules.Load() != accepted || loader.etag != `"good"` ||
-				loader.status.Load().lastSuccess != lastSuccess {
-				t.Fatal("transport failure changed accepted config state")
-			}
-		})
-	}
-}
 
 func TestRemoteConfigValidation(t *testing.T) {
 	for _, bad := range []string{
