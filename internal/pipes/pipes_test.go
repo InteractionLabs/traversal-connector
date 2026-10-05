@@ -119,7 +119,12 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 }
 
 // capabilityFor signs a capability for host:port on this connector.
-func capabilityFor(t *testing.T, host string, port uint16, mutate ...func(*capability.Claims)) string {
+func capabilityFor(
+	t *testing.T,
+	host string,
+	port uint16,
+	mutate ...func(*capability.Claims),
+) string {
 	t.Helper()
 	now := time.Now()
 	claims := capability.Claims{

@@ -24,7 +24,9 @@ func FuzzH2Server(f *testing.F) {
 		_ = enc.WriteField(hf)
 	}
 	_ = fr.WriteSettings(http2.Setting{ID: http2.SettingInitialWindowSize, Val: 1 << 20})
-	_ = fr.WriteHeaders(http2.HeadersFrameParam{StreamID: 1, BlockFragment: hb.Bytes(), EndHeaders: true})
+	_ = fr.WriteHeaders(
+		http2.HeadersFrameParam{StreamID: 1, BlockFragment: hb.Bytes(), EndHeaders: true},
+	)
 	_ = fr.WriteData(1, false, []byte("hello"))
 	_ = fr.WriteWindowUpdate(1, 1<<31-1)
 	_ = fr.WriteWindowUpdate(0, 1<<31-1)

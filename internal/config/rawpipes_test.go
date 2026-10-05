@@ -35,7 +35,8 @@ func TestParseCapabilityKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !keys["prod-current"].Equal(currentKey) || !keys["prod-next"].Equal(nextKey) || len(keys) != 2 {
+	if !keys["prod-current"].Equal(currentKey) || !keys["prod-next"].Equal(nextKey) ||
+		len(keys) != 2 {
 		t.Fatalf("parsed %v", keys)
 	}
 
