@@ -583,7 +583,7 @@ func TestApplyJSON_FaultDescribesWhatWentWrong(t *testing.T) {
 		{
 			name: "a stray bracket is also trailing bytes",
 			src:  `{"a":1}]`,
-			want: "trailing bytes that do not parse at byte 7",
+			want: "trailing bytes that do not parse at byte 8",
 		},
 		{
 			name: "a body that is not json at all",
