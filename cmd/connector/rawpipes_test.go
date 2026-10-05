@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
@@ -119,8 +120,15 @@ func TestRawPipeSetupFailureLeavesLegacyRunning(t *testing.T) {
 				t.Fatalf("the base config cannot hold tunnels: %v", err)
 			}
 			mutate(t, cfg)
-			if raw := startRawPipes(context.Background(), cfg, redact.NewRedactor()); raw != nil {
+			var reported recordedStatus
+			if raw := startRawPipes(
+				context.Background(), cfg, reported.report, redact.NewRedactor(),
+			); raw != nil {
 				t.Fatal("raw pipes started from a config that cannot run them")
+			}
+			if st := reported.get(t); !st.GetEnabled() || st.GetTunnelsUp() ||
+				st.GetDetail() == "" {
+				t.Fatalf("metadata would report %v, want enabled, down, and why", st)
 			}
 		})
 	}
@@ -180,6 +188,9 @@ func TestFatalAcceptErrorStopsRawPipesOnly(t *testing.T) {
 	if ready, reason := raw.readiness()(context.Background()); !ready {
 		t.Fatalf("raw pipes failing held the connector unready: %q", reason)
 	}
+	if st := raw.status(); st.GetTunnelsUp() || st.GetDetail() != "the pipe server stopped" {
+		t.Fatalf("metadata would report %v after the pipe server failed", st)
+	}
 	raw.drain() // shutdown after a failure returns, without draining twice
 }
 
@@ -193,7 +204,8 @@ func TestInnerTLSDisabledWarnsAtStartup(t *testing.T) {
 	cfg := rawPipesConfig(t)
 	cfg.RawPipes.EnvoyPath = filepath.Join(t.TempDir(), "no-envoy")
 	cfg.RawPipes.TunnelInnerTLS = tunnels.InnerTLSDisabled
-	raw := startRawPipes(context.Background(), cfg, redact.NewRedactor())
+	var reported recordedStatus
+	raw := startRawPipes(context.Background(), cfg, reported.report, redact.NewRedactor())
 	if raw == nil {
 		t.Fatalf("raw pipes did not start: %s", logs.String())
 	}
@@ -217,4 +229,19 @@ func unusedPort(t *testing.T) int {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return port
+}
+
+// recordedStatus records the raw pipe status startRawPipes reports.
+type recordedStatus struct {
+	f func() *pb.RawPipesStatus
+}
+
+func (r *recordedStatus) report(f func() *pb.RawPipesStatus) { r.f = f }
+
+func (r *recordedStatus) get(t *testing.T) *pb.RawPipesStatus {
+	t.Helper()
+	if r.f == nil {
+		t.Fatal("no raw pipe status was reported")
+	}
+	return r.f()
 }

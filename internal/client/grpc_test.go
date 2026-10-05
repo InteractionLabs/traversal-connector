@@ -555,6 +555,31 @@ func TestHandleMessage_MetadataRequest_ReturnsMetadataResponse(t *testing.T) {
 	if meta.MaxConcurrentRequests != 10 {
 		t.Errorf("MaxConcurrentRequests = %d, want 10", meta.MaxConcurrentRequests)
 	}
+	if meta.ConnectorVersion == "" {
+		t.Error("expected a connector version")
+	}
+	if meta.RawPipes != nil {
+		t.Errorf("RawPipes = %v before raw pipes report status, want unset", meta.RawPipes)
+	}
+}
+
+func TestHandleMessage_MetadataRequest_ReportsRawPipes(t *testing.T) {
+	sender := &mockSender{}
+	cm := newTestConnectionManager()
+	cm.SetRawPipesStatus(func() *pb.RawPipesStatus {
+		return &pb.RawPipesStatus{Enabled: true, Detail: "no tunnel to [t-envoy-1]"}
+	})
+	msg := &pb.ControllerMessage{
+		RequestId: "meta",
+		Message:   &pb.ControllerMessage_MetadataRequest{MetadataRequest: &pb.MetadataRequest{}},
+	}
+	if err := cm.handleMessage(context.Background(), sender, uuid.New(), msg); err != nil {
+		t.Fatalf("handleMessage() = %v", err)
+	}
+	got := sender.sent.GetMetadataResponse().GetRawPipes()
+	if !got.GetEnabled() || got.GetTunnelsUp() || got.GetDetail() != "no tunnel to [t-envoy-1]" {
+		t.Errorf("RawPipes = %v", got)
+	}
 }
 
 func TestHandleMessage_ConnectionRequest_ReturnsErrorResponse(t *testing.T) {

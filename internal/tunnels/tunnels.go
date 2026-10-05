@@ -184,6 +184,20 @@ func (m *Manager) Run(ctx context.Context) error {
 	return nil
 }
 
+// TunnelsUp reports whether Envoy holds a tunnel to the tunnel endpoint, and
+// if not, why.
+func (m *Manager) TunnelsUp(ctx context.Context) (bool, string) {
+	up, err := m.admin.tunnels(ctx)
+	switch {
+	case err != nil:
+		return false, "envoy is not answering"
+	case up == 0:
+		return false, "no tunnel to " + m.cfg.Endpoint
+	}
+	m.everConnected.Store(true)
+	return true, ""
+}
+
 // Status reports whether the connector should take pipes, and if not, why.
 // A connector is ready when it holds a tunnel. Until a first tunnel has come
 // up, it is also ready once ReadyGrace has passed, so a network that blocks
@@ -192,18 +206,14 @@ func (m *Manager) Status(ctx context.Context) (bool, string) {
 	if m.draining.Load() {
 		return false, "draining"
 	}
-	up, err := m.admin.tunnels(ctx)
-	if err == nil && up > 0 {
-		m.everConnected.Store(true)
+	up, why := m.TunnelsUp(ctx)
+	if up {
 		return true, ""
 	}
 	if !m.everConnected.Load() && time.Since(m.start) > m.cfg.ReadyGrace {
 		return true, "no tunnel has connected; serving the legacy transport only"
 	}
-	if err != nil {
-		return false, "envoy is not answering: " + err.Error()
-	}
-	return false, "no tunnel to " + m.cfg.Endpoint
+	return false, why
 }
 
 // Drain sends GOAWAY on every tunnel, so tunnel endpoints stop sending this

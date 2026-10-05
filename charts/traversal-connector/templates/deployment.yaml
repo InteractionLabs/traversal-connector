@@ -180,6 +180,26 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.rawPipes.enabled }}
+            - name: TRAVERSAL_RAW_PIPES
+              value: "enabled"
+            - name: TRAVERSAL_CAPABILITY_ISSUER
+              value: {{ required "rawPipes.capabilityIssuer is required when rawPipes.enabled" .Values.rawPipes.capabilityIssuer | quote }}
+            - name: TRAVERSAL_CAPABILITY_KEYS
+              value: {{ required "rawPipes.capabilityKeysPEM is required when rawPipes.enabled" .Values.rawPipes.capabilityKeysPEM | quote }}
+            {{- with .Values.rawPipes.maxPipes }}
+            - name: TRAVERSAL_RAW_PIPES_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelsPerReplica }}
+            - name: TRAVERSAL_TUNNELS_PER_REPLICA
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelsConnectTo }}
+            - name: TRAVERSAL_TUNNELS_CONNECT_TO
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY
               value: "true"

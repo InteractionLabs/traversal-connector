@@ -51,6 +51,24 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
+# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
+# Raw pipes let Traversal reach databases, kubectl exec, git, and other non-HTTP
+# destinations through this connector. The connector holds outbound tunnels to
+# Traversal (allowlist *.tunnels.<your Traversal domain>:443) and checks a
+# Traversal-signed capability for every pipe. Off by default; leaving it off,
+# or setting it back to false, keeps the connector on HTTP requests only.
+rawPipes:
+  enabled: false           # TRAVERSAL_RAW_PIPES
+  # Both provided by Traversal. The keys verify capabilities and are never
+  # sent over the tunnel.
+  capabilityIssuer: ""     # TRAVERSAL_CAPABILITY_ISSUER
+  capabilityKeysPEM: ""    # TRAVERSAL_CAPABILITY_KEYS
+  maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
+  tunnelsPerReplica: ""    # TRAVERSAL_TUNNELS_PER_REPLICA (default 2)
+  # host:port that replaces the tunnels entry point, e.g. a PrivateLink
+  # endpoint. TLS names are unchanged.
+  tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
+
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference
 # an existing Secret with keys: tls.crt, tls.key, ca.crt.
