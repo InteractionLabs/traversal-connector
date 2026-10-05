@@ -174,7 +174,8 @@ deadcode:
     #!/usr/bin/env bash
     set -euo pipefail
     # Lists functions never called transitively from any main package.
-    out=$(deadcode ./...)
+    # Test-support packages (*test) exist only for tests, so they are exempt.
+    out=$(deadcode ./... | grep -v 'test/[^/]*\.go:' || true)
     if [ -n "$out" ]; then
         echo "Dead code detected:"
         echo "$out"
