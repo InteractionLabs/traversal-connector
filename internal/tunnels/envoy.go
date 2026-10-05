@@ -151,7 +151,7 @@ func (c envoyConfig) listener(r replica) map[string]any {
 					"http_connection_manager.v3.HttpConnectionManager",
 				"stat_prefix":            "pipes",
 				"codec_type":             "HTTP2",
-				"http2_protocol_options": http2Options(),
+				"http2_protocol_options": tunnelServerHTTP2Options(),
 				"upgrade_configs":        []any{map[string]any{"upgrade_type": "CONNECT"}},
 				// Pipes are long-lived and may sit idle (psql, kubectl exec).
 				// core enforces any lifetime cap.
@@ -216,6 +216,27 @@ func (c envoyConfig) cluster(r replica) map[string]any {
 		},
 	}
 }
+
+// tunnelServerHTTP2Options are the tunnel's HTTP/2 settings on the
+// connector, which serves it. Every pipe the connector refuses (a closed
+// port, a forbidden address) ends with the tunnel endpoint resetting that
+// stream, so a burst of refusals is a burst of RST_STREAM frames. Envoy's
+// Rapid Reset limiter (CVE-2023-44487: 1,000 resets, then 33 a second) would
+// answer it by closing the tunnel with GOAWAY, cutting every pipe on it. The
+// only peer is Traversal's tunnel endpoint, authenticated by mutual TLS, so
+// the limiter is sized far above any real refusal rate instead.
+func tunnelServerHTTP2Options() map[string]any {
+	opts := http2Options()
+	opts["stream_reset_burst"] = streamResetBurst
+	opts["stream_reset_rate"] = streamResetRate
+	return opts
+}
+
+// Rapid Reset limiter bounds for the tunnel, in resets and resets a second.
+const (
+	streamResetBurst = 1_000_000
+	streamResetRate  = 100_000
+)
 
 func http2Options() map[string]any {
 	return map[string]any{
