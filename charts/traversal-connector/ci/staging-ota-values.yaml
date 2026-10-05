@@ -1,0 +1,21 @@
+# Overlay the existing self-serve-qa-b132a9a8 release's user values in
+# self-serve-connector-qa-agent, on staging only. Preserve its ID and TLS values.
+# Use the paired prerelease chart and override image.tag with tag@digest from
+# its manifest after scanning/signing. Do not install this with a release chart.
+image:
+  repository: 885798945817.dkr.ecr.us-west-2.amazonaws.com/traversal-connector
+
+controllerURL: https://edge.staging.traversal.com
+
+configUpdates:
+  enabled: true
+  refreshInterval: 30s
+
+otel:
+  # Keep the existing single-container deployment; this test is for OTA.
+  sidecar:
+    enabled: false
+  protocol: grpc
+  metricsEndpoint: https://telemetry.staging.traversal.com:4317
+  tracesEndpoint: https://telemetry.staging.traversal.com:4317
+  logsEndpoint: https://telemetry.staging.traversal.com:4317
