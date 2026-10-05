@@ -1,0 +1,505 @@
+package pipes
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"math"
+	"net"
+	"sync"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
+)
+
+// A minimal HTTP/2 server for CONNECT streams.
+//
+// net/http's server sends RST_STREAM(NO_ERROR) when a handler returns before
+// the request body ends (RFC 9113 §8.1 allows it). Envoy turns that reset into
+// an abort of the downstream stream and drops response bytes still queued
+// behind flow control, so a destination that writes and closes while the
+// caller is still open loses its tail. A server where "handler returned" means
+// "stream done" also cannot keep one direction open after the other ends,
+// which TCP can. So the pipe server frames HTTP/2 itself: each direction ends
+// with its own END_STREAM, and RST_STREAM is sent only to abort.
+//
+// Only the connector's own Envoy reaches this server, over loopback. It still
+// enforces its receive windows and stream limit, so a misbehaving peer costs
+// bounded memory.
+
+// Receive windows. They match the tunnel's, so one stalled pipe holds at most
+// streamWindow here and cannot exhaust the connection.
+const (
+	streamWindow = 256 << 10
+	connWindow   = 1 << 20
+	defaultWin   = 65535
+	maxFrameSize = 16 << 10
+	maxHeaders   = 64 << 10
+)
+
+var (
+	errStreamReset = errors.New("pipes: stream reset")
+	errConnClosed  = errors.New("pipes: connection closed")
+)
+
+// h2server accepts HTTP/2 cleartext connections and runs handle for every
+// stream. wg tracks running handlers, so a drain can wait for them.
+type h2server struct {
+	handle     func(*h2stream)
+	maxStreams int
+	wg         sync.WaitGroup
+}
+
+func (s *h2server) serve(ctx context.Context, ln net.Listener) error {
+	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
+	defer stop()
+	for {
+		nc, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		go s.serveConn(nc)
+	}
+}
+
+type h2conn struct {
+	nc  net.Conn
+	fr  *http2.Framer
+	wmu sync.Mutex // serializes frame writes and the HPACK encoder
+	enc *hpack.Encoder
+	buf bytes.Buffer
+
+	mu            sync.Mutex
+	cond          *sync.Cond
+	sendWin       int64 // connection send window
+	recvUsed      int64 // bytes received and not yet credited back
+	peerStreamWin int64 // peer's SETTINGS_INITIAL_WINDOW_SIZE
+	maxFrame      int
+	streams       map[uint32]*h2stream
+	lastStream    uint32
+	err           error // set once the connection is gone
+}
+
+// h2stream is one CONNECT. Read returns the caller's bytes; Write sends bytes
+// back.
+type h2stream struct {
+	c         *h2conn
+	id        uint32
+	method    string
+	authority string
+	header    map[string]string
+
+	// Guarded by c.mu.
+	sendWin  int64
+	in       bytes.Buffer
+	inErr    error // io.EOF after END_STREAM; errStreamReset after RST_STREAM
+	reset    bool  // RST_STREAM sent or received: no more frames
+	localEnd bool  // END_STREAM sent
+}
+
+func (s *h2server) serveConn(nc net.Conn) {
+	defer func() { _ = nc.Close() }()
+	preface := make([]byte, len(http2.ClientPreface))
+	if _, err := io.ReadFull(nc, preface); err != nil ||
+		string(preface) != http2.ClientPreface {
+		return
+	}
+	c := &h2conn{
+		nc:            nc,
+		fr:            http2.NewFramer(nc, nc),
+		sendWin:       defaultWin,
+		peerStreamWin: defaultWin,
+		maxFrame:      maxFrameSize,
+		streams:       map[uint32]*h2stream{},
+	}
+	c.cond = sync.NewCond(&c.mu)
+	c.enc = hpack.NewEncoder(&c.buf)
+	c.fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+	c.fr.MaxHeaderListSize = maxHeaders
+	settings := []http2.Setting{{ID: http2.SettingInitialWindowSize, Val: streamWindow}}
+	if s.maxStreams > 0 {
+		settings = append(settings, http2.Setting{
+			ID:  http2.SettingMaxConcurrentStreams,
+			Val: windowIncrement(int64(s.maxStreams)),
+		})
+	}
+	_ = c.write(func() error {
+		if err := c.fr.WriteSettings(settings...); err != nil {
+			return err
+		}
+		return c.fr.WriteWindowUpdate(0, connWindow-defaultWin)
+	})
+	err := c.readLoop(s)
+	if errors.Is(err, errProtocol) {
+		_ = c.write(func() error {
+			return c.fr.WriteGoAway(c.lastStream, http2.ErrCodeProtocol, nil)
+		})
+	}
+	c.mu.Lock()
+	c.err = errConnClosed
+	for _, st := range c.streams {
+		if st.inErr == nil {
+			st.inErr = errConnClosed
+		}
+		st.reset = true
+	}
+	c.cond.Broadcast()
+	c.mu.Unlock()
+}
+
+var errProtocol = errors.New("pipes: peer violated HTTP/2")
+
+// write runs fn with the write lock; a failed write ends the connection.
+func (c *h2conn) write(fn func() error) error {
+	c.wmu.Lock()
+	err := fn()
+	c.wmu.Unlock()
+	if err != nil {
+		_ = c.nc.Close()
+	}
+	return err
+}
+
+func (c *h2conn) readLoop(s *h2server) error {
+	for {
+		f, err := c.fr.ReadFrame()
+		if err != nil {
+			var se http2.StreamError
+			if errors.As(err, &se) {
+				c.resetStream(se.StreamID, se.Code)
+				continue
+			}
+			var ce http2.ConnectionError
+			if errors.As(err, &ce) {
+				return errProtocol
+			}
+			return err
+		}
+		switch f := f.(type) {
+		case *http2.MetaHeadersFrame:
+			c.onHeaders(s, f)
+		case *http2.DataFrame:
+			if err := c.onData(f); err != nil {
+				return err
+			}
+		case *http2.WindowUpdateFrame:
+			c.onWindowUpdate(f)
+		case *http2.SettingsFrame:
+			if f.IsAck() {
+				continue
+			}
+			c.onSettings(f)
+			if err := c.write(c.fr.WriteSettingsAck); err != nil {
+				return err
+			}
+		case *http2.PingFrame:
+			if !f.IsAck() {
+				data := f.Data
+				if err := c.write(func() error { return c.fr.WritePing(true, data) }); err != nil {
+					return err
+				}
+			}
+		case *http2.RSTStreamFrame:
+			c.mu.Lock()
+			dropped := 0
+			if st := c.streams[f.StreamID]; st != nil {
+				dropped = st.dropBuffered()
+				st.inErr, st.reset = errStreamReset, true
+				c.cond.Broadcast()
+			}
+			c.mu.Unlock()
+			if err := c.credit(dropped); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (c *h2conn) onSettings(f *http2.SettingsFrame) {
+	_ = f.ForeachSetting(func(set http2.Setting) error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		switch set.ID {
+		case http2.SettingInitialWindowSize:
+			delta := int64(set.Val) - c.peerStreamWin
+			c.peerStreamWin = int64(set.Val)
+			for _, st := range c.streams {
+				st.sendWin += delta
+			}
+			c.cond.Broadcast()
+		case http2.SettingMaxFrameSize:
+			c.maxFrame = int(set.Val)
+		}
+		return nil
+	})
+}
+
+func (c *h2conn) onWindowUpdate(f *http2.WindowUpdateFrame) {
+	c.mu.Lock()
+	if f.StreamID == 0 {
+		c.sendWin += int64(f.Increment)
+	} else if st := c.streams[f.StreamID]; st != nil {
+		st.sendWin += int64(f.Increment)
+	}
+	c.cond.Broadcast()
+	c.mu.Unlock()
+}
+
+func (c *h2conn) onHeaders(s *h2server, f *http2.MetaHeadersFrame) {
+	c.mu.Lock()
+	if st := c.streams[f.StreamID]; st != nil {
+		// Trailers: only END_STREAM matters.
+		if f.StreamEnded() && st.inErr == nil {
+			st.inErr = io.EOF
+			c.cond.Broadcast()
+		}
+		c.mu.Unlock()
+		return
+	}
+	if f.StreamID <= c.lastStream {
+		// A closed stream's late HEADERS, or a reused ID: never a new pipe.
+		c.mu.Unlock()
+		c.resetStream(f.StreamID, http2.ErrCodeStreamClosed)
+		return
+	}
+	c.lastStream = f.StreamID
+	if s.maxStreams > 0 && len(c.streams) >= s.maxStreams {
+		c.mu.Unlock()
+		c.resetStream(f.StreamID, http2.ErrCodeRefusedStream)
+		return
+	}
+	st := &h2stream{
+		c:         c,
+		id:        f.StreamID,
+		method:    f.PseudoValue("method"),
+		authority: f.PseudoValue("authority"),
+		header:    map[string]string{},
+		sendWin:   c.peerStreamWin,
+	}
+	for _, hf := range f.RegularFields() {
+		st.header[hf.Name] = hf.Value
+	}
+	if f.StreamEnded() {
+		st.inErr = io.EOF
+	}
+	c.streams[f.StreamID] = st
+	c.mu.Unlock()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer st.finish()
+		s.handle(st)
+	}()
+}
+
+// onData buffers a stream's bytes. A peer that sends past either receive
+// window is broken, and the connection ends rather than buffering without
+// bound.
+func (c *h2conn) onData(f *http2.DataFrame) error {
+	data := f.Data()
+	credit := f.Length - windowIncrement(int64(len(data))) // padding is consumed at once
+	c.mu.Lock()
+	c.recvUsed += int64(f.Length)
+	if c.recvUsed > connWindow {
+		c.mu.Unlock()
+		return errProtocol
+	}
+	st := c.streams[f.StreamID]
+	switch {
+	case st == nil || st.inErr != nil:
+		credit = f.Length // nobody will read it
+	case int64(st.in.Len()+len(data)) > streamWindow:
+		c.mu.Unlock()
+		c.resetStream(f.StreamID, http2.ErrCodeFlowControl)
+		c.mu.Lock()
+		credit = f.Length
+	default:
+		st.in.Write(data)
+		if f.StreamEnded() {
+			st.inErr = io.EOF
+		}
+		c.cond.Broadcast()
+	}
+	c.recvUsed -= int64(credit)
+	c.mu.Unlock()
+	if credit > 0 {
+		return c.write(func() error { return c.fr.WriteWindowUpdate(0, credit) })
+	}
+	return nil
+}
+
+func (c *h2conn) resetStream(id uint32, code http2.ErrCode) {
+	c.mu.Lock()
+	dropped := 0
+	if st := c.streams[id]; st != nil {
+		dropped = st.dropBuffered()
+		st.inErr, st.reset = errStreamReset, true
+		c.cond.Broadcast()
+	}
+	c.mu.Unlock()
+	_ = c.write(func() error { return c.fr.WriteRSTStream(id, code) })
+	_ = c.credit(dropped)
+}
+
+// dropBuffered discards bytes nobody will read and returns how many, for
+// the caller to credit back to the connection window. c.mu must be held.
+func (st *h2stream) dropBuffered() int {
+	n := st.in.Len()
+	st.in.Reset()
+	st.c.recvUsed -= int64(n)
+	return n
+}
+
+// credit returns n received bytes to the peer's connection window.
+func (c *h2conn) credit(n int) error {
+	if n == 0 {
+		return nil
+	}
+	return c.write(func() error { return c.fr.WriteWindowUpdate(0, windowIncrement(int64(n))) })
+}
+
+// windowIncrement converts a byte count to a WINDOW_UPDATE increment. Counts
+// here are bounded by the receive windows, far below the HTTP/2 maximum.
+func windowIncrement(n int64) uint32 {
+	if n <= 0 {
+		return 0
+	}
+	if n > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return uint32(n)
+}
+
+// Read returns the caller's bytes, io.EOF after its END_STREAM, or
+// errStreamReset after an abort. Consumed bytes are credited back, so a
+// destination that stops reading stops the caller.
+func (st *h2stream) Read(p []byte) (int, error) {
+	c := st.c
+	c.mu.Lock()
+	for st.in.Len() == 0 && st.inErr == nil {
+		c.cond.Wait()
+	}
+	if st.in.Len() == 0 {
+		err := st.inErr
+		c.mu.Unlock()
+		return 0, err
+	}
+	n, _ := st.in.Read(p)
+	open := st.inErr == nil
+	c.recvUsed -= int64(n)
+	c.mu.Unlock()
+	inc := windowIncrement(int64(n))
+	_ = c.write(func() error {
+		if open {
+			if err := c.fr.WriteWindowUpdate(st.id, inc); err != nil {
+				return err
+			}
+		}
+		return c.fr.WriteWindowUpdate(0, inc)
+	})
+	return n, nil
+}
+
+// Write sends p as DATA within both send windows.
+func (st *h2stream) Write(p []byte) (int, error) {
+	c := st.c
+	written := 0
+	for len(p) > 0 {
+		c.mu.Lock()
+		for (st.sendWin <= 0 || c.sendWin <= 0) && !st.reset && c.err == nil {
+			c.cond.Wait()
+		}
+		if st.reset || c.err != nil || st.localEnd {
+			c.mu.Unlock()
+			return written, errStreamReset
+		}
+		n := int(min(int64(len(p)), int64(c.maxFrame), st.sendWin, c.sendWin))
+		st.sendWin -= int64(n)
+		c.sendWin -= int64(n)
+		c.mu.Unlock()
+		chunk := p[:n]
+		if err := c.write(func() error { return c.fr.WriteData(st.id, false, chunk) }); err != nil {
+			return written, err
+		}
+		p, written = p[n:], written+n
+	}
+	return written, nil
+}
+
+// respond sends the response headers, ending this direction if end is set.
+func (st *h2stream) respond(status string, header map[string]string, end bool) error {
+	c := st.c
+	c.mu.Lock()
+	if st.reset {
+		c.mu.Unlock()
+		return errStreamReset
+	}
+	st.localEnd = end
+	c.mu.Unlock()
+	return c.write(func() error {
+		c.buf.Reset()
+		_ = c.enc.WriteField(hpack.HeaderField{Name: ":status", Value: status})
+		for k, v := range header {
+			_ = c.enc.WriteField(hpack.HeaderField{Name: k, Value: v})
+		}
+		return c.fr.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      st.id,
+			BlockFragment: c.buf.Bytes(),
+			EndHeaders:    true,
+			EndStream:     end,
+		})
+	})
+}
+
+// CloseWrite ends this direction with END_STREAM: the destination finished.
+func (st *h2stream) CloseWrite() error {
+	c := st.c
+	c.mu.Lock()
+	if st.reset || st.localEnd {
+		c.mu.Unlock()
+		return nil
+	}
+	st.localEnd = true
+	c.mu.Unlock()
+	return c.write(func() error { return c.fr.WriteData(st.id, true, nil) })
+}
+
+// Abort resets the stream: the destination failed, so the caller must not see
+// a clean end.
+func (st *h2stream) Abort() {
+	c := st.c
+	c.mu.Lock()
+	if st.reset {
+		c.mu.Unlock()
+		return
+	}
+	st.reset = true
+	if st.inErr == nil {
+		st.inErr = errStreamReset
+	}
+	c.cond.Broadcast()
+	c.mu.Unlock()
+	_ = c.write(func() error { return c.fr.WriteRSTStream(st.id, http2.ErrCodeInternal) })
+}
+
+// finish forgets the stream once its handler is done and returns the window
+// held by bytes nobody will read. A handler that ended its direction is done,
+// even if the caller is still sending: resetting here is what truncates
+// responses behind Envoy, so the caller's late bytes are dropped and credited
+// instead. Only a handler that never ended its direction resets the stream.
+func (st *h2stream) finish() {
+	c := st.c
+	c.mu.Lock()
+	left := st.dropBuffered()
+	unfinished := !st.reset && !st.localEnd
+	delete(c.streams, st.id)
+	c.mu.Unlock()
+	if unfinished {
+		_ = c.write(func() error { return c.fr.WriteRSTStream(st.id, http2.ErrCodeCancel) })
+	}
+	_ = c.credit(left)
+}
