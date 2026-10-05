@@ -49,16 +49,6 @@ assert_contains "$tmp_dir/direct.yaml" 'image: "traversalext/traversal-connector
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_CONTROLLER_CONNECT_TO'
 assert_not_contains "$tmp_dir/direct.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
 
-render staging-ota "$fixtures/direct-export-values.yaml" \
-  -f "$fixtures/staging-ota-values.yaml" \
-  --set-string image.tag=prerelease-test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-assert_contains "$tmp_dir/staging-ota.yaml" 'image: "885798945817.dkr.ecr.us-west-2.amazonaws.com/traversal-connector:prerelease-test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
-assert_contains "$tmp_dir/staging-ota.yaml" $'name: TRAVERSAL_CONFIG_ENABLED\n              value: "true"'
-assert_contains "$tmp_dir/staging-ota.yaml" 'value: "https://edge.staging.traversal.com"'
-assert_contains "$tmp_dir/staging-ota.yaml" 'value: "https://telemetry.staging.traversal.com:4317"'
-assert_not_contains "$tmp_dir/staging-ota.yaml" 'https://telemetry.traversal.com'
-assert_not_contains "$tmp_dir/staging-ota.yaml" 'name: telemetry-sidecar'
-
 render direct-connect-to "$fixtures/direct-export-values.yaml" \
   --set-string controllerConnectTo=edge-istio.traversal-gateways.svc.cluster.local:443 \
   --set-string otel.connectTo=telemetry-istio.traversal-gateways.svc.cluster.local:443

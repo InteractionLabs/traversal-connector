@@ -1,4 +1,4 @@
-# Overlay the existing self-serve-qa-b132a9a8 release's user values in
+# QA connector only: overlay the self-serve-qa-b132a9a8 release's user values in
 # self-serve-connector-qa-agent, on staging only. Preserve its ID and TLS values.
 # Use the paired prerelease chart and override image.tag with tag@digest from
 # its manifest after scanning/signing. Do not install this with a release chart.
