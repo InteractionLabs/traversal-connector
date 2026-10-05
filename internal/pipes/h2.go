@@ -28,11 +28,13 @@ import (
 // enforces its receive windows and stream limit, so a misbehaving peer costs
 // bounded memory.
 
-// Receive windows. They match the tunnel's, so one stalled pipe holds at most
-// streamWindow here and cannot exhaust the connection.
+// Receive windows. The stream window bounds what one stalled pipe holds here;
+// Envoy is on loopback, so it is small and still carries a pipe at full speed.
+// The connection window is far larger than any number of stalled pipes can
+// fill, so a destination that stops reading never stalls the pipes beside it.
 const (
 	streamWindow = 256 << 10
-	connWindow   = 1 << 20
+	connWindow   = 1 << 30
 	defaultWin   = 65535
 	maxFrameSize = 16 << 10
 	maxHeaders   = 64 << 10
