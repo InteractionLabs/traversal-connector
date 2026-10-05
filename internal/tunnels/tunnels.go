@@ -128,7 +128,9 @@ func New(cfg Config) (*Manager, error) {
 	}
 	if cfg.StreamWindow < 64<<10 || cfg.StreamWindow > cfg.ConnectionWindow ||
 		cfg.ConnectionWindow > 1<<30 {
-		return nil, errors.New("tunnels: windows must satisfy 64 KiB <= stream <= connection <= 1 GiB")
+		return nil, errors.New(
+			"tunnels: windows must satisfy 64 KiB <= stream <= connection <= 1 GiB",
+		)
 	}
 	if cfg.ReadyGrace == 0 {
 		cfg.ReadyGrace = time.Minute

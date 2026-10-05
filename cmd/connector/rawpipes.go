@@ -236,7 +236,9 @@ func tunnelRoots(extra *string) ([]byte, error) {
 		roots = append(append(roots, '\n'), *extra...)
 	}
 	if len(roots) == 0 {
-		return nil, errors.New("no CA roots: the image has no system bundle and TLS_CA_BASE64 is unset")
+		return nil, errors.New(
+			"no CA roots: the image has no system bundle and TLS_CA_BASE64 is unset",
+		)
 	}
 	return roots, nil
 }

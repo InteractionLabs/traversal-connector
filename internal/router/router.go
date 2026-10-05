@@ -21,7 +21,11 @@ type ReadinessGate func(ctx context.Context) (ready bool, reason string)
 // NewRouter creates a gin HTTP engine for the traversal connector with health and
 // readiness endpoints. The connector is ready when it holds a legacy tunnel and
 // every gate passes.
-func NewRouter(cfg config.Config, cm *client.ConnectionManager, gates ...ReadinessGate) *gin.Engine {
+func NewRouter(
+	cfg config.Config,
+	cm *client.ConnectionManager,
+	gates ...ReadinessGate,
+) *gin.Engine {
 	if cfg.EnvLevel.IsDev() {
 		gin.SetMode(gin.DebugMode)
 	} else {

@@ -117,13 +117,20 @@ func TestFetchDiscovery(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(Discovery{
-			Cell:     "0",
-			Address:  "tunnels.traversal.com:443",
-			Replicas: []string{"t-envoy-1.tunnels.traversal.com", "t-envoy-0.tunnels.traversal.com"},
+			Cell:    "0",
+			Address: "tunnels.traversal.com:443",
+			Replicas: []string{
+				"t-envoy-1.tunnels.traversal.com",
+				"t-envoy-0.tunnels.traversal.com",
+			},
 		})
 	}))
 	defer srv.Close()
-	d, err := fetchDiscovery(context.Background(), srv.Client(), srv.URL+"/v1/tunnels/"+testConnector)
+	d, err := fetchDiscovery(
+		context.Background(),
+		srv.Client(),
+		srv.URL+"/v1/tunnels/"+testConnector,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
