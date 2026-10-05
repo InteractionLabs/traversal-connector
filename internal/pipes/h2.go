@@ -46,11 +46,51 @@ var (
 )
 
 // h2server accepts HTTP/2 cleartext connections and runs handle for every
-// stream. wg tracks running handlers, so a drain can wait for them.
+// stream. It counts running handlers, so a drain can wait for them; streams
+// keep arriving during a drain, so the count cannot be a WaitGroup, whose Add
+// may not race Wait.
 type h2server struct {
 	handle     func(*h2stream)
 	maxStreams int
-	wg         sync.WaitGroup
+
+	mu     sync.Mutex
+	active int
+	idle   chan struct{} // closed when active falls to zero
+}
+
+func (s *h2server) started() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == 0 {
+		s.idle = make(chan struct{})
+	}
+	s.active++
+}
+
+func (s *h2server) done() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active--
+	if s.active == 0 {
+		close(s.idle)
+	}
+}
+
+// wait blocks until no handler is running or ctx is done.
+func (s *h2server) wait(ctx context.Context) error {
+	s.mu.Lock()
+	if s.active == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	idle := s.idle
+	s.mu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *h2server) serve(ctx context.Context, ln net.Listener) error {
@@ -157,15 +197,27 @@ func (s *h2server) serveConn(nc net.Conn) {
 
 var errProtocol = errors.New("pipes: peer violated HTTP/2")
 
-// write runs fn with the write lock; a failed write ends the connection.
+// write runs fn with the write lock. A failed write ends the connection;
+// errStreamReset from fn means only that the stream can no longer send.
+//
+// Lock order: wmu, then mu. A stream's state is re-checked under both locks
+// right before its frame is written, so no frame follows the stream's
+// RST_STREAM or its END_STREAM.
 func (c *h2conn) write(fn func() error) error {
 	c.wmu.Lock()
 	err := fn()
 	c.wmu.Unlock()
-	if err != nil {
+	if err != nil && !errors.Is(err, errStreamReset) {
 		_ = c.nc.Close()
 	}
 	return err
+}
+
+// sendable reports, under c.mu, whether st may still send frames.
+func (st *h2stream) sendable() bool {
+	st.c.mu.Lock()
+	defer st.c.mu.Unlock()
+	return !st.reset && !st.localEnd && st.c.err == nil
 }
 
 func (c *h2conn) readLoop(s *h2server) error {
@@ -191,12 +243,16 @@ func (c *h2conn) readLoop(s *h2server) error {
 				return err
 			}
 		case *http2.WindowUpdateFrame:
-			c.onWindowUpdate(f)
+			if err := c.onWindowUpdate(f); err != nil {
+				return err
+			}
 		case *http2.SettingsFrame:
 			if f.IsAck() {
 				continue
 			}
-			c.onSettings(f)
+			if err := c.onSettings(f); err != nil {
+				return err
+			}
 			if err := c.write(c.fr.WriteSettingsAck); err != nil {
 				return err
 			}
@@ -223,8 +279,11 @@ func (c *h2conn) readLoop(s *h2server) error {
 	}
 }
 
-func (c *h2conn) onSettings(f *http2.SettingsFrame) {
-	_ = f.ForeachSetting(func(set http2.Setting) error {
+func (c *h2conn) onSettings(f *http2.SettingsFrame) error {
+	return f.ForeachSetting(func(set http2.Setting) error {
+		if err := set.Valid(); err != nil {
+			return errProtocol
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		switch set.ID {
@@ -233,6 +292,9 @@ func (c *h2conn) onSettings(f *http2.SettingsFrame) {
 			c.peerStreamWin = int64(set.Val)
 			for _, st := range c.streams {
 				st.sendWin += delta
+				if st.sendWin > math.MaxInt32 {
+					return errProtocol
+				}
 			}
 			c.cond.Broadcast()
 		case http2.SettingMaxFrameSize:
@@ -242,15 +304,24 @@ func (c *h2conn) onSettings(f *http2.SettingsFrame) {
 	})
 }
 
-func (c *h2conn) onWindowUpdate(f *http2.WindowUpdateFrame) {
+func (c *h2conn) onWindowUpdate(f *http2.WindowUpdateFrame) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if f.StreamID == 0 {
 		c.sendWin += int64(f.Increment)
+		if c.sendWin > math.MaxInt32 {
+			return errProtocol
+		}
 	} else if st := c.streams[f.StreamID]; st != nil {
 		st.sendWin += int64(f.Increment)
+		if st.sendWin > math.MaxInt32 {
+			// A stream error; resetting it here would take the write lock
+			// under c.mu, so the stream simply stops sending.
+			st.reset = true
+		}
 	}
 	c.cond.Broadcast()
-	c.mu.Unlock()
+	return nil
 }
 
 func (c *h2conn) onHeaders(s *h2server, f *http2.MetaHeadersFrame) {
@@ -292,9 +363,9 @@ func (c *h2conn) onHeaders(s *h2server, f *http2.MetaHeadersFrame) {
 	}
 	c.streams[f.StreamID] = st
 	c.mu.Unlock()
-	s.wg.Add(1)
+	s.started()
 	go func() {
-		defer s.wg.Done()
+		defer s.done()
 		defer st.finish()
 		s.handle(st)
 	}()
@@ -316,13 +387,16 @@ func (c *h2conn) onData(f *http2.DataFrame) error {
 	switch {
 	case st == nil || st.inErr != nil:
 		credit = f.Length // nobody will read it
-	case int64(st.in.Len()+len(data))+st.pending > streamWindow:
+	case int64(st.in.Len())+st.pending+int64(f.Length) > streamWindow:
 		c.mu.Unlock()
 		c.resetStream(f.StreamID, http2.ErrCodeFlowControl)
 		c.mu.Lock()
 		credit = f.Length
 	default:
 		st.in.Write(data)
+		// Padding counts against the stream window too; credit it with
+		// the stream's consumed bytes.
+		st.pending += int64(credit)
 		if f.StreamEnded() {
 			st.inErr = io.EOF
 		}
@@ -446,7 +520,12 @@ func (st *h2stream) Write(p []byte) (int, error) {
 		c.sendWin -= int64(n)
 		c.mu.Unlock()
 		chunk := p[:n]
-		if err := c.write(func() error { return c.fr.WriteData(st.id, false, chunk) }); err != nil {
+		if err := c.write(func() error {
+			if !st.sendable() {
+				return errStreamReset
+			}
+			return c.fr.WriteData(st.id, false, chunk)
+		}); err != nil {
 			return written, err
 		}
 		p, written = p[n:], written+n
@@ -457,14 +536,14 @@ func (st *h2stream) Write(p []byte) (int, error) {
 // respond sends the response headers, ending this direction if end is set.
 func (st *h2stream) respond(status string, header map[string]string, end bool) error {
 	c := st.c
-	c.mu.Lock()
-	if st.reset {
-		c.mu.Unlock()
-		return errStreamReset
-	}
-	st.localEnd = end
-	c.mu.Unlock()
 	return c.write(func() error {
+		c.mu.Lock()
+		if st.reset || c.err != nil {
+			c.mu.Unlock()
+			return errStreamReset
+		}
+		st.localEnd = end
+		c.mu.Unlock()
 		c.buf.Reset()
 		_ = c.enc.WriteField(hpack.HeaderField{Name: ":status", Value: status})
 		for k, v := range header {
@@ -482,32 +561,40 @@ func (st *h2stream) respond(status string, header map[string]string, end bool) e
 // CloseWrite ends this direction with END_STREAM: the destination finished.
 func (st *h2stream) CloseWrite() error {
 	c := st.c
-	c.mu.Lock()
-	if st.reset || st.localEnd {
+	err := c.write(func() error {
+		c.mu.Lock()
+		if st.reset || st.localEnd || c.err != nil {
+			c.mu.Unlock()
+			return nil
+		}
+		st.localEnd = true
 		c.mu.Unlock()
+		return c.fr.WriteData(st.id, true, nil)
+	})
+	if errors.Is(err, errStreamReset) {
 		return nil
 	}
-	st.localEnd = true
-	c.mu.Unlock()
-	return c.write(func() error { return c.fr.WriteData(st.id, true, nil) })
+	return err
 }
 
 // Abort resets the stream: the destination failed, so the caller must not see
 // a clean end.
 func (st *h2stream) Abort() {
 	c := st.c
-	c.mu.Lock()
-	if st.reset {
+	_ = c.write(func() error {
+		c.mu.Lock()
+		if st.reset || c.err != nil {
+			c.mu.Unlock()
+			return nil
+		}
+		st.reset = true
+		if st.inErr == nil {
+			st.inErr = errStreamReset
+		}
+		c.cond.Broadcast()
 		c.mu.Unlock()
-		return
-	}
-	st.reset = true
-	if st.inErr == nil {
-		st.inErr = errStreamReset
-	}
-	c.cond.Broadcast()
-	c.mu.Unlock()
-	_ = c.write(func() error { return c.fr.WriteRSTStream(st.id, http2.ErrCodeInternal) })
+		return c.fr.WriteRSTStream(st.id, http2.ErrCodeInternal)
+	})
 }
 
 // finish forgets the stream once its handler is done and returns the window
@@ -525,6 +612,9 @@ func (st *h2stream) finish() {
 	c.recvUsed -= c.connPending
 	c.connPending = 0
 	unfinished := !st.reset && !st.localEnd
+	// Nothing may follow on this stream once it is forgotten: a late Abort
+	// (a lifetime timer) or Write sends no frame.
+	st.reset = true
 	delete(c.streams, st.id)
 	c.mu.Unlock()
 	if unfinished {

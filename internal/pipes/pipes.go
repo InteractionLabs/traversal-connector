@@ -98,14 +98,7 @@ func (s *Server) Open() int64 { return s.open.Load() }
 
 // Wait blocks until every stream handler has returned or ctx is done.
 func (s *Server) Wait(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() { s.h2.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return s.h2.wait(ctx)
 }
 
 // ReasonName is how a refusal reason appears on the wire and in logs: the
@@ -199,8 +192,7 @@ func (s *Server) serve(st *h2stream) {
 		if errors.As(err, &refusal) {
 			reason, detail = refusal.OpenFailureReason(), string(refusal.Code)
 		}
-		log.Info("pipe refused", "reason", ReasonName(reason), "detail", detail)
-		refuse(st, reason, detail)
+		refused(reason, detail)
 		return
 	}
 	defer func() { _ = dst.Close() }()
@@ -216,26 +208,48 @@ func (s *Server) serve(st *h2stream) {
 	if s.cfg.MaxLifetime > 0 && time.Since(start) >= s.cfg.MaxLifetime {
 		result.outcome = outcomeMaxLifetime
 	}
+	upstream := route.Addr.String()
+	if route.Proxy != nil {
+		upstream = "proxy " + route.Proxy.Host
+	}
 	log.Info("pipe",
-		"upstream", route.Addr.String(),
-		"outcome", result.outcome,
+		"upstream", upstream,
+		"outcome", string(result.outcome),
 		"bytes_sent", result.sent,
 		"bytes_received", result.received,
 		"duration_ms", time.Since(start).Milliseconds())
 }
 
-// Pipe outcomes, as audited.
+// outcome is how a pipe ended, as audited.
+type outcome string
+
+// Pipe outcomes.
 const (
-	outcomeCompleted         = "completed"
-	outcomeCallerAborted     = "caller_aborted"
-	outcomeUpstreamAborted   = "upstream_aborted"
-	outcomeMaxLifetime       = "max_lifetime"
-	outcomeTunnelUnavailable = "tunnel_lost"
+	outcomeCompleted         outcome = "completed"
+	outcomeCallerAborted     outcome = "caller_aborted"
+	outcomeUpstreamAborted   outcome = "upstream_aborted"
+	outcomeMaxLifetime       outcome = "max_lifetime"
+	outcomeTunnelUnavailable outcome = "tunnel_lost"
 )
 
 type spliceResult struct {
-	outcome        string
+	outcome        outcome
 	sent, received int64
+}
+
+// callerReader remembers whether reading the caller failed, so a copy error
+// can be told apart from a failed write to the destination.
+type callerReader struct {
+	st     *h2stream
+	failed bool
+}
+
+func (r *callerReader) Read(p []byte) (int, error) {
+	n, err := r.st.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.failed = true
+	}
+	return n, err
 }
 
 // splice copies bytes both ways until both directions end. END_STREAM from
@@ -244,14 +258,23 @@ type spliceResult struct {
 // failure for an end. Like TCP, the caller may keep sending after the
 // destination's FIN.
 func splice(st *h2stream, dst dialpolicy.Conn) spliceResult {
-	var callerAborted atomic.Bool
+	var callerAborted, upstreamFailed atomic.Bool
 	callerDone := make(chan int64, 1)
 	go func() {
-		n, err := io.Copy(dst, st)
-		if err == nil {
+		src := &callerReader{st: st}
+		n, err := io.Copy(dst, src)
+		switch {
+		case err == nil:
 			_ = dst.CloseWrite()
-		} else {
+		case src.failed:
 			callerAborted.Store(true)
+			abort(dst)
+		default:
+			// The destination failed while the caller was still sending,
+			// perhaps after its own FIN: the caller must hear it as a reset,
+			// not keep writing into a pipe that has nowhere to go.
+			upstreamFailed.Store(true)
+			st.Abort()
 			abort(dst)
 		}
 		callerDone <- n
@@ -287,7 +310,11 @@ func splice(st *h2stream, dst dialpolicy.Conn) spliceResult {
 		}
 	}
 	result.sent = <-callerDone
-	if callerAborted.Load() && result.outcome == outcomeCompleted {
+	switch {
+	case result.outcome != outcomeCompleted:
+	case upstreamFailed.Load():
+		result.outcome = outcomeUpstreamAborted
+	case callerAborted.Load():
 		result.outcome = outcomeCallerAborted
 	}
 	return result

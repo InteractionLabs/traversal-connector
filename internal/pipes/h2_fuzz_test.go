@@ -1,6 +1,7 @@
 package pipes
 
 import (
+	"context"
 	"bytes"
 	"io"
 	"net"
@@ -54,7 +55,7 @@ func FuzzH2Server(f *testing.F) {
 			t.Fatal("server did not finish after the client closed")
 		}
 		handlers := make(chan struct{})
-		go func() { s.wg.Wait(); close(handlers) }()
+		go func() { _ = s.wait(context.Background()); close(handlers) }()
 		select {
 		case <-handlers:
 		case <-time.After(5 * time.Second):

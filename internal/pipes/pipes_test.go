@@ -498,3 +498,26 @@ func TestMaxLifetimeAbortsPipe(t *testing.T) {
 		t.Fatal("a pipe cut at its lifetime cap looked like a clean close")
 	}
 }
+
+// The destination ends its side and then fails while the caller is still
+// sending. The caller must be told, as a reset, rather than keep writing into
+// a pipe whose bytes go nowhere.
+func TestDestinationFailureAfterItsFINResetsCaller(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	_, _ = dst.Write([]byte("done"))
+	_ = dst.Close() // FIN; writes that follow get a TCP reset
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(p.resp.Body, got); err != nil || string(got) != "done" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	chunk := bytes.Repeat([]byte("x"), 32<<10)
+	for time.Now().Before(deadline) {
+		if _, err := p.body.Write(chunk); err != nil {
+			return // the stream was reset
+		}
+	}
+	t.Fatal("the caller kept writing for 10 s after the destination failed")
+}
