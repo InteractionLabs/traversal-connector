@@ -158,6 +158,8 @@ type Config struct {
 	ConfigEnabled bool
 	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
 	ConfigRefreshInterval time.Duration
+	// RawPipes configures raw pipes over Envoy reverse tunnels.
+	RawPipes RawPipes
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -230,6 +232,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rawPipes, err := loadRawPipes()
+	if err != nil {
+		return Config{}, err
+	}
 
 	configEnabled := false
 	if raw := os.Getenv("TRAVERSAL_CONFIG_ENABLED"); raw != "" {
@@ -294,6 +300,7 @@ func Load() (Config, error) {
 		ConfigRefreshInterval: env.GetEnvDuration(
 			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
+		RawPipes: rawPipes,
 	}
 
 	for _, name := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL", "TRAVERSAL_CONFIG_ENDPOINT"} {
