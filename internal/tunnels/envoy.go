@@ -17,13 +17,21 @@ import (
 // replica adds a listener and removing one removes only that listener, so a
 // change to the replica set never touches tunnels that are already up.
 
-// Default HTTP/2 windows for pipes, on the tunnels and toward core. A stalled
-// pipe holds at most one stream window, so it cannot exhaust a tunnel. A
-// pipe's throughput is at most one stream window per round trip, and a
-// tunnel's at most one connection window per round trip.
+// HTTP/2 windows for pipes.
+//
+// A pipe moves at most one stream window per round trip, and a stalled pipe
+// (its reader stopped) holds up to one stream window at each hop. So stream
+// windows are sized to the hop: the tunnel crosses the internet to Traversal,
+// the hop to core is loopback. Connection windows are as large as HTTP/2
+// allows a sane value to be, because every stalled pipe also holds its stream
+// window of the connection window: a small one lets a few stalled pipes freeze
+// every pipe on the tunnel. In kind with 50 ms added, a 2 MiB stream window
+// carried a pipe at ~33 MiB/s where 256 KiB managed 2.4.
 const (
-	DefaultStreamWindow     = 256 << 10
-	DefaultConnectionWindow = 1 << 20
+	DefaultStreamWindow     = 2 << 20
+	DefaultConnectionWindow = 1 << 30
+	coreStreamWindow        = 256 << 10
+	coreConnectionWindow    = 1 << 30
 )
 
 // adminAddress is the Envoy admin listener. Loopback only: nothing outside
@@ -127,7 +135,11 @@ func (c envoyConfig) coreCluster() map[string]any {
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": map[string]any{
 				"@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
 				"explicit_http_config": map[string]any{
-					"http2_protocol_options": c.http2Options(),
+					"http2_protocol_options": map[string]any{
+						"allow_connect":                  true,
+						"initial_stream_window_size":     coreStreamWindow,
+						"initial_connection_window_size": coreConnectionWindow,
+					},
 				},
 			},
 		},
