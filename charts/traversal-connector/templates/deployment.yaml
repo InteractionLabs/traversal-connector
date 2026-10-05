@@ -203,6 +203,14 @@ spec:
             - name: TRAVERSAL_TUNNELS_CONNECT_TO
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.rawPipes.tunnelStreamWindow }}
+            - name: TRAVERSAL_TUNNEL_STREAM_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelConnectionWindow }}
+            - name: TRAVERSAL_TUNNEL_CONNECTION_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY

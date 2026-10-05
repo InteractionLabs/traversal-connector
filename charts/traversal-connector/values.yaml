@@ -68,6 +68,11 @@ rawPipes:
   # host:port that replaces the tunnels entry point, e.g. a PrivateLink
   # endpoint. TLS names are unchanged.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
+  # HTTP/2 receive windows on the tunnels, in bytes. A pipe moves at most one
+  # stream window per round trip to Traversal; raise both for distant
+  # deployments. Blank uses the defaults.
+  tunnelStreamWindow: ""     # TRAVERSAL_TUNNEL_STREAM_WINDOW
+  tunnelConnectionWindow: "" # TRAVERSAL_TUNNEL_CONNECTION_WINDOW
 
 # Pod-level securityContext. Each raw pipe is its own TCP connection from the
 # connector, and a closed one holds its port for 60 s (TIME_WAIT), so very
