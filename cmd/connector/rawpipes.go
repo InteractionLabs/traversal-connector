@@ -204,6 +204,7 @@ func tunnelConfig(cfg *config.Config) (tunnels.Config, error) {
 		Dir:         cfg.RawPipes.RunDir,
 		EnvoyPath:   cfg.RawPipes.EnvoyPath,
 		CoreAddress: cfg.RawPipes.Listen,
+		MaxPipes:    cfg.RawPipes.MaxPipes,
 		PerReplica:  cfg.RawPipes.TunnelsPerReplica,
 		DiscoveryURL: (&url.URL{
 			Scheme: controller.Scheme,

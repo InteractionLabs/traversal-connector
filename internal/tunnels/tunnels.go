@@ -34,6 +34,10 @@ type Config struct {
 	EnvoyPath string
 	// CoreAddress is connector-core's pipe listener, host:port.
 	CoreAddress string
+	// MaxPipes is connector-core's pipe cap. Envoy's limits toward core are
+	// sized above it, so core, not Envoy, refuses the overflow, with a typed
+	// CAPACITY.
+	MaxPipes int64
 	// PerReplica is W, how many tunnels to hold to each replica. Envoy runs
 	// one worker per tunnel, each holding one, so pipes spread across W
 	// threads as well as W TCP connections.
@@ -76,6 +80,12 @@ type Manager struct {
 	mu       sync.Mutex
 	replicas []replica
 	cell     string
+	// staleClusters is set while the cluster file still names replicas the
+	// listeners no longer use. They are pruned on the next poll, once Envoy
+	// has had time to apply the listeners: Envoy's file watches for clusters
+	// and listeners apply independently, so pruning in the same breath could
+	// leave a listener naming a removed cluster.
+	staleClusters bool
 
 	everConnected atomic.Bool
 	draining      atomic.Bool
@@ -92,6 +102,8 @@ func New(cfg Config) (*Manager, error) {
 		return nil, errors.New("tunnels: a connector identity is required")
 	case cfg.Dir == "" || cfg.EnvoyPath == "" || cfg.DiscoveryURL == "" || cfg.DiscoveryClient == nil:
 		return nil, errors.New("tunnels: dir, envoy path, and discovery are required")
+	case cfg.MaxPipes <= 0:
+		return nil, errors.New("tunnels: the pipe cap must be positive")
 	case cfg.PerReplica <= 0 || cfg.PerReplica > 8:
 		return nil, errors.New("tunnels: tunnels per replica must be between 1 and 8")
 	case len(cfg.CertPEM) == 0 || len(cfg.KeyPEM) == 0 || len(cfg.CAPEM) == 0:
@@ -129,6 +141,7 @@ func New(cfg Config) (*Manager, error) {
 			coreHost:         host,
 			corePort:         port,
 			perWorker:        1,
+			maxPipes:         cfg.MaxPipes,
 			streamWindow:     cfg.StreamWindow,
 			connectionWindow: cfg.ConnectionWindow,
 		},
@@ -202,8 +215,8 @@ func (m *Manager) discover(ctx context.Context) {
 }
 
 // apply points Envoy at d's replicas. Clusters are written as the union of
-// old and new first, then listeners, then the new clusters, so no listener
-// ever names a cluster Envoy lacks.
+// old and new first, then listeners; clusters no listener uses are pruned on
+// a later poll. No listener ever names a cluster Envoy lacks.
 func (m *Manager) apply(d Discovery) error {
 	host, port, err := splitAddress(d.Address)
 	if m.cfg.ConnectTo != "" {
@@ -219,6 +232,12 @@ func (m *Manager) apply(d Discovery) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if slices.Equal(next, m.replicas) {
+		if m.staleClusters {
+			if err := m.envoy.writeClusters(next); err != nil {
+				return err
+			}
+			m.staleClusters = false
+		}
 		return nil
 	}
 	union := slices.Clone(next)
@@ -233,9 +252,7 @@ func (m *Manager) apply(d Discovery) error {
 	if err := m.envoy.writeListeners(next); err != nil {
 		return err
 	}
-	if err := m.envoy.writeClusters(next); err != nil {
-		return err
-	}
+	m.staleClusters = len(union) > len(next)
 	slog.Info("tunnel replica set changed",
 		"cell", d.Cell, "replicas", len(next), "was", len(m.replicas))
 	m.replicas, m.cell = next, d.Cell

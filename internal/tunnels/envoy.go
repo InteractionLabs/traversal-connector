@@ -63,6 +63,8 @@ type envoyConfig struct {
 	// perWorker is the tunnels each Envoy worker holds to each replica.
 	// Every worker dials its own, so a replica gets workers × perWorker.
 	perWorker int
+	// maxPipes is core's pipe cap.
+	maxPipes int64
 	// streamWindow and connectionWindow are the HTTP/2 windows, in bytes.
 	streamWindow, connectionWindow int
 }
@@ -130,6 +132,14 @@ func (c envoyConfig) coreCluster() map[string]any {
 		"name":            "core",
 		"type":            "STATIC",
 		"connect_timeout": "1s",
+		// Envoy's defaults (1,024) would answer overflow with an untyped 503
+		// before core could refuse with CAPACITY. Refused opens are streams
+		// too, so leave room above the cap.
+		"circuit_breakers": map[string]any{"thresholds": []any{map[string]any{
+			"max_requests":         2 * c.maxPipes,
+			"max_pending_requests": 2 * c.maxPipes,
+			"max_connections":      2 * c.maxPipes,
+		}}},
 		"load_assignment": loadAssignment("core", c.coreHost, c.corePort),
 		"typed_extension_protocol_options": map[string]any{
 			"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": map[string]any{

@@ -157,6 +157,7 @@ func newTestManager(t *testing.T) *Manager {
 		Dir:             t.TempDir(),
 		EnvoyPath:       "envoy",
 		CoreAddress:     "127.0.0.1:9100",
+		MaxPipes:        200,
 		PerReplica:      2,
 		DiscoveryURL:    "https://edge.example.com/v1/tunnels/" + testConnector,
 		DiscoveryClient: http.DefaultClient,
@@ -212,8 +213,20 @@ func TestApplyWritesOneListenerAndClusterPerReplica(t *testing.T) {
 	if len(listeners) != 1 || string(before) != string(after) {
 		t.Fatalf("remaining listener changed:\n%s\n%s", before, after)
 	}
+	// The removed replica's cluster outlives its listener by one poll, so
+	// Envoy never sees a listener naming a cluster it lacks.
+	if n := len(readResources(t, m.envoy.path(clustersFile))); n != 2 {
+		t.Fatalf("%d clusters right after scale-down, want the stale one kept", n)
+	}
+	if err := m.apply(Discovery{
+		Cell:     "0",
+		Address:  "tunnels.traversal.com:443",
+		Replicas: []string{"t-envoy-0.tunnels.traversal.com"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if n := len(readResources(t, m.envoy.path(clustersFile))); n != 1 {
-		t.Fatalf("%d clusters after scale-down", n)
+		t.Fatalf("%d clusters after the next poll, want the stale one pruned", n)
 	}
 }
 
