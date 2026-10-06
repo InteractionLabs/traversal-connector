@@ -59,10 +59,28 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # or setting it back to false, keeps the connector on HTTP requests only.
 rawPipes:
   enabled: false           # TRAVERSAL_RAW_PIPES
-  # Both provided by Traversal. The keys verify capabilities and are never
-  # sent over the tunnel.
+  # The Traversal environment whose capability signer this connector trusts.
+  # It selects that environment's keys in trustedKeys and the issuer,
+  # traversal-raw-tunnel/<environment>.
+  environment: ""
+  # Overrides the issuer derived from environment. Leave blank.
   capabilityIssuer: ""     # TRAVERSAL_CAPABILITY_ISSUER
-  capabilityKeysPEM: ""    # TRAVERSAL_CAPABILITY_KEYS
+  # Each environment's capability-signer public keys, identified by kid: the
+  # bare KMS key ID, not its ARN or an alias. Rendered as
+  # TRAVERSAL_CAPABILITY_KEYS; the keys only verify capabilities and are never
+  # sent over the tunnel. Traversal ships them with each chart release: do not
+  # override them, or upgrades stop delivering key rotations. See "Raw pipe
+  # signing keys" in the README.
+  trustedKeys:
+    dev:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    staging:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    prod:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
   maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
   tunnelsPerReplica: ""    # TRAVERSAL_TUNNELS_PER_REPLICA (default 2)
   # host:port that replaces the tunnels entry point, e.g. a PrivateLink

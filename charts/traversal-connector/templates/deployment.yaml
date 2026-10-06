@@ -6,6 +6,9 @@
 {{- if or (.Values.redactionRules | default "") ($oldRedaction.enabled | default false) ($oldRedaction.rulesContent | default "") ($oldRedaction.existingConfigMap | default "") ($oldRedaction.existingSecret | default "") -}}
 {{- fail "Local redaction configuration is no longer supported; publish rules remotely and set configUpdates.enabled=true before upgrading." -}}
 {{- end -}}
+{{- if .Values.rawPipes.capabilityKeysPEM | default "" -}}
+{{- fail "rawPipes.capabilityKeysPEM is no longer supported; the chart ships each environment's keys in rawPipes.trustedKeys, selected by rawPipes.environment." -}}
+{{- end -}}
 {{- if not (kindIs "bool" .Values.configUpdates.enabled) -}}
 {{- fail "configUpdates.enabled must be a boolean" -}}
 {{- end -}}
@@ -193,9 +196,9 @@ spec:
             - name: TRAVERSAL_RAW_PIPES
               value: "enabled"
             - name: TRAVERSAL_CAPABILITY_ISSUER
-              value: {{ required "rawPipes.capabilityIssuer is required when rawPipes.enabled" .Values.rawPipes.capabilityIssuer | quote }}
+              value: {{ .Values.rawPipes.capabilityIssuer | default (printf "traversal-raw-tunnel/%s" .Values.rawPipes.environment) | quote }}
             - name: TRAVERSAL_CAPABILITY_KEYS
-              value: {{ required "rawPipes.capabilityKeysPEM is required when rawPipes.enabled" .Values.rawPipes.capabilityKeysPEM | quote }}
+              value: {{ include "traversal-connector.capabilityKeys" . | trim | b64enc | quote }}
             {{- with .Values.rawPipes.maxPipes }}
             - name: TRAVERSAL_RAW_PIPES_MAX
               value: {{ . | quote }}

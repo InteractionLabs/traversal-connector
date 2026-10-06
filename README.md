@@ -498,6 +498,47 @@ Regardless of rules, `connector.response_content_encoding_total` reports the
 coding of every upstream response, so a deployment can see which of its
 upstreams would be affected before configuring anything.
 
+### Raw pipes (preview)
+
+Raw pipes let Traversal reach databases, `kubectl exec`, git, and other
+non-HTTP destinations through the connector. Each pipe carries a
+Traversal-signed capability that the connector verifies before it dials.
+Raw pipes are off by default; the Helm chart's `rawPipes` block turns them on.
+
+#### Raw pipe signing keys
+
+Each Traversal environment signs capabilities with its own AWS KMS key. The
+Helm chart packages every environment's public keys under
+`rawPipes.trustedKeys.<environment>`, and `rawPipes.environment` selects one
+set. Each key is a PEM `PUBLIC KEY` block, converted from the DER that KMS
+`GetPublicKey` returns, and its kid is the bare KMS key ID, not the key's ARN
+or an alias. The chart renders the selected keys into
+`TRAVERSAL_CAPABILITY_KEYS` and derives the issuer,
+`traversal-raw-tunnel/<environment>`. It refuses to render when the selected
+environment has no current key, when `next` has only one of `kid` and
+`publicKeyPEM`, when `next.kid` reuses `current.kid`, when a kid is an ARN or
+alias, or when a key is not a PEM `PUBLIC KEY` block. The connector refuses
+capabilities from any other issuer or key with `unknown_key` or
+`invalid_capability`.
+
+A rotation needs chart upgrades only, never a new connector binary:
+
+1. Create the next KMS key, ship its public key as `next` in a chart release,
+   and add it as the next key on the signer. Both sides now trust both keys.
+2. Once connectors run that release, switch the signer to the next key.
+3. After the longest capability lifetime, ship a chart release that promotes
+   the next key to `current` and drops the old one.
+
+Rotations reach a connector only through the chart's own `trustedKeys`, so do
+not override them in your values, and do not upgrade with
+`helm upgrade --reuse-values`, which keeps the previous release's keys; use
+`--reset-then-reuse-values` to keep your overrides and take the new keys. At
+startup the connector logs the key ids it trusts ("trusting capability keys")
+and counts them in `connector.raw_key_loads_total`, so you can confirm the
+fleet has the next key before the signer switches to it. Removing a key takes
+effect only as each connector rolls out the new chart, so revoke a compromised
+key on the signer first.
+
 ### Telemetry (OpenTelemetry)
 
 The connector emits OpenTelemetry traces, metrics, and logs. Telemetry is the

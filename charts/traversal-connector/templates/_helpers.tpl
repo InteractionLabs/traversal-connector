@@ -95,3 +95,47 @@ https://telemetry.traversal.com:4317
 https://telemetry.traversal.com/v1/{{ .signal }}
 {{- end -}}
 {{- end -}}
+
+{{- /* The capability public keys this chart packages for rawPipes.environment,
+       validated and rendered as the PEM bundle TRAVERSAL_CAPABILITY_KEYS takes:
+       each PUBLIC KEY block names its kid in a Key-ID header. A rollout ships
+       the next key beside the current one, so the template refuses anything
+       that would break one: a next key with only one half set, a next kid that
+       reuses the current one, a kid that is a KMS ARN or alias rather than the
+       bare key ID, or a key that is not a PEM PUBLIC KEY block. */}}
+{{- define "traversal-connector.capabilityKeys" -}}
+{{- $env := .Values.rawPipes.environment | default "" -}}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" $env) -}}
+{{- fail "rawPipes.environment is required when rawPipes.enabled and must be a lowercase Traversal environment name, such as prod" -}}
+{{- end -}}
+{{- $keys := get (.Values.rawPipes.trustedKeys | default dict) $env | default dict -}}
+{{- $current := $keys.current | default dict -}}
+{{- $next := $keys.next | default dict -}}
+{{- if not (and $current.kid $current.publicKeyPEM) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.current needs a kid and publicKeyPEM; this chart packages no capability key for that environment yet" $env) -}}
+{{- end -}}
+{{- if ne (empty $next.kid) (empty $next.publicKeyPEM) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.next needs both kid and publicKeyPEM, or neither" $env) -}}
+{{- end -}}
+{{- if and $next.kid (eq $next.kid $current.kid) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.next.kid must differ from current.kid" $env) -}}
+{{- end -}}
+{{- range $slot, $key := dict "current" $current "next" $next -}}
+{{- if $key.kid -}}
+{{- if or (hasPrefix "arn:" $key.kid) (hasPrefix "alias/" $key.kid) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.%s.kid must be the bare KMS key ID, not an ARN or alias" $env $slot) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" $key.kid) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.%s.kid must be letters, digits, '.', '_' or '-'" $env $slot) -}}
+{{- end -}}
+{{- $pem := $key.publicKeyPEM | trim -}}
+{{- if not (regexMatch "^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END PUBLIC KEY-----$" $pem) -}}
+{{- fail (printf "rawPipes.trustedKeys.%s.%s.publicKeyPEM must be one PEM PUBLIC KEY block" $env $slot) -}}
+{{- end }}
+-----BEGIN PUBLIC KEY-----
+Key-ID: {{ $key.kid }}
+
+{{ $pem | trimPrefix "-----BEGIN PUBLIC KEY-----" | trim }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
