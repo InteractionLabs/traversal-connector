@@ -117,12 +117,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: connector
           image: "{{ .Values.image.repository }}:{{ include "traversal-connector.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
           securityContext:
-            runAsNonRoot: true
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: ENV_NAME
               value: {{ required "envName is required" .Values.envName | quote }}
@@ -283,6 +289,9 @@ spec:
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
           {{- end }}
+          volumeMounts:
+            - name: connector-tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
         {{- if $sidecarEnabled }}
@@ -368,6 +377,8 @@ spec:
                   key: ca.crt
                   optional: true
           volumeMounts:
+            - name: telemetry-sidecar-tmp
+              mountPath: /tmp
             - name: telemetry-sidecar-config
               mountPath: /etc/telemetry-sidecar
               readOnly: true
@@ -376,6 +387,10 @@ spec:
           resources:
             {{- toYaml $sidecar.resources | nindent 12 }}
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities:
               drop:
@@ -383,16 +398,18 @@ spec:
             seccompProfile:
               type: RuntimeDefault
         {{- end }}
-      {{- if $sidecarEnabled }}
       volumes:
+        - name: connector-tmp
+          emptyDir: {}
         {{- if $sidecarEnabled }}
+        - name: telemetry-sidecar-tmp
+          emptyDir: {}
         - name: telemetry-sidecar-data
           emptyDir: {}
         - name: telemetry-sidecar-config
           configMap:
             name: {{ include "traversal-connector.fullname" . }}-telemetry-sidecar
         {{- end }}
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
