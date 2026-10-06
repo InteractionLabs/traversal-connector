@@ -83,6 +83,25 @@ func CanonicalAuthority(host string, port uint16) string {
 	return net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10))
 }
 
+// SplitAuthority parses a canonical host:port, the form CanonicalAuthority
+// returns. The host must already be canonical and the port must be decimal
+// 1-65535 without a sign or leading zeros, so the authority checked is the one
+// dialed.
+func SplitAuthority(authority string) (host string, port uint16, ok bool) {
+	host, portText, err := net.SplitHostPort(authority)
+	if err != nil {
+		return "", 0, false
+	}
+	if canonical, err := CanonicalHost(host); err != nil || canonical != host {
+		return "", 0, false
+	}
+	p, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || p == 0 || strconv.FormatUint(p, 10) != portText {
+		return "", 0, false
+	}
+	return host, uint16(p), true
+}
+
 // AbsoluteHost returns host in the form a resolver must be given. Canonical
 // hostnames are relative, so this adds a trailing dot and the lookup cannot be
 // rewritten by a search list. IP literals are unchanged. host must already be

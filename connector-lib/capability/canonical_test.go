@@ -78,6 +78,50 @@ func TestCanonicalAuthority(t *testing.T) {
 	}
 }
 
+func TestSplitAuthority(t *testing.T) {
+	type split struct {
+		host string
+		port uint16
+	}
+	for _, tc := range []struct {
+		authority string
+		want      *split // nil when authority is invalid
+	}{
+		{"db.internal:5432", &split{"db.internal", 5432}},
+		{"10.0.0.1:1", &split{"10.0.0.1", 1}},
+		{"[2001:db8::1]:65535", &split{"2001:db8::1", 65535}},
+		{"db.internal", nil},
+		{"db.internal:", nil},
+		{"db.internal:0", nil},
+		{"db.internal:05432", nil},
+		{"db.internal:+5432", nil},
+		{"db.internal:65536", nil},
+		{"db.internal:http", nil},
+		{"DB.internal:5432", nil},
+		{"db.internal.:5432", nil},
+		{"[2001:DB8::1]:5432", nil},
+		{"[::ffff:10.0.0.1]:5432", nil},
+		{"[fe80::1%eth0]:5432", nil},
+		{"2001:db8::1:5432", nil},
+		{":5432", nil},
+	} {
+		host, port, ok := capability.SplitAuthority(tc.authority)
+		if tc.want == nil {
+			if ok {
+				t.Errorf("SplitAuthority(%q) = %q, %d, want invalid", tc.authority, host, port)
+			}
+			continue
+		}
+		if !ok || host != tc.want.host || port != tc.want.port {
+			t.Errorf("SplitAuthority(%q) = %q, %d, %v, want %q, %d",
+				tc.authority, host, port, ok, tc.want.host, tc.want.port)
+		}
+		if got := capability.CanonicalAuthority(host, port); got != tc.authority {
+			t.Errorf("CanonicalAuthority(SplitAuthority(%q)) = %q", tc.authority, got)
+		}
+	}
+}
+
 func TestAbsoluteHost(t *testing.T) {
 	for host, want := range map[string]string{
 		"db.internal": "db.internal.",
