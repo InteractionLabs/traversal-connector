@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":separateMultipleMajorReleases"
+  ],
+  "enabledManagers": ["gomod", "dockerfile", "github-actions"],
+  "minimumReleaseAge": "7 days",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
+  "dependencyDashboard": true,
+  "automerge": false,
+  "prConcurrentLimit": 1,
+  "prHourlyLimit": 1,
+  "postUpdateOptions": ["gomodTidy"],
+  "constraintsFiltering": "strict",
+  "vulnerabilityAlerts": {
+    "enabled": false
+  },
+  "osvVulnerabilityAlerts": false,
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "matchPackageNames": [
+        "github.com/google/cel-go",
+        "github.com/quic-go/quic-go",
+        "golang.org/x/crypto",
+        "golang.org/x/text"
+      ],
+      "enabled": true
+    },
+    {
+      "matchPackageNames": ["github.com/google/cel-go"],
+      "allowedVersions": ">=0.30.0"
+    },
+    {
+      "groupName": "OpenTelemetry v1 core",
+      "matchPackageNames": [
+        "go.opentelemetry.io/otel",
+        "go.opentelemetry.io/otel/metric",
+        "go.opentelemetry.io/otel/trace",
+        "go.opentelemetry.io/otel/sdk",
+        "go.opentelemetry.io/otel/sdk/metric"
+      ]
+    }
+  ]
+}
