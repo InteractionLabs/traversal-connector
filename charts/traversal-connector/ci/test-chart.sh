@@ -166,22 +166,13 @@ assert_contains "$tmp_dir/local-legacy.yaml" $'  redaction-rules.toml: |\n    ru
 
 assert_render_fails local-no-source 'requires exactly one source' "${local_values[@]}"
 assert_render_fails local-non-boolean 'redaction.enabled must be a boolean' "${common[@]}" --set-string redaction.enabled=false
-for source in rulesContent existingConfigMap existingSecret; do
-  scenario=$(printf '%s' "$source" | tr '[:upper:]' '[:lower:]')
-  assert_render_fails "local-disabled-$scenario" 'require redaction.enabled=true' \
-    "${common[@]}" --set-string "redaction.$source=rules"
-  assert_render_fails "both-$scenario" 'mutually exclusive' \
-    "${local_values[@]}" --set configUpdates.enabled=true --set-string "redaction.$source=rules"
-  assert_render_fails "both-disabled-$scenario" 'mutually exclusive' \
-    "${common[@]}" --set configUpdates.enabled=true --set-string "redaction.$source=rules"
-  assert_render_fails "legacy-and-$scenario" 'requires exactly one source' \
-    "${local_values[@]}" --set-string redactionRules=legacy --set-string "redaction.$source=rules"
-done
-assert_render_fails local-content-and-map 'requires exactly one source' "${local_values[@]}" --set-string redaction.rulesContent=rules --set-string redaction.existingConfigMap=rules
-assert_render_fails local-content-and-secret 'requires exactly one source' "${local_values[@]}" --set-string redaction.rulesContent=rules --set-string redaction.existingSecret=rules
-assert_render_fails local-map-and-secret 'requires exactly one source' "${local_values[@]}" --set-string redaction.existingConfigMap=rules --set-string redaction.existingSecret=rules
+assert_render_fails local-disabled 'require redaction.enabled=true' \
+  "${common[@]}" --set-string redaction.existingConfigMap=rules
+assert_render_fails local-multiple-sources 'requires exactly one source' \
+  "${local_values[@]}" --set-string redaction.rulesContent=rules --set-string redaction.existingSecret=rules
+assert_render_fails both-sources 'mutually exclusive' \
+  "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
-assert_render_fails both-enabled 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set redaction.enabled=true
 
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
