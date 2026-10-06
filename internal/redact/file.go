@@ -1,7 +1,6 @@
 package redact
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -46,9 +45,23 @@ func (l *FileLoader) refresh() error {
 		return nil
 	}
 	var rules RulesFile
-	if err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&rules); err != nil {
+	if err := toml.Unmarshal(data, &rules); err != nil {
 		// Parser and compiler diagnostics can contain customer rule contents.
-		return errors.New("invalid local redaction TOML or unknown fields")
+		return errors.New("invalid local redaction TOML")
+	}
+	if rules.Rules == nil {
+		// An OTA-only document must not silently become an empty local ruleset.
+		var doc map[string]any
+		if err := toml.Unmarshal(data, &doc); err != nil {
+			return errors.New("invalid local redaction TOML")
+		}
+		_, versioned := doc["schema_version"]
+		remote, _ := doc["redaction"].(map[string]any)
+		if _, hasRules := remote["rules"]; versioned && hasRules {
+			return errors.New(
+				"OTA document supplied as local rules; use top-level rules instead of redaction.rules",
+			)
+		}
 	}
 	if err := l.redactor.Update(&rules); err != nil {
 		return errors.New(

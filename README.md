@@ -383,10 +383,10 @@ pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
 ```
 
-The optional `version` string is metadata. Unknown TOML fields are rejected,
-including the OTA document wrapper. Local files retain the legacy rule handling:
-unsupported rule types are logged and skipped; field filters on `regex` rules
-are ignored with a warning.
+The optional `version` string is metadata. Unknown TOML fields are ignored.
+OTA documents without top-level local rules are rejected. Local files retain
+the legacy rule handling: unsupported rule types are logged and skipped;
+field filters on `regex` rules are ignored with a warning.
 
 The initial rules load completes before any tunnels open. Changed file contents
 are compiled and applied atomically; unchanged content is not recompiled.
