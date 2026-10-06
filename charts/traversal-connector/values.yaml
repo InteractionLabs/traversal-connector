@@ -168,6 +168,25 @@ probes:
     periodSeconds: 10
 
 # ─── Pod / scheduling ────────────────────────────────────────────────────────
+podSecurityContext:
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# The connector needs no writable root filesystem or Linux capabilities.
+# The telemetry sidecar has its own container security context.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
 serviceAccount:
   create: true
   name: ""
