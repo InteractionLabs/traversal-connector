@@ -339,13 +339,13 @@ func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
 	if err := checkShape(c); err != nil {
 		return err
 	}
-	switch {
-	case c.Issuer != v.issuer:
+	if c.Issuer != v.issuer {
 		return fail(CodeWrongIssuer, "unexpected iss")
-	case c.Audience != Audience:
-		return fail(CodeWrongAudience, "unexpected aud")
-	case c.ExpiresAt-c.IssuedAt > int64(MaxLifetime/time.Second):
-		return fail(CodeLifetimeTooLong, "exp - iat exceeds the maximum lifetime")
+	}
+	if err := checkTerms(c); err != nil {
+		return err
+	}
+	switch {
 	case now.Add(MaxClockSkew).Before(time.Unix(c.IssuedAt, 0)):
 		return fail(CodeNotYetValid, "iat is in the future")
 	case !now.Add(-MaxClockSkew).Before(time.Unix(c.ExpiresAt, 0)):
@@ -371,6 +371,29 @@ func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
 	}
 	if mode, ok := ModeClaim(want.Mode); !ok || c.Mode != mode {
 		return fail(CodeUnsupportedMode, "mode is not authorized")
+	}
+	return nil
+}
+
+// CheckShape returns the *Error any Verifier would reject c with on the claims
+// alone, before issuer, time, or caller checks: an empty or oversized string
+// claim, a non-canonical host, a zero port, an inverted validity window, the
+// wrong audience, or a lifetime over MaxLifetime. An issuer calls it to refuse
+// claims before signing them.
+func (c *Claims) CheckShape() error {
+	if err := checkShape(c); err != nil {
+		return err
+	}
+	return checkTerms(c)
+}
+
+// checkTerms rejects claims with the wrong audience or too long a lifetime.
+func checkTerms(c *Claims) error {
+	if c.Audience != Audience {
+		return fail(CodeWrongAudience, "unexpected aud")
+	}
+	if c.ExpiresAt-c.IssuedAt > int64(MaxLifetime/time.Second) {
+		return fail(CodeLifetimeTooLong, "exp - iat exceeds the maximum lifetime")
 	}
 	return nil
 }
