@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"strings"
 	"testing"
+	"time"
 )
 
 func publicKeyBlock(t *testing.T, kid string) (string, *ecdsa.PublicKey) {
@@ -93,6 +94,29 @@ func TestLoadRawPipes(t *testing.T) {
 		if !cfg.Enabled || cfg.MaxPipes != 50 || cfg.CapabilityKeys["prod-current"] == nil ||
 			cfg.Listen != rawPipesListen {
 			t.Fatalf("got %+v", cfg)
+		}
+	})
+	t.Run("pipe limits default to 4h and 15m idle", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		cfg, err := loadRawPipes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.MaxLifetime != 4*time.Hour || cfg.IdleTimeout != 15*time.Minute {
+			t.Fatalf("lifetime %s, idle %s", cfg.MaxLifetime, cfg.IdleTimeout)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", "0")
+		t.Setenv("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", "30m")
+		if cfg, err = loadRawPipes(); err != nil || cfg.MaxLifetime != 0 ||
+			cfg.IdleTimeout != 30*time.Minute {
+			t.Fatalf("overrides: %+v, %v", cfg, err)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", "-1s")
+		if _, err := loadRawPipes(); err == nil {
+			t.Fatal("accepted a negative idle timeout")
 		}
 	})
 }

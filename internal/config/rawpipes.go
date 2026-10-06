@@ -15,6 +15,11 @@ import (
 
 const (
 	defaultRawPipesMax = 200
+	// Pipe limits (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT).
+	// They match the Traversal side's, so neither side ends a pipe the other
+	// would still keep.
+	defaultRawPipesMaxLifetime = 4 * time.Hour
+	defaultRawPipesIdleTimeout = 15 * time.Minute
 	// rawPipesListen is where connector-core accepts pipes from the
 	// connector's own Envoy. Loopback only: nothing outside the pod reaches
 	// it, and the dial policy refuses loopback, so no pipe reaches it either.
@@ -34,8 +39,12 @@ type RawPipes struct {
 	// MaxPipes is the most pipes open at once (TRAVERSAL_RAW_PIPES_MAX).
 	MaxPipes int64
 	// MaxLifetime, if positive, aborts a pipe open this long
-	// (TRAVERSAL_RAW_PIPES_MAX_LIFETIME). Zero means no cap.
+	// (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, default 4h). Zero means no cap.
 	MaxLifetime time.Duration
+	// IdleTimeout, if positive, aborts a pipe that has moved no bytes either
+	// way for this long (TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT, default 15m). Zero
+	// means no cap.
+	IdleTimeout time.Duration
 	// CapabilityIssuer is the iss claim capabilities must carry
 	// (TRAVERSAL_CAPABILITY_ISSUER).
 	CapabilityIssuer string
@@ -57,13 +66,20 @@ func loadRawPipes() (RawPipes, error) {
 			"TRAVERSAL_RAW_PIPES must be enabled or disabled, got %q", mode)
 	}
 	cfg := RawPipes{
-		Enabled:     true,
-		Listen:      rawPipesListen,
-		MaxPipes:    env.GetEnvInt64("TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax),
-		MaxLifetime: env.GetEnvDuration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 0),
+		Enabled:  true,
+		Listen:   rawPipesListen,
+		MaxPipes: env.GetEnvInt64("TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax),
+		MaxLifetime: env.GetEnvDuration(
+			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME", defaultRawPipesMaxLifetime),
+		IdleTimeout: env.GetEnvDuration(
+			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", defaultRawPipesIdleTimeout),
 	}
 	if cfg.MaxPipes <= 0 {
 		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_MAX must be positive")
+	}
+	if cfg.MaxLifetime < 0 || cfg.IdleTimeout < 0 {
+		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_MAX_LIFETIME and " +
+			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT must not be negative")
 	}
 	issuer := env.GetEnvOptionalString("TRAVERSAL_CAPABILITY_ISSUER")
 	if issuer == nil {

@@ -50,6 +50,7 @@ type harnessConfig struct {
 	maxPipes    int64
 	inspect     func(string, uint16) bool
 	maxLifetime time.Duration
+	idleTimeout time.Duration
 }
 
 func newHarness(t *testing.T, hc harnessConfig) *harness {
@@ -96,6 +97,7 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 		Policy:      policy,
 		MaxPipes:    hc.maxPipes,
 		MaxLifetime: hc.maxLifetime,
+		IdleTimeout: hc.idleTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -501,6 +503,49 @@ func TestMaxLifetimeAbortsPipe(t *testing.T) {
 	_, err := io.ReadAll(p.resp.Body)
 	if err == nil {
 		t.Fatal("a pipe cut at its lifetime cap looked like a clean close")
+	}
+}
+
+func TestIdleTimeoutAbortsQuietPipe(t *testing.T) {
+	h := newHarness(t, harnessConfig{idleTimeout: 200 * time.Millisecond})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	start := time.Now()
+	_, err := io.ReadAll(p.resp.Body)
+	if err == nil {
+		t.Fatal("a pipe cut for idling looked like a clean close")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("an idle pipe lasted %s", waited)
+	}
+}
+
+// Bytes in either direction keep a pipe alive past its idle timeout.
+func TestIdleTimeoutSparesBusyPipe(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	h := newHarness(t, harnessConfig{idleTimeout: idle})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	buf := make([]byte, 1)
+	for i := range 8 { // 8 × idle/3 spans well over the timeout
+		time.Sleep(idle / 3)
+		if i%2 == 0 {
+			if _, err := p.body.Write([]byte("c")); err != nil {
+				t.Fatalf("caller write %d: %v", i, err)
+			}
+			if _, err := io.ReadFull(dst, buf); err != nil {
+				t.Fatalf("destination read %d: %v", i, err)
+			}
+		} else {
+			if _, err := dst.Write([]byte("d")); err != nil {
+				t.Fatalf("destination write %d: %v", i, err)
+			}
+			if _, err := io.ReadFull(p.resp.Body, buf); err != nil {
+				t.Fatalf("caller read %d: %v", i, err)
+			}
+		}
 	}
 }
 

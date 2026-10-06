@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -57,6 +58,9 @@ type Config struct {
 	// MaxLifetime, if set, ends a pipe that has been open this long. The
 	// pipe is aborted, never closed cleanly, so the caller knows to reconnect.
 	MaxLifetime time.Duration
+	// IdleTimeout, if set, ends a pipe that has moved no bytes in either
+	// direction for this long, aborted like MaxLifetime.
+	IdleTimeout time.Duration
 }
 
 // Server serves pipes. Create one with New.
@@ -200,13 +204,11 @@ func (s *Server) serve(st *h2stream) {
 		abort(dst)
 		return
 	}
-	if s.cfg.MaxLifetime > 0 {
-		timer := time.AfterFunc(s.cfg.MaxLifetime, func() { st.Abort(); abort(dst) })
-		defer timer.Stop()
-	}
-	result := splice(st, dst)
-	if s.cfg.MaxLifetime > 0 && time.Since(start) >= s.cfg.MaxLifetime {
-		result.outcome = outcomeMaxLifetime
+	limits := startLimits(s.cfg.MaxLifetime, s.cfg.IdleTimeout, func() { st.Abort(); abort(dst) })
+	result := splice(st, dst, limits.touch)
+	limits.stop()
+	if reached := limits.reached(); reached != "" {
+		result.outcome = reached
 	}
 	upstream := route.Addr.String()
 	if route.Proxy != nil {
@@ -229,6 +231,7 @@ const (
 	outcomeCallerAborted     outcome = "caller_aborted"
 	outcomeUpstreamAborted   outcome = "upstream_aborted"
 	outcomeMaxLifetime       outcome = "max_lifetime"
+	outcomeIdleTimeout       outcome = "idle_timeout"
 	outcomeTunnelUnavailable outcome = "tunnel_lost"
 )
 
@@ -238,14 +241,19 @@ type spliceResult struct {
 }
 
 // callerReader remembers whether reading the caller failed, so a copy error
-// can be told apart from a failed write to the destination.
+// can be told apart from a failed write to the destination. It reports every
+// byte read to touch.
 type callerReader struct {
 	st     *h2stream
+	touch  func()
 	failed bool
 }
 
 func (r *callerReader) Read(p []byte) (int, error) {
 	n, err := r.st.Read(p)
+	if n > 0 {
+		r.touch()
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		r.failed = true
 	}
@@ -256,12 +264,12 @@ func (r *callerReader) Read(p []byte) (int, error) {
 // the caller half-closes the destination and the destination's FIN becomes
 // END_STREAM; a reset on either side aborts the other, so neither mistakes a
 // failure for an end. Like TCP, the caller may keep sending after the
-// destination's FIN.
-func splice(st *h2stream, dst dialpolicy.Conn) spliceResult {
+// destination's FIN. touch is called whenever bytes move either way.
+func splice(st *h2stream, dst dialpolicy.Conn, touch func()) spliceResult {
 	var callerAborted, upstreamFailed atomic.Bool
 	callerDone := make(chan int64, 1)
 	go func() {
-		src := &callerReader{st: st}
+		src := &callerReader{st: st, touch: touch}
 		n, err := io.Copy(dst, src)
 		switch {
 		case err == nil:
@@ -285,6 +293,7 @@ func splice(st *h2stream, dst dialpolicy.Conn) spliceResult {
 	for {
 		n, err := dst.Read(buf)
 		if n > 0 {
+			touch()
 			if _, werr := st.Write(buf[:n]); werr != nil {
 				result.outcome = outcomeCallerAborted
 				if errors.Is(werr, errConnClosed) {
@@ -318,6 +327,71 @@ func splice(st *h2stream, dst dialpolicy.Conn) spliceResult {
 		result.outcome = outcomeCallerAborted
 	}
 	return result
+}
+
+// limits ends a pipe at its lifetime cap or after it has idled too long,
+// whichever comes first. Either one aborts the pipe through end.
+type limits struct {
+	start   time.Time
+	idle    time.Duration
+	end     func()
+	last    atomic.Int64 // when bytes last moved, as time since start
+	hit     atomic.Pointer[outcome]
+	stopped atomic.Bool
+	timers  []*time.Timer
+}
+
+// startLimits starts the timers for the limits that are set. A zero
+// lifetime or idle timeout means that limit does not apply.
+func startLimits(lifetime, idle time.Duration, end func()) *limits {
+	l := &limits{start: time.Now(), idle: idle, end: end}
+	if lifetime > 0 {
+		l.timers = append(l.timers, time.AfterFunc(lifetime, func() {
+			l.expire(outcomeMaxLifetime)
+		}))
+	}
+	if idle > 0 {
+		// Armed only once assigned, so the callback always sees timer.
+		var timer *time.Timer
+		timer = time.AfterFunc(math.MaxInt64, func() {
+			quiet := time.Since(l.start) - time.Duration(l.last.Load())
+			if quiet < l.idle {
+				if !l.stopped.Load() {
+					timer.Reset(l.idle - quiet)
+				}
+				return
+			}
+			l.expire(outcomeIdleTimeout)
+		})
+		timer.Reset(idle)
+		l.timers = append(l.timers, timer)
+	}
+	return l
+}
+
+// touch records that bytes moved.
+func (l *limits) touch() { l.last.Store(int64(time.Since(l.start))) }
+
+func (l *limits) expire(o outcome) {
+	if !l.stopped.Load() && l.hit.CompareAndSwap(nil, &o) {
+		l.end()
+	}
+}
+
+// stop ends the timers once the pipe has ended.
+func (l *limits) stop() {
+	l.stopped.Store(true)
+	for _, t := range l.timers {
+		t.Stop()
+	}
+}
+
+// reached is the limit that ended the pipe, or "" if none did.
+func (l *limits) reached() outcome {
+	if o := l.hit.Load(); o != nil {
+		return *o
+	}
+	return ""
 }
 
 // splitAuthority parses a canonical host:port. The port must be canonical

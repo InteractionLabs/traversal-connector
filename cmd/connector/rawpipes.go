@@ -56,6 +56,7 @@ func startRawPipes(
 		Policy:      policy,
 		MaxPipes:    cfg.MaxPipes,
 		MaxLifetime: cfg.MaxLifetime,
+		IdleTimeout: cfg.IdleTimeout,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -73,7 +74,8 @@ func startRawPipes(
 		}
 	}()
 	slog.InfoContext(ctx, "raw pipes enabled",
-		"listen", cfg.Listen, "max_pipes", cfg.MaxPipes, "issuer", cfg.CapabilityIssuer)
+		"listen", cfg.Listen, "max_pipes", cfg.MaxPipes, "issuer", cfg.CapabilityIssuer,
+		"max_lifetime", cfg.MaxLifetime, "idle_timeout", cfg.IdleTimeout)
 	drain := func() {
 		server.Drain()
 		waitCtx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace)
