@@ -19,6 +19,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -267,5 +272,40 @@ func TestStatusFollowsTheTunnelGauge(t *testing.T) {
 	connected = "1"
 	if ready, why := m.Status(context.Background()); !ready {
 		t.Fatalf("one worker's tunnel up: %q", why)
+	}
+}
+
+// The tunnels gauge reads Envoy's tunnel gauges for the endpoint at each
+// collection.
+func TestTunnelsGaugeReportsEnvoysTunnels(t *testing.T) {
+	stats := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(
+			"downstream_reverse_connection.worker_0.cluster.tunnels.connected: 1\n" +
+				"downstream_reverse_connection.worker_1.cluster.tunnels.connected: 1\n" +
+				"downstream_reverse_connection.worker_1.cluster.other.connected: 5\n"))
+	}))
+	defer stats.Close()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	m := newTestManager(t, func(c *Config) { c.MeterProvider = provider })
+	m.admin = admin{base: stats.URL, client: stats.Client()}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var got []int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, metric := range sm.Metrics {
+			if metric.Name == telemetry.MetricRawTunnelsActive {
+				for _, dp := range metric.Data.(metricdata.Gauge[int64]).DataPoints {
+					got = append(got, dp.Value)
+				}
+			}
+		}
+	}
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("tunnels gauge %v, want [2]", got)
 	}
 }

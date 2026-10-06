@@ -30,6 +30,7 @@ const (
 // Raw pipe metric names. They follow traversal-connector#77's raw tunnel
 // names where the meaning is the same.
 const (
+	MetricRawTunnelsActive                = "connector.raw_tunnels_active"
 	MetricRawPipesActive                  = "connector.raw_pipes_active"
 	MetricRawOpensTotal                   = "connector.raw_opens_total"
 	MetricRawPipeClosesTotal              = "connector.raw_pipe_closes_total"

@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 )
 
 // TunnelPort is the port the connector dials its tunnel endpoint on, unless
@@ -66,6 +68,8 @@ type Config struct {
 	// whose network never lets a tunnel up becomes ready after it, so raw
 	// pipes cannot hold up the legacy transport. Zero means one minute.
 	ReadyGrace time.Duration
+	// MeterProvider records the tunnel metrics. Nil means the global one.
+	MeterProvider metric.MeterProvider
 }
 
 // Manager runs the connector's Envoy and reports on its tunnels.
@@ -127,7 +131,7 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.ReadyGrace == 0 {
 		cfg.ReadyGrace = time.Minute
 	}
-	return &Manager{
+	m := &Manager{
 		cfg: cfg,
 		envoy: envoyConfig{
 			identity:         cfg.Identity,
@@ -141,7 +145,11 @@ func New(cfg Config) (*Manager, error) {
 		},
 		admin: newAdmin(cfg.AdminPort),
 		start: time.Now(),
-	}, nil
+	}
+	if err := m.registerMetrics(cfg.MeterProvider); err != nil {
+		return nil, fmt.Errorf("tunnels: metrics: %w", err)
+	}
+	return m, nil
 }
 
 // Run writes Envoy's configuration and supervises Envoy until ctx is done.
