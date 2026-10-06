@@ -12,6 +12,44 @@ The telemetry sidecar retains its own container security context. When
 overriding user or group IDs, keep the writable volumes accessible to both
 containers.
 
+## Redaction configuration
+
+Choose one source, or leave both disabled to run without redaction.
+Local sources and `configUpdates.enabled: true` are mutually exclusive.
+
+For remote (S3-backed OTA) configuration, the config document should be published
+before enabling polling:
+
+```yaml
+configUpdates:
+  enabled: true
+  refreshInterval: "30s"
+```
+
+For a local file, provide inline TOML that the chart renders into a ConfigMap:
+
+```yaml
+configUpdates:
+  enabled: false
+redaction:
+  enabled: true
+  reloadInterval: "10s"
+  rulesContent: |
+    version = "1"
+    [[rules]]
+    name = "token"
+    type = "regex"
+    pattern = 'secret'
+    replacement = "[REDACTED]"
+```
+
+Alternatively, leave `rulesContent` empty and set exactly one of
+`redaction.existingConfigMap` or `redaction.existingSecret` to a resource in the
+release namespace containing the key `redaction-rules.toml`.
+
+See the [connector redaction documentation](../../README.md#redaction) for both
+TOML formats, validation, and switching sources.
+
 ## TLS failures after restarting a connector
 
 An existing tunnel can survive while new connections fail certificate

@@ -345,7 +345,64 @@ HTTP_PROXY=http://proxy.corp.example.com:3128
 NO_PROXY=.corp.example.com,10.0.0.0/8
 ```
 
-### Redaction via remote configuration
+### Redaction
+
+Choose either a local TOML rules file or S3-backed remote (OTA) configuration.
+The two sources are mutually exclusive: setting `REDACTION_RULES_FILE` together
+with `TRAVERSAL_CONFIG_ENABLED=true` fails startup. Helm also rejects combining
+local redaction sources with `configUpdates.enabled: true`.
+If neither source is enabled, the connector runs without redaction.
+There is no automatic fallback between sources.
+
+#### Local-file configuration
+
+Set `REDACTION_RULES_FILE` to a readable file inside the connector container.
+Leave `TRAVERSAL_CONFIG_ENABLED` unset or `false`; no remote config is fetched.
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDACTION_RULES_FILE` | (none) | Path to the local TOML rules file. Startup fails if the file cannot be read, parsed, or compiled. |
+| `REDACTION_RELOAD_INTERVAL` | `10s` | Positive duration between local-file checks. Used only when a local file is configured. |
+
+Local files use top-level `default_replacement` and `[[rules]]` tables:
+
+```toml
+version = "1"
+default_replacement = "[REDACTED]"
+
+[[rules]]
+name = "ssn"
+type = "regex"
+pattern = '\b\d{3}-\d{2}-(\d{4})\b'
+replacement = "***-**-$1"
+
+[[rules]]
+name = "email"
+type = "regex-structured-data"
+pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
+redact_fields = ["body|message"]
+```
+
+The optional `version` string is metadata. Unknown TOML fields are ignored.
+OTA documents without top-level local rules are rejected. Local files retain
+the legacy rule handling: unsupported rule types are logged and skipped;
+field filters on `regex` rules are ignored with a warning.
+
+The initial rules load completes before any tunnels open. Changed file contents
+are compiled and applied atomically; unchanged content is not recompiled.
+Reload errors retain the last-known-good rules. After three consecutive reload
+failures, the connector exits; a successful read resets the failure count.
+To disable redaction without changing the selected source, replace the file
+with `rules = []`.
+
+In Helm, set `redaction.enabled: true` and exactly one of
+`redaction.rulesContent`, `redaction.existingConfigMap`, or
+`redaction.existingSecret`. ConfigMaps and Secrets must contain the key
+`redaction-rules.toml`. The legacy `redactionRules` inline string also enables
+local redaction and cannot be combined with another source.
+See the [chart examples](charts/traversal-connector/README.md#redaction-configuration).
+
+#### Remote configuration (S3-backed OTA)
 
 Enable OTA redaction using `TRAVERSAL_CONFIG_ENABLED=true`
 (`configUpdates.enabled: true` in Helm). The URL is derived from the validated
@@ -380,7 +437,8 @@ rules = []
 ```
 
 If OTA configuration is not needed, leave `TRAVERSAL_CONFIG_ENABLED=false`
-(the default); no config fetch is performed.
+(the default); no remote config fetch is performed. Local-file redaction can
+still be enabled independently.
 
 Publish through `ingestion-configs` at
 `connector/<env>/<certificate-org-id>/<connector-id>.toml`; the gateway proxies
@@ -421,16 +479,17 @@ Rule field filters are only accepted for `regex-structured-data`. Metric
 `connector.config_staleness_seconds` expose active rules and time since the last
 successful fetch. Applied ETags are logged, not used as metric labels.
 
-**Breaking migration:** local rule files, `REDACTION_RULES_FILE`,
-`REDACTION_RELOAD_INTERVAL`, and the Helm `redaction` / `redactionRules` sources
-are removed. Active deprecated settings fail with a migration error instead of
-silently disabling redaction. Before upgrading, wrap the old rules in the
-versioned document above, publish it remotely, set `configUpdates.enabled: true`,
-and remove the old settings/mounts. Polling is opt-in; do not upgrade a
-redacting deployment without completing this migration.
-Replace the old `version` header with integer `schema_version = 1`, move
-`default_replacement` under `[redaction]`, and rename `[[rules]]` tables to
-`[[redaction.rules]]`.
+#### Switching configuration sources
+
+To switch from local files to OTA, replace the local `version` header with
+integer `schema_version = 1`, move `default_replacement` under `[redaction]`,
+and rename `[[rules]]` tables to `[[redaction.rules]]`. Publish the document,
+then remove the local settings and enable OTA in the same deployment update.
+To switch to local files, reverse this document conversion, mount the file,
+and disable OTA when enabling the local source. Source selection changes
+require restarting the connector; rule updates within a source are polled.
+
+#### Rule fields
 
 Each rule requires:
 - `name` — human-readable label used in log output.

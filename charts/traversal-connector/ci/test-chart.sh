@@ -136,12 +136,47 @@ assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${commo
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
 
-assert_render_fails local-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set redaction.enabled=true
-assert_render_fails legacy-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set-string redactionRules=old-rules
-assert_render_fails mounted-redaction 'Local redaction configuration is no longer supported' "${common[@]}" --set-string redaction.existingConfigMap=old-rules
+local_values=(-f "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false --set redaction.enabled=true)
+for source in rulesContent existingConfigMap existingSecret; do
+  scenario="local-$(printf '%s' "$source" | tr '[:upper:]' '[:lower:]')"
+  render "$scenario" "$fixtures/direct-export-values.yaml" \
+    --set configUpdates.enabled=false --set redaction.enabled=true \
+    --set-string "redaction.$source=local-rules" --set-string redaction.reloadInterval=2s
+  output="$tmp_dir/$scenario.yaml"
+  assert_contains "$output" $'            - name: REDACTION_RULES_FILE\n              value: /etc/traversal/redaction-rules.toml'
+  assert_contains "$output" $'            - name: REDACTION_RELOAD_INTERVAL\n              value: "2s"'
+  assert_contains "$output" $'              mountPath: /etc/traversal\n              readOnly: true'
+  assert_contains "$output" $'              - key: redaction-rules.toml\n                path: redaction-rules.toml'
+  assert_not_contains "$output" 'subPath:'
+  assert_not_contains "$output" 'TRAVERSAL_CONFIG_ENABLED'
+  if [[ "$source" == rulesContent ]]; then
+    assert_contains "$output" $'  redaction-rules.toml: |\n    local-rules'
+  else
+    assert_not_contains "$output" 'kind: ConfigMap'
+  fi
+done
+assert_contains "$tmp_dir/local-existingconfigmap.yaml" $'          configMap:\n            name: "local-rules"'
+assert_contains "$tmp_dir/local-existingsecret.yaml" $'          secret:\n            secretName: "local-rules"'
+assert_contains "$tmp_dir/local-rulescontent.yaml" $'          configMap:\n            name: "local-rulescontent-traversal-connector-redaction-rules"'
+
+render local-legacy "$fixtures/direct-export-values.yaml" \
+  --set configUpdates.enabled=false --set-string redactionRules='rules=[]'
+assert_contains "$tmp_dir/local-legacy.yaml" 'REDACTION_RULES_FILE'
+assert_contains "$tmp_dir/local-legacy.yaml" $'  redaction-rules.toml: |\n    rules=[]'
+
+assert_render_fails local-no-source 'requires exactly one source' "${local_values[@]}"
+assert_render_fails local-non-boolean 'redaction.enabled must be a boolean' "${common[@]}" --set-string redaction.enabled=false
+assert_render_fails local-disabled 'require redaction.enabled=true' \
+  "${common[@]}" --set-string redaction.existingConfigMap=rules
+assert_render_fails local-multiple-sources 'requires exactly one source' \
+  "${local_values[@]}" --set-string redaction.rulesContent=rules --set-string redaction.existingSecret=rules
+assert_render_fails both-sources 'mutually exclusive' \
+  "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
+assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
+assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'
 assert_render_fails config-boolean 'configUpdates.enabled must be a boolean' "${common[@]}" --set-string configUpdates.enabled=false
 assert_render_fails config-override 'configUpdates.endpoint is no longer supported' "${common[@]}" --set-string configUpdates.endpoint=https://other.example.invalid
 

@@ -49,18 +49,14 @@ func TestRemoteConfigInvalidIDAndInterval(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsDeprecatedRedactionSettings(t *testing.T) {
+func TestLoadRejectsConfigEndpointOverride(t *testing.T) {
 	t.Setenv("ENV_LEVEL", "development")
 	t.Setenv("ENV_NAME", "test")
 	t.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
 	t.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
-	for _, key := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL", "TRAVERSAL_CONFIG_ENDPOINT"} {
-		t.Run(key, func(t *testing.T) {
-			t.Setenv(key, "legacy")
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
-				t.Fatalf("expected migration error for %s, got %v", key, err)
-			}
-		})
+	t.Setenv("TRAVERSAL_CONFIG_ENDPOINT", "https://other.example.com/config")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TRAVERSAL_CONFIG_ENDPOINT") {
+		t.Fatalf("expected endpoint override error, got %v", err)
 	}
 }
 

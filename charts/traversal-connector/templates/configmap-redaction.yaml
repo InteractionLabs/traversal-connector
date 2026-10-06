@@ -1,0 +1,12 @@
+{{- $enabled := include "traversal-connector.redactionEnabled" . -}}
+{{- if and $enabled (or .Values.redaction.rulesContent .Values.redactionRules) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "traversal-connector.fullname" . }}-redaction-rules
+  labels:
+    {{- include "traversal-connector.labels" . | nindent 4 }}
+data:
+  redaction-rules.toml: |
+    {{- default .Values.redactionRules .Values.redaction.rulesContent | nindent 4 }}
+{{- end }}

@@ -141,12 +141,28 @@ otel:
 
 # ─── Remote configuration (opt-in) ──────────────────────────────────────────
 # Uses the controller origin and /v1/config/<connectorID>; no endpoint override.
-# Publish migrated rules before enabling; no local-file source is supported.
+# Publish a valid config before enabling. Mutually exclusive with local redaction.
 # When enabled, startup requires a valid document (including explicit rules=[]);
 # a missing config or any other initial fetch failure blocks startup.
 configUpdates:
   enabled: false
   refreshInterval: "30s"
+
+# ─── Local-file redaction (opt-in) ───────────────────────────────────────────
+# Set enabled: true and exactly one source. Cannot be combined with configUpdates.
+# See the repository README for the local TOML format.
+redaction:
+  enabled: false
+  reloadInterval: "10s"
+  # Inline TOML; the chart creates a ConfigMap.
+  rulesContent: ""
+  # An existing ConfigMap or Secret must contain the key redaction-rules.toml.
+  existingConfigMap: ""
+  existingSecret: ""
+
+# Legacy inline TOML alias. A nonempty value enables local redaction.
+# Cannot be combined with any redaction source above.
+redactionRules: ""
 
 # ─── Health probes ───────────────────────────────────────────────────────────
 # Connector exposes /healthz (always 200 once HTTP server is up) and /readyz

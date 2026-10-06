@@ -92,6 +92,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
+				RedactionReloadInterval:      10 * time.Second,
 			},
 		},
 		{
@@ -120,6 +121,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
+				RedactionReloadInterval:      10 * time.Second,
 			},
 		},
 		{
@@ -167,6 +169,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
+				RedactionReloadInterval:      10 * time.Second,
 			},
 		},
 		{
@@ -195,6 +198,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
+				RedactionReloadInterval:      10 * time.Second,
 			},
 		},
 		{
@@ -226,6 +230,7 @@ func TestLoad(t *testing.T) {
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
+				RedactionReloadInterval:      10 * time.Second,
 			},
 		},
 	}

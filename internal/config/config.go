@@ -34,10 +34,11 @@ const (
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
 	// Default timeout and interval durations.
-	defaultReconnectInterval     = 5 * time.Second
-	defaultMaxBackoffDelay       = 60 * time.Second
-	defaultRequestTimeout        = 60 * time.Second
-	defaultConfigRefreshInterval = 30 * time.Second
+	defaultReconnectInterval       = 5 * time.Second
+	defaultMaxBackoffDelay         = 60 * time.Second
+	defaultRequestTimeout          = 60 * time.Second
+	defaultConfigRefreshInterval   = 30 * time.Second
+	defaultRedactionReloadInterval = 10 * time.Second
 )
 
 var systemCertPool = x509.SystemCertPool
@@ -158,6 +159,10 @@ type Config struct {
 	ConfigEnabled bool
 	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
 	ConfigRefreshInterval time.Duration
+	// RedactionRulesFile selects local TOML rules instead of OTA configuration.
+	RedactionRulesFile *string
+	// RedactionReloadInterval controls local-file polling. Defaults to 10s.
+	RedactionReloadInterval time.Duration
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -294,14 +299,26 @@ func Load() (Config, error) {
 		ConfigRefreshInterval: env.GetEnvDuration(
 			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
+		RedactionRulesFile:      env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionReloadInterval: defaultRedactionReloadInterval,
 	}
 
-	for _, name := range []string{"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL", "TRAVERSAL_CONFIG_ENDPOINT"} {
-		if os.Getenv(name) != "" {
-			return Config{}, fmt.Errorf(
-				"%s is no longer supported; publish rules remotely and set TRAVERSAL_CONFIG_ENABLED=true before upgrading",
-				name,
+	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {
+		return Config{}, errors.New(
+			"TRAVERSAL_CONFIG_ENDPOINT is no longer supported; OTA uses the controller origin",
+		)
+	}
+	if cfg.RedactionRulesFile != nil {
+		if cfg.ConfigEnabled {
+			return Config{}, errors.New(
+				"REDACTION_RULES_FILE and TRAVERSAL_CONFIG_ENABLED=true are mutually exclusive",
 			)
+		}
+		if raw := os.Getenv("REDACTION_RELOAD_INTERVAL"); raw != "" {
+			cfg.RedactionReloadInterval, err = time.ParseDuration(raw)
+			if err != nil || cfg.RedactionReloadInterval <= 0 {
+				return Config{}, errors.New("REDACTION_RELOAD_INTERVAL must be a positive duration")
+			}
 		}
 	}
 	if err := validateRemoteConfig(cfg); err != nil {
