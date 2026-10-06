@@ -169,7 +169,25 @@ func main() {
 	defer cancel()
 
 	redactor := redact.NewRedactor()
-	if cfg.ConfigEnabled {
+	if cfg.RedactionRulesFile != nil {
+		loader := redact.NewFileLoader(
+			*cfg.RedactionRulesFile, redactor, cfg.RedactionReloadInterval,
+		)
+		if err := loader.LoadInitial(); err != nil {
+			slog.Error(
+				"failed to load local redaction rules; refusing to start unredacted",
+				"error",
+				err,
+			)
+			os.Exit(1)
+		}
+		go func() {
+			if err := loader.Run(ctx); err != nil {
+				slog.Error("local redaction reload failed; exiting", "error", err)
+				os.Exit(1)
+			}
+		}()
+	} else if cfg.ConfigEnabled {
 		httpClient, clientErr := client.NewConfigHTTPClient(&cfg)
 		if clientErr != nil {
 			slog.Error("failed to build config transport", "error", clientErr)
