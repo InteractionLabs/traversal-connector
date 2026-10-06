@@ -17,8 +17,8 @@ containers.
 Choose one source, or leave both disabled to run without redaction.
 Local sources and `configUpdates.enabled: true` are mutually exclusive.
 
-For remote (S3-backed OTA) configuration, publish the config document before
-enabling polling:
+For remote (S3-backed OTA) configuration, the config document should be published
+before enabling polling:
 
 ```yaml
 configUpdates:
@@ -45,17 +45,8 @@ redaction:
 
 Alternatively, leave `rulesContent` empty and set exactly one of
 `redaction.existingConfigMap` or `redaction.existingSecret` to a resource in the
-release namespace. It must contain the key `redaction-rules.toml`. Only that
-key is mounted, read-only, at `/etc/traversal/redaction-rules.toml`.
-The chart mounts the directory without `subPath`, so Kubernetes volume updates
-can be picked up by the local-file poller without restarting the pod.
-The legacy `redactionRules` inline string is also accepted and enables local
-redaction; it cannot be combined with another rules source.
+release namespace containing the key `redaction-rules.toml`.
 
-Both sources require a valid initial load before opening tunnels. Local reload
-errors retain the last-known-good rules, then stop the connector after three
-consecutive failures. OTA refresh errors retain the last-known-good rules in
-memory and continue polling. Neither source falls back to the other.
 See the [connector redaction documentation](../../README.md#redaction) for both
 TOML formats, validation, and switching sources.
 
