@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/net/http2"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
@@ -51,6 +52,7 @@ type harnessConfig struct {
 	inspect     func(string, uint16) bool
 	maxLifetime time.Duration
 	idleTimeout time.Duration
+	meters      metric.MeterProvider
 }
 
 func newHarness(t *testing.T, hc harnessConfig) *harness {
@@ -98,6 +100,9 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 		MaxPipes:    hc.maxPipes,
 		MaxLifetime: hc.maxLifetime,
 		IdleTimeout: hc.idleTimeout,
+		// One key, so key-load counts are known.
+		TrustedKeyIDs: []string{testKID},
+		MeterProvider: hc.meters,
 	})
 	if err != nil {
 		t.Fatal(err)

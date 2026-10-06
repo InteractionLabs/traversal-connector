@@ -12,6 +12,7 @@ package pipes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
@@ -61,12 +64,18 @@ type Config struct {
 	// IdleTimeout, if set, ends a pipe that has moved no bytes in either
 	// direction for this long, aborted like MaxLifetime.
 	IdleTimeout time.Duration
+	// TrustedKeyIDs are the kids Verifier trusts. They are logged and counted
+	// at startup, so a key rollout can be confirmed before the signer uses it.
+	TrustedKeyIDs []string
+	// MeterProvider records the server's metrics. Nil means the global one.
+	MeterProvider metric.MeterProvider
 }
 
 // Server serves pipes. Create one with New.
 type Server struct {
 	cfg      Config
 	h2       *h2server
+	metrics  *pipeMetrics
 	draining atomic.Bool
 	open     atomic.Int64
 }
@@ -81,7 +90,13 @@ func New(cfg Config) (*Server, error) {
 	case cfg.MaxPipes <= 0:
 		return nil, errors.New("pipes: the pipe cap must be positive")
 	}
-	s := &Server{cfg: cfg}
+	m, err := newPipeMetrics(cfg.MeterProvider)
+	if err != nil {
+		return nil, fmt.Errorf("pipes: metrics: %w", err)
+	}
+	m.keysLoaded(len(cfg.TrustedKeyIDs))
+	slog.Info("trusting capability keys", "key_ids", cfg.TrustedKeyIDs)
+	s := &Server{cfg: cfg, metrics: m}
 	// Streams beyond the cap are refused by admission with a typed reason;
 	// the HTTP/2 limit only bounds what a broken peer can start at once.
 	s.h2 = &h2server{handle: s.serve, maxStreams: int(min(2*cfg.MaxPipes, 1<<20))}
@@ -95,7 +110,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // Drain refuses every later open with CONNECTOR_DRAINING. Open pipes continue.
-func (s *Server) Drain() { s.draining.Store(true) }
+func (s *Server) Drain() {
+	if s.draining.CompareAndSwap(false, true) {
+		s.metrics.drained()
+	}
+}
 
 // Open is the number of pipes open now.
 func (s *Server) Open() int64 { return s.open.Load() }
@@ -108,7 +127,11 @@ func (s *Server) Wait(ctx context.Context) error {
 // ReasonName is how a refusal reason appears on the wire and in logs: the
 // enum name, lower-cased, without its prefix.
 func ReasonName(r pb.RawOpenFailureReason) string {
-	return strings.ToLower(strings.TrimPrefix(r.String(), "RAW_OPEN_FAILURE_REASON_"))
+	return lowerName(r.String(), "RAW_OPEN_FAILURE_REASON_")
+}
+
+func lowerName(enum, prefix string) string {
+	return strings.ToLower(strings.TrimPrefix(enum, prefix))
 }
 
 // refuse answers a CONNECT that will not become a pipe.
@@ -145,6 +168,7 @@ func (s *Server) serve(st *h2stream) {
 	log := slog.With("connector_id", s.cfg.ConnectorID, "authority", st.authority)
 	refused := func(reason pb.RawOpenFailureReason, detail string) {
 		log.Info("pipe refused", "reason", ReasonName(reason), "detail", detail)
+		s.metrics.refused(reason)
 		refuse(st, reason, detail)
 	}
 	if s.draining.Load() {
@@ -169,13 +193,16 @@ func (s *Server) serve(st *h2stream) {
 	})
 	if err != nil {
 		reason, detail := pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_INVALID_CAPABILITY, "invalid"
+		code := capability.CodeMalformed
 		var ce *capability.Error
 		if errors.As(err, &ce) {
-			reason, detail = ce.OpenFailureReason(), string(ce.Code)
+			reason, detail, code = ce.OpenFailureReason(), string(ce.Code), ce.Code
 		}
+		s.metrics.rejected(code)
 		refused(reason, detail)
 		return
 	}
+	s.metrics.verified()
 	// Admission after verification: a refused capability never takes a slot.
 	if s.open.Add(1) > s.cfg.MaxPipes {
 		s.open.Add(-1)
@@ -204,12 +231,14 @@ func (s *Server) serve(st *h2stream) {
 		abort(dst)
 		return
 	}
+	s.metrics.opened()
 	limits := startLimits(s.cfg.MaxLifetime, s.cfg.IdleTimeout, func() { st.Abort(); abort(dst) })
 	result := splice(st, dst, limits.touch)
 	limits.stop()
 	if reached := limits.reached(); reached != "" {
 		result.outcome = reached
 	}
+	s.metrics.closed(result, time.Since(start))
 	upstream := route.Addr.String()
 	if route.Proxy != nil {
 		upstream = "proxy " + route.Proxy.Host

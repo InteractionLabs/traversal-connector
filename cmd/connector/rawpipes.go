@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
@@ -57,6 +59,8 @@ func startRawPipes(
 		MaxPipes:    cfg.MaxPipes,
 		MaxLifetime: cfg.MaxLifetime,
 		IdleTimeout: cfg.IdleTimeout,
+		// Sorted, so the startup log reads the same on every pod.
+		TrustedKeyIDs: slices.Sorted(maps.Keys(cfg.CapabilityKeys)),
 	})
 	if err != nil {
 		return nil, nil, err
