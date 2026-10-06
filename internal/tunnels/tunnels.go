@@ -69,8 +69,8 @@ type Config struct {
 	// DefaultConnectionWindow. Larger windows raise throughput to distant
 	// tunnel endpoints and let a stalled pipe hold more memory.
 	StreamWindow, ConnectionWindow int
-	// ReadyGrace is how long readiness waits for a first tunnel. A connector
-	// whose network never lets a tunnel up becomes ready after it, so raw
+	// ReadyGrace is how long readiness waits for tunnels that are down. A
+	// connector whose tunnels stay down longer becomes ready anyway, so raw
 	// pipes cannot hold up the legacy transport. Zero means one minute.
 	ReadyGrace time.Duration
 	// MeterProvider records the tunnel metrics. Nil means the global one.
@@ -84,8 +84,10 @@ type Manager struct {
 	admin admin
 	start time.Time
 
-	everConnected atomic.Bool
-	draining      atomic.Bool
+	// downSince is when the tunnels were last seen go down, in Unix
+	// nanoseconds, or zero while they are up. It starts at startup.
+	downSince atomic.Int64
+	draining  atomic.Bool
 }
 
 // dnsName is a lower-case DNS name.
@@ -157,6 +159,7 @@ func New(cfg Config) (*Manager, error) {
 		admin: newAdmin(cfg.AdminPort),
 		start: time.Now(),
 	}
+	m.downSince.Store(m.start.UnixNano())
 	if err := m.registerMetrics(cfg.MeterProvider); err != nil {
 		return nil, fmt.Errorf("tunnels: metrics: %w", err)
 	}
@@ -188,20 +191,25 @@ func (m *Manager) Run(ctx context.Context) error {
 // if not, why.
 func (m *Manager) TunnelsUp(ctx context.Context) (bool, string) {
 	up, err := m.admin.tunnels(ctx)
-	switch {
-	case err != nil:
-		return false, "envoy is not answering"
-	case up == 0:
-		return false, "no tunnel to " + m.cfg.Endpoint
+	if err == nil && up > 0 {
+		m.downSince.Store(0)
+		return true, ""
 	}
-	m.everConnected.Store(true)
-	return true, ""
+	m.downSince.CompareAndSwap(0, time.Now().UnixNano())
+	if err != nil {
+		return false, "envoy is not answering"
+	}
+	return false, "no tunnel to " + m.cfg.Endpoint
 }
 
 // Status reports whether the connector should take pipes, and if not, why.
-// A connector is ready when it holds a tunnel. Until a first tunnel has come
-// up, it is also ready once ReadyGrace has passed, so a network that blocks
-// tunnels never blocks the connector's legacy transport.
+//
+// A connector is ready when it holds a tunnel, so a rollout waits for a new
+// connector pod's tunnels. Tunnels down for longer than ReadyGrace, since
+// startup or since they were last up, no longer hold it unready: a network
+// that blocks tunnels or a broken tunnel endpoint never blocks the legacy
+// transport or stalls customer rollouts. A tunnel that is merely being
+// re-dialed is back within seconds.
 func (m *Manager) Status(ctx context.Context) (bool, string) {
 	if m.draining.Load() {
 		return false, "draining"
@@ -210,8 +218,10 @@ func (m *Manager) Status(ctx context.Context) (bool, string) {
 	if up {
 		return true, ""
 	}
-	if !m.everConnected.Load() && time.Since(m.start) > m.cfg.ReadyGrace {
-		return true, "no tunnel has connected; serving the legacy transport only"
+	if since := m.downSince.Load(); since != 0 &&
+		time.Since(time.Unix(0, since)) > m.cfg.ReadyGrace {
+		return true, fmt.Sprintf("%s for over %s; serving the legacy transport only",
+			why, m.cfg.ReadyGrace)
 	}
 	return false, why
 }

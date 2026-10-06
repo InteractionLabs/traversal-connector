@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -465,13 +466,40 @@ func TestStatusGraceLetsLegacyServe(t *testing.T) {
 	if ready, why := m.Status(context.Background()); !ready {
 		t.Fatalf("not ready after the grace with no tunnel ever up: %s", why)
 	}
-	m.everConnected.Store(true)
-	if ready, _ := m.Status(context.Background()); ready {
-		t.Fatal("ready without tunnels after tunnels had connected")
-	}
 	m.draining.Store(true)
 	if ready, why := m.Status(context.Background()); ready || why != "draining" {
 		t.Fatalf("draining: %v %q", ready, why)
+	}
+}
+
+// Tunnels that just dropped keep the connector unready, briefly; tunnels
+// down for longer than the grace no longer do.
+func TestStatusToleratesTunnelsDownPastTheGrace(t *testing.T) {
+	var connected atomic.Value
+	connected.Store("1")
+	stats := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("downstream_reverse_connection.worker_0.cluster.tunnels.connected: " +
+			connected.Load().(string) + "\n"))
+	}))
+	defer stats.Close()
+	m := newTestManager(t)
+	m.cfg.ReadyGrace = 50 * time.Millisecond
+	m.admin = admin{base: stats.URL, client: stats.Client()}
+	if ready, why := m.Status(context.Background()); !ready {
+		t.Fatalf("not ready with a tunnel up: %s", why)
+	}
+	time.Sleep(60 * time.Millisecond) // the grace counts from the drop, not startup
+	connected.Store("0")
+	if ready, why := m.Status(context.Background()); ready {
+		t.Fatalf("ready with the tunnels just dropped: %s", why)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if ready, why := m.Status(context.Background()); !ready {
+		t.Fatalf("still unready after the tunnels were down past the grace: %s", why)
+	}
+	connected.Store("1")
+	if ready, why := m.Status(context.Background()); !ready || why != "" {
+		t.Fatalf("tunnels back: %v %q", ready, why)
 	}
 }
 

@@ -113,6 +113,11 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
+      {{- with (.Values.terminationGracePeriodSeconds | default (ternary 45 "" .Values.rawPipes.enabled)) }}
+      # A connector with raw pipes drains them for up to ~35 s on SIGTERM:
+      # GOAWAY on its tunnels, a settle, open pipes finishing, then Envoy.
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

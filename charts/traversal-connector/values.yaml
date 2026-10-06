@@ -74,6 +74,10 @@ rawPipes:
   tunnelStreamWindow: ""     # TRAVERSAL_TUNNEL_STREAM_WINDOW
   tunnelConnectionWindow: "" # TRAVERSAL_TUNNEL_CONNECTION_WINDOW
 
+# Pod termination grace period, in seconds. Empty uses Kubernetes' default
+# (30), or 45 when rawPipes.enabled, which a raw pipe drain needs.
+terminationGracePeriodSeconds: ""
+
 # Pod-level securityContext. Each raw pipe is its own TCP connection from the
 # connector, and a closed one holds its port for 60 s (TIME_WAIT), so very
 # high pipe churn to one destination can exhaust the default port range
