@@ -535,3 +535,47 @@ func TestModeClaim(t *testing.T) {
 		t.Fatal("ModeClaim(unspecified) succeeded")
 	}
 }
+
+// TestCheckShapeMatchesVerify checks that CheckShape refuses exactly the claims
+// a verifier rejects on shape alone, with the same code, so an issuer that
+// calls it never signs a capability every verifier would refuse.
+func TestCheckShapeMatchesVerify(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*capability.Claims)
+		want   capability.Code
+	}{
+		{"valid", func(*capability.Claims) {}, ""},
+		{"maximum lifetime", func(c *capability.Claims) { c.ExpiresAt = c.IssuedAt + 300 }, ""},
+		{"empty claim", func(c *capability.Claims) { c.SessionID = "" }, capability.CodeMalformed},
+		{"oversized claim", func(c *capability.Claims) { c.JTI = strings.Repeat("j", 257) },
+			capability.CodeMalformed},
+		{"replacement rune", func(c *capability.Claims) { c.Subject = "sub�" },
+			capability.CodeMalformed},
+		{"non-canonical host", func(c *capability.Claims) { c.Host = "DB.internal" },
+			capability.CodeMalformed},
+		{"zero port", func(c *capability.Claims) { c.Port = 0 }, capability.CodeMalformed},
+		{"zero iat", func(c *capability.Claims) { c.IssuedAt = 0 }, capability.CodeMalformed},
+		{"inverted window", func(c *capability.Claims) { c.ExpiresAt = c.IssuedAt },
+			capability.CodeMalformed},
+		{"wrong audience", func(c *capability.Claims) { c.Audience = "traversal" },
+			capability.CodeWrongAudience},
+		{"lifetime too long", func(c *capability.Claims) { c.ExpiresAt = c.IssuedAt + 301 },
+			capability.CodeLifetimeTooLong},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validClaims(testNow)
+			tc.mutate(&c)
+			if got := codeOf(c.CheckShape()); got != tc.want {
+				t.Fatalf("CheckShape = %q, want %q", got, tc.want)
+			}
+			_, err := newVerifier(
+				t,
+				func() time.Time { return testNow },
+			).Verify(sign(t, c), expected())
+			if got := codeOf(err); got != tc.want {
+				t.Fatalf("Verify = %v, want code %q", err, tc.want)
+			}
+		})
+	}
+}
