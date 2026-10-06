@@ -10,11 +10,11 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
-	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/pipes"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -100,7 +100,7 @@ func startRawPipes(
 	}()
 	slog.InfoContext(ctx, "raw pipes enabled",
 		"max_pipes", cfg.RawPipes.MaxPipes,
-		"tunnels_per_replica", cfg.RawPipes.TunnelsPerReplica,
+		"tunnels", cfg.RawPipes.TunnelCount,
 		"issuer", cfg.RawPipes.CapabilityIssuer,
 		"max_lifetime", cfg.RawPipes.MaxLifetime,
 		"idle_timeout", cfg.RawPipes.IdleTimeout)
@@ -195,30 +195,22 @@ func tunnelConfig(cfg *config.Config) (tunnels.Config, error) {
 	if err != nil {
 		return tunnels.Config{}, err
 	}
-	discoveryClient, err := client.NewConfigHTTPClient(cfg)
-	if err != nil {
-		return tunnels.Config{}, err
-	}
 	return tunnels.Config{
 		Identity:    identity,
 		Dir:         cfg.RawPipes.RunDir,
 		EnvoyPath:   cfg.RawPipes.EnvoyPath,
 		CoreAddress: cfg.RawPipes.Listen,
 		MaxPipes:    cfg.RawPipes.MaxPipes,
-		PerReplica:  cfg.RawPipes.TunnelsPerReplica,
-		DiscoveryURL: (&url.URL{
-			Scheme: controller.Scheme,
-			Host:   controller.Host,
-			Path:   "/v1/tunnels/" + cfg.ConnectorID,
-		}).String(),
-		DiscoveryClient:   discoveryClient,
-		DiscoveryInterval: cfg.RawPipes.TunnelDiscoveryInterval,
-		ConnectTo:         cfg.RawPipes.TunnelsConnectTo,
-		StreamWindow:      cfg.RawPipes.TunnelStreamWindow,
-		ConnectionWindow:  cfg.RawPipes.TunnelConnectionWindow,
-		CertPEM:           []byte(*cfg.TLSCert),
-		KeyPEM:            []byte(*cfg.TLSKey),
-		CAPEM:             roots,
+		Tunnels:     cfg.RawPipes.TunnelCount,
+		// The tunnel endpoint answers on the controller's host: Traversal's
+		// front door routes tunnels to it by ALPN.
+		Endpoint:         strings.ToLower(controller.Hostname()),
+		ConnectTo:        cfg.RawPipes.TunnelsConnectTo,
+		StreamWindow:     cfg.RawPipes.TunnelStreamWindow,
+		ConnectionWindow: cfg.RawPipes.TunnelConnectionWindow,
+		CertPEM:          []byte(*cfg.TLSCert),
+		KeyPEM:           []byte(*cfg.TLSKey),
+		CAPEM:            roots,
 	}, nil
 }
 

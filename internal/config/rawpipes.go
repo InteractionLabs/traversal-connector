@@ -14,6 +14,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
 )
 
 const (
@@ -21,9 +22,8 @@ const (
 	// maxRawPipesMax keeps every pipe able to stall without stalling the
 	// rest: connector-core's 1 GiB connection window holds 4,096 stalled
 	// 256 KiB streams.
-	maxRawPipesMax                 = 4096
-	defaultTunnelsPerReplica       = 2
-	defaultTunnelDiscoveryInterval = 15 * time.Second
+	maxRawPipesMax     = 4096
+	defaultTunnelCount = 2
 	// Pipe limits (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT).
 	// They match the Traversal side's, so neither side ends a pipe the other
 	// would still keep.
@@ -75,17 +75,15 @@ type RawPipes struct {
 	// connector's credentials (TRAVERSAL_RUN_DIR). It must be private and
 	// writable.
 	RunDir string
-	// TunnelsPerReplica is W, the tunnels held to each Traversal tunnel
-	// endpoint replica (TRAVERSAL_TUNNELS_PER_REPLICA).
-	TunnelsPerReplica int
-	// TunnelsConnectTo, if set, replaces the tunnels entry point address
-	// discovery names, host:port, for PrivateLink or a fixed endpoint
-	// (TRAVERSAL_TUNNELS_CONNECT_TO). SNI and certificate checks are
-	// unchanged.
+	// TunnelCount is W, the tunnels this connector holds to Traversal's tunnel
+	// endpoint, one per Envoy worker (TRAVERSAL_TUNNEL_COUNT; the older
+	// TRAVERSAL_TUNNELS_PER_REPLICA is still read when it is unset).
+	TunnelCount int
+	// TunnelsConnectTo, if set, replaces the address the tunnels dial, the
+	// controller's host on port 443, with host:port, for PrivateLink or a
+	// fixed endpoint (TRAVERSAL_TUNNELS_CONNECT_TO). SNI and certificate
+	// checks still use the controller's host.
 	TunnelsConnectTo string
-	// TunnelDiscoveryInterval is the mean time between discovery polls
-	// (TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL).
-	TunnelDiscoveryInterval time.Duration
 	// TunnelStreamWindow and TunnelConnectionWindow are the tunnels' HTTP/2
 	// receive windows in bytes (TRAVERSAL_TUNNEL_STREAM_WINDOW,
 	// TRAVERSAL_TUNNEL_CONNECTION_WINDOW). Zero uses the defaults.
@@ -107,15 +105,15 @@ func loadRawPipes() (RawPipes, error) {
 		EnvoyPath: env.GetEnvString("TRAVERSAL_ENVOY_PATH", "envoy"),
 		RunDir: env.GetEnvString("TRAVERSAL_RUN_DIR",
 			filepath.Join(os.TempDir(), "traversal-tunnels")),
-		TunnelsPerReplica: env.GetEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelsPerReplica),
-		TunnelsConnectTo:  env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
-		TunnelDiscoveryInterval: env.GetEnvDuration(
-			"TRAVERSAL_TUNNEL_DISCOVERY_INTERVAL", defaultTunnelDiscoveryInterval),
+		TunnelCount: env.GetEnvInt("TRAVERSAL_TUNNEL_COUNT",
+			env.GetEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelCount)),
+		TunnelsConnectTo:       env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
 		TunnelStreamWindow:     env.GetEnvInt("TRAVERSAL_TUNNEL_STREAM_WINDOW", 0),
 		TunnelConnectionWindow: env.GetEnvInt("TRAVERSAL_TUNNEL_CONNECTION_WINDOW", 0),
 	}
-	if cfg.TunnelsPerReplica < 1 || cfg.TunnelsPerReplica > 8 {
-		return RawPipes{}, errors.New("TRAVERSAL_TUNNELS_PER_REPLICA must be between 1 and 8")
+	if cfg.TunnelCount < 1 || cfg.TunnelCount > tunnels.MaxTunnels {
+		return RawPipes{}, fmt.Errorf(
+			"TRAVERSAL_TUNNEL_COUNT must be between 1 and %d", tunnels.MaxTunnels)
 	}
 	if cfg.TunnelsConnectTo != "" {
 		if err := validateConnectTo("TRAVERSAL_TUNNELS_CONNECT_TO", cfg.TunnelsConnectTo); err != nil {

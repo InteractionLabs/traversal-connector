@@ -5,17 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
-// The connector's Envoy (the C-Envoy) dials reverse tunnels to every
-// Traversal tunnel endpoint replica and forwards each pipe that arrives
-// through them, unchanged, to connector-core on loopback.
+// The connector's Envoy (the C-Envoy) dials reverse tunnels to Traversal's
+// tunnel endpoint and forwards each pipe that arrives through them,
+// unchanged, to connector-core on loopback.
 //
-// Its bootstrap is static. Each replica gets its own listener (the tunnels)
-// and cluster (how to reach it), delivered as files Envoy watches: adding a
-// replica adds a listener and removing one removes only that listener, so a
-// change to the replica set never touches tunnels that are already up.
+// Its configuration is static: one listener (the tunnels, one per worker),
+// one cluster (how to reach the tunnel endpoint), and one cluster for core.
 
 // HTTP/2 windows for pipes.
 //
@@ -45,8 +42,6 @@ const AdminPort = 9901
 // files Envoy reads from the run directory.
 const (
 	bootstrapFile = "envoy.json"
-	listenersFile = "lds.json"
-	clustersFile  = "cds.json"
 	certFile      = "tls.crt"
 	keyFile       = "tls.key"
 	caFile        = "ca.crt"
@@ -60,34 +55,45 @@ type envoyConfig struct {
 	// coreAddr is connector-core's pipe listener, host:port.
 	coreHost string
 	corePort int
-	// perWorker is the tunnels each Envoy worker holds to each replica.
-	// Every worker dials its own, so a replica gets workers × perWorker.
-	perWorker int
+	// endpoint is the tunnel endpoint.
+	endpoint endpoint
 	// maxPipes is core's pipe cap.
 	maxPipes int64
 	// streamWindow and connectionWindow are the HTTP/2 windows, in bytes.
 	streamWindow, connectionWindow int
 }
 
-// replica is one Traversal tunnel endpoint the connector holds tunnels to.
-type replica struct {
-	// name is the replica's first SNI label, such as "t-envoy-3". It names
-	// the replica's Envoy listener and cluster.
-	name string
-	// sni is the name the connector dials and verifies, such as
-	// "t-envoy-3.tunnels.traversal.com".
+// endpoint is the Traversal tunnel endpoint the connector holds tunnels to.
+type endpoint struct {
+	// sni is the name the connector sends and verifies: the controller's
+	// host, such as "edge.traversal.com".
 	sni string
-	// host and port are where the connector connects: the shared tunnels
-	// entry point, which routes by SNI.
+	// host and port are where the connector connects: sni:443, unless
+	// ConnectTo replaced them.
 	host string
 	port int
 }
 
+// tunnelCluster names the tunnel endpoint's cluster, and tunnelListener the
+// listener that holds the tunnels.
+const (
+	tunnelCluster  = "tunnels"
+	tunnelListener = "tunnels"
+)
+
+// tunnelsPerWorker is how many tunnels each Envoy worker holds. Every worker
+// dials its own, so the connector holds workers × tunnelsPerWorker.
+const tunnelsPerWorker = 1
+
+// tunnelALPN is the ALPN protocol that tells Traversal's front door a
+// connection is a tunnel, not a request for the controller. h2 follows it,
+// the protocol the tunnel endpoint actually negotiates.
+const tunnelALPN = "x-traversal-tunnel"
+
 func (c envoyConfig) path(name string) string { return filepath.Join(c.dir, name) }
 
-// bootstrap is the C-Envoy's static configuration.
+// bootstrap is the C-Envoy's configuration.
 func (c envoyConfig) bootstrap() map[string]any {
-	watched := map[string]any{"path": c.dir}
 	return map[string]any{
 		"node": map[string]any{"id": c.identity.ConnectorID, "cluster": c.identity.TenantID},
 		"bootstrap_extensions": []any{map[string]any{
@@ -109,21 +115,10 @@ func (c envoyConfig) bootstrap() map[string]any {
 			},
 		}}},
 		"admin": map[string]any{"address": socketAddress(adminAddress, AdminPort)},
-		"dynamic_resources": map[string]any{
-			"lds_config": map[string]any{
-				"resource_api_version": "V3",
-				"path_config_source": map[string]any{
-					"path": c.path(listenersFile), "watched_directory": watched,
-				},
-			},
-			"cds_config": map[string]any{
-				"resource_api_version": "V3",
-				"path_config_source": map[string]any{
-					"path": c.path(clustersFile), "watched_directory": watched,
-				},
-			},
+		"static_resources": map[string]any{
+			"listeners": []any{c.listener()},
+			"clusters":  []any{c.coreCluster(), c.cluster()},
 		},
-		"static_resources": map[string]any{"clusters": []any{c.coreCluster()}},
 	}
 }
 
@@ -156,16 +151,15 @@ func (c envoyConfig) coreCluster() map[string]any {
 	}
 }
 
-// listener holds W tunnels to one replica and hands every pipe they carry
-// to core.
-func (c envoyConfig) listener(r replica) map[string]any {
+// listener holds the tunnels, one per worker, and hands every pipe they
+// carry to core.
+func (c envoyConfig) listener() map[string]any {
 	id := c.identity
 	return map[string]any{
-		"@type": "type.googleapis.com/envoy.config.listener.v3.Listener",
-		"name":  "tunnels-" + r.name,
+		"name": tunnelListener,
 		"address": map[string]any{"socket_address": map[string]any{
 			"address": fmt.Sprintf("rc://%s:%s:%s@%s:%d",
-				id.ConnectorID, id.TenantID, id.TenantID, r.name, c.perWorker),
+				id.ConnectorID, id.TenantID, id.TenantID, tunnelCluster, tunnelsPerWorker),
 			"port_value":    0,
 			"resolver_name": "envoy.resolvers.reverse_connection",
 		}},
@@ -180,7 +174,8 @@ func (c envoyConfig) listener(r replica) map[string]any {
 				"http2_protocol_options": c.tunnelServerHTTP2Options(),
 				"upgrade_configs":        []any{map[string]any{"upgrade_type": "CONNECT"}},
 				// Pipes are long-lived and may sit idle (psql, kubectl exec).
-				// core enforces any lifetime cap.
+				// core enforces the idle timeout and lifetime cap, so a
+				// pipe ends with a reason core audits.
 				"stream_idle_timeout": "0s",
 				"route_config": map[string]any{"virtual_hosts": []any{map[string]any{
 					"name":    "pipes",
@@ -201,16 +196,17 @@ func (c envoyConfig) listener(r replica) map[string]any {
 	}
 }
 
-// cluster is how the connector reaches one replica: the shared entry point,
-// with the replica's SNI, mutual TLS 1.3, and the replica's name verified.
-func (c envoyConfig) cluster(r replica) map[string]any {
+// cluster is how the connector reaches the tunnel endpoint: mutual TLS 1.3
+// with the endpoint's name as SNI and verified in its certificate, offering
+// the tunnel ALPN.
+func (c envoyConfig) cluster() map[string]any {
+	e := c.endpoint
 	return map[string]any{
-		"@type":             "type.googleapis.com/envoy.config.cluster.v3.Cluster",
-		"name":              r.name,
+		"name":              tunnelCluster,
 		"type":              "STRICT_DNS",
 		"dns_lookup_family": "V4_PREFERRED",
 		"connect_timeout":   "5s",
-		"load_assignment":   loadAssignment(r.name, r.host, r.port),
+		"load_assignment":   loadAssignment(tunnelCluster, e.host, e.port),
 		"upstream_connection_options": map[string]any{"tcp_keepalive": map[string]any{
 			"keepalive_time": 30, "keepalive_interval": 10, "keepalive_probes": 3,
 		}},
@@ -218,14 +214,14 @@ func (c envoyConfig) cluster(r replica) map[string]any {
 			"name": "envoy.transport_sockets.tls",
 			"typed_config": map[string]any{
 				"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
-				"sni":   r.sni,
+				"sni":   e.sni,
 				"common_tls_context": map[string]any{
 					// Envoy's upstream TLS defaults to a 1.2 maximum.
 					"tls_params": map[string]any{
 						"tls_minimum_protocol_version": "TLSv1_3",
 						"tls_maximum_protocol_version": "TLSv1_3",
 					},
-					"alpn_protocols": []any{"h2"},
+					"alpn_protocols": []any{tunnelALPN, "h2"},
 					"tls_certificates": []any{map[string]any{
 						"certificate_chain": map[string]any{"filename": c.path(certFile)},
 						"private_key":       map[string]any{"filename": c.path(keyFile)},
@@ -234,7 +230,7 @@ func (c envoyConfig) cluster(r replica) map[string]any {
 						"trusted_ca": map[string]any{"filename": c.path(caFile)},
 						"match_typed_subject_alt_names": []any{map[string]any{
 							"san_type": "DNS",
-							"matcher":  map[string]any{"exact": r.sni},
+							"matcher":  map[string]any{"exact": e.sni},
 						}},
 					},
 				},
@@ -285,20 +281,13 @@ func loadAssignment(name, host string, port int) map[string]any {
 	}
 }
 
-// writeBootstrap writes the static configuration and empty resource files,
-// so Envoy starts with no tunnels until discovery names the replicas.
+// writeBootstrap writes Envoy's configuration.
 func (c envoyConfig) writeBootstrap() error {
-	if err := writeJSON(c.path(bootstrapFile), c.bootstrap()); err != nil {
-		return err
-	}
-	if err := c.writeClusters(nil); err != nil {
-		return err
-	}
-	return c.writeListeners(nil)
+	return writeJSON(c.path(bootstrapFile), c.bootstrap())
 }
 
-// writeJSON replaces path atomically. Envoy watches the directory for moves,
-// so a rename is the only write it ever sees.
+// writeJSON replaces path atomically, so a restarted Envoy never reads a
+// half-written file.
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -326,10 +315,4 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path) //nolint:gosec // see CreateTemp above
-}
-
-// replicaName is the first label of a replica's SNI.
-func replicaName(sni string) string {
-	name, _, _ := strings.Cut(sni, ".")
-	return name
 }

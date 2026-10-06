@@ -28,7 +28,7 @@ func supervise(ctx context.Context, envoyPath, bootstrap string, workers int, ou
 		cmd := exec.CommandContext(ctx, envoyPath,
 			"--config-path", bootstrap,
 			"--log-level", "warn",
-			// Each worker dials its own tunnels to every replica.
+			// Each worker dials its own tunnel.
 			"--concurrency", strconv.Itoa(workers),
 			// Envoy's own hot-restart shared memory is not needed: core
 			// restarts it, and two connectors may share a host network.
@@ -87,36 +87,35 @@ func (a admin) drainListeners(ctx context.Context) error {
 	return nil
 }
 
-// connectedStat is the per-worker, per-replica tunnel gauge Envoy keeps with
+// connectedStat is the per-worker, per-cluster tunnel gauge Envoy keeps with
 // enable_detailed_stats.
 var connectedStat = regexp.MustCompile(
 	`^downstream_reverse_connection\.worker_\d+\.cluster\.([^.]+)\.connected: (\d+)$`)
 
-// tunnels returns how many tunnels Envoy holds to each replica it has a
-// tunnel gauge for.
-func (a admin) tunnels(ctx context.Context) (map[string]int, error) {
+// tunnels returns how many tunnels Envoy holds to the tunnel endpoint.
+func (a admin) tunnels(ctx context.Context) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		a.base+"/stats?filter=^downstream_reverse_connection", nil)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	resp, err := a.client.Do(req) //nolint:gosec // loopback Envoy admin
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("stats: %s", resp.Status)
+		return 0, fmt.Errorf("stats: %s", resp.Status)
 	}
-	perReplica := map[string]int{}
+	total := 0
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
-		if m := connectedStat.FindStringSubmatch(sc.Text()); m != nil {
+		if m := connectedStat.FindStringSubmatch(sc.Text()); m != nil && m[1] == tunnelCluster {
 			n, _ := strconv.Atoi(m[2])
-			perReplica[m[1]] += n
+			total += n
 		}
 	}
-	return perReplica, sc.Err()
+	return total, sc.Err()
 }
 
 // envoyOutput is where Envoy's own logs go: the connector's stdout, beside

@@ -74,104 +74,62 @@ func TestIdentityFromCertificate(t *testing.T) {
 	}
 }
 
-func TestDiscoveryValidation(t *testing.T) {
-	valid := Discovery{
-		Cell:     "0",
-		Address:  "tunnels.traversal.com:443",
-		Replicas: []string{"t-envoy-0.tunnels.traversal.com", "t-envoy-1.tunnels.traversal.com"},
-	}
-	if err := valid.validate(); err != nil {
+// bootstrapOf reads the Envoy configuration m writes.
+func bootstrapOf(t *testing.T, m *Manager) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(m.cfg.Dir, bootstrapFile))
+	if err != nil {
 		t.Fatal(err)
 	}
-	for name, mutate := range map[string]func(*Discovery){
-		"no port":          func(d *Discovery) { d.Address = "tunnels.traversal.com" },
-		"bad port":         func(d *Discovery) { d.Address = "tunnels.traversal.com:0" },
-		"uppercase name":   func(d *Discovery) { d.Replicas[0] = "T-envoy-0.tunnels.traversal.com" },
-		"single label":     func(d *Discovery) { d.Replicas[0] = "t-envoy-0" },
-		"repeated replica": func(d *Discovery) { d.Replicas[1] = "t-envoy-0.other.com" },
-		"reserved name":    func(d *Discovery) { d.Replicas[0] = "core.tunnels.traversal.com" },
-		"injection":        func(d *Discovery) { d.Replicas[0] = "a:b@c.tunnels.traversal.com" },
-		"too many": func(d *Discovery) {
-			d.Replicas = nil
-			for i := range maxReplicas + 1 {
-				d.Replicas = append(d.Replicas, "t-envoy-"+strings.Repeat("x", i%3+1)+
-					string(rune('a'+i%26))+string(rune('a'+i/26))+".tunnels.traversal.com")
-			}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			d := valid
-			d.Replicas = append([]string{}, valid.Replicas...)
-			mutate(&d)
-			if err := d.validate(); err == nil {
-				t.Fatal("accepted an invalid discovery answer")
-			}
-		})
+	var b map[string]any
+	if err := json.Unmarshal(data, &b); err != nil {
+		t.Fatal(err)
 	}
+	return b
 }
 
-func TestFetchDiscovery(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/tunnels/"+testConnector {
-			http.NotFound(w, r)
-			return
+// staticResource returns the one static listener or cluster named name.
+func staticResource(t *testing.T, b map[string]any, kind, name string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, r := range b["static_resources"].(map[string]any)[kind].([]any) {
+		if res := r.(map[string]any); res["name"] == name {
+			if found != nil {
+				t.Fatalf("two %s named %s", kind, name)
+			}
+			found = res
 		}
-		_ = json.NewEncoder(w).Encode(Discovery{
-			Cell:    "0",
-			Address: "tunnels.traversal.com:443",
-			Replicas: []string{
-				"t-envoy-1.tunnels.traversal.com",
-				"t-envoy-0.tunnels.traversal.com",
-			},
-		})
-	}))
-	defer srv.Close()
-	d, err := fetchDiscovery(
-		context.Background(),
-		srv.Client(),
-		srv.URL+"/v1/tunnels/"+testConnector,
-	)
-	if err != nil {
-		t.Fatal(err)
 	}
-	if d.Replicas[0] != "t-envoy-0.tunnels.traversal.com" {
-		t.Fatalf("replicas not sorted: %v", d.Replicas)
+	if found == nil {
+		t.Fatalf("no %s named %s", kind, name)
 	}
-	if _, err := fetchDiscovery(context.Background(), srv.Client(), srv.URL+"/other"); err == nil {
-		t.Fatal("accepted a 404")
+	return found
+}
+
+// testConfig is a valid Config.
+func testConfig(t *testing.T) Config {
+	t.Helper()
+	return Config{
+		Identity:    Identity{ConnectorID: testConnector, TenantID: testTenant},
+		Dir:         t.TempDir(),
+		EnvoyPath:   "envoy",
+		CoreAddress: "127.0.0.1:9100",
+		MaxPipes:    200,
+		Tunnels:     2,
+		Endpoint:    "edge.traversal.com",
+		CertPEM:     []byte("cert"),
+		KeyPEM:      []byte("key"),
+		CAPEM:       []byte("ca"),
 	}
 }
 
-func readResources(t *testing.T, path string) []map[string]any {
+func newTestManager(t *testing.T, mutate ...func(*Config)) *Manager {
 	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // test temp dir
-	if err != nil {
-		t.Fatal(err)
+	cfg := testConfig(t)
+	for _, f := range mutate {
+		f(&cfg)
 	}
-	var file struct {
-		Resources []map[string]any `json:"resources"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		t.Fatal(err)
-	}
-	return file.Resources
-}
-
-func newTestManager(t *testing.T) *Manager {
-	t.Helper()
-	m, err := New(Config{
-		Identity:        Identity{ConnectorID: testConnector, TenantID: testTenant},
-		Dir:             t.TempDir(),
-		EnvoyPath:       "envoy",
-		CoreAddress:     "127.0.0.1:9100",
-		MaxPipes:        200,
-		PerReplica:      2,
-		DiscoveryURL:    "https://edge.example.com/v1/tunnels/" + testConnector,
-		DiscoveryClient: http.DefaultClient,
-		CertPEM:         []byte("cert"),
-		KeyPEM:          []byte("key"),
-		CAPEM:           []byte("ca"),
-	})
+	m, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,77 +139,77 @@ func newTestManager(t *testing.T) *Manager {
 	return m
 }
 
-func TestApplyWritesOneListenerAndClusterPerReplica(t *testing.T) {
-	m := newTestManager(t)
-	err := m.apply(Discovery{
-		Cell:     "0",
-		Address:  "tunnels.traversal.com:443",
-		Replicas: []string{"t-envoy-0.tunnels.traversal.com", "t-envoy-1.tunnels.traversal.com"},
-	})
-	if err != nil {
-		t.Fatal(err)
+// The connector holds its tunnels to one endpoint, the controller's host on
+// 443: one listener, one tunnel per worker, and a cluster that sends the
+// controller's host as SNI, verifies it, and offers the tunnel ALPN first.
+func TestBootstrapHoldsTunnelsToTheControllerHost(t *testing.T) {
+	b := bootstrapOf(t, newTestManager(t))
+	if len(b["static_resources"].(map[string]any)["listeners"].([]any)) != 1 {
+		t.Fatal("want exactly one listener")
 	}
-	listeners := readResources(t, m.envoy.path(listenersFile))
-	clusters := readResources(t, m.envoy.path(clustersFile))
-	if len(listeners) != 2 || len(clusters) != 2 {
-		t.Fatalf("%d listeners, %d clusters", len(listeners), len(clusters))
+	if _, dynamic := b["dynamic_resources"]; dynamic {
+		t.Fatal("the configuration is static; nothing should be watched")
 	}
-	addr := listeners[1]["address"].(map[string]any)["socket_address"].(map[string]any)["address"]
-	want := "rc://" + testConnector + ":" + testTenant + ":" + testTenant + "@t-envoy-1:1"
+	listener := staticResource(t, b, "listeners", tunnelListener)
+	addr := listener["address"].(map[string]any)["socket_address"].(map[string]any)["address"]
+	want := "rc://" + testConnector + ":" + testTenant + ":" + testTenant + "@tunnels:1"
 	if addr != want {
 		t.Fatalf("listener address %v, want %v", addr, want)
 	}
-	tls := clusters[1]["transport_socket"].(map[string]any)["typed_config"].(map[string]any)
-	if tls["sni"] != "t-envoy-1.tunnels.traversal.com" {
-		t.Fatalf("cluster SNI %v", tls["sni"])
-	}
 
-	// Removing a replica leaves the other replica's listener untouched.
-	before, _ := json.Marshal(listeners[0])
-	if err := m.apply(Discovery{
-		Cell:     "0",
-		Address:  "tunnels.traversal.com:443",
-		Replicas: []string{"t-envoy-0.tunnels.traversal.com"},
-	}); err != nil {
-		t.Fatal(err)
+	cluster := staticResource(t, b, "clusters", tunnelCluster)
+	got, _ := json.Marshal(cluster["load_assignment"])
+	if !strings.Contains(string(got), `"address":"edge.traversal.com","port_value":443`) {
+		t.Fatalf("load assignment %s", got)
 	}
-	listeners = readResources(t, m.envoy.path(listenersFile))
-	after, _ := json.Marshal(listeners[0])
-	if len(listeners) != 1 || string(before) != string(after) {
-		t.Fatalf("remaining listener changed:\n%s\n%s", before, after)
+	tls := cluster["transport_socket"].(map[string]any)["typed_config"].(map[string]any)
+	if tls["sni"] != "edge.traversal.com" {
+		t.Fatalf("SNI %v", tls["sni"])
 	}
-	// The removed replica's cluster outlives its listener by one poll, so
-	// Envoy never sees a listener naming a cluster it lacks.
-	if n := len(readResources(t, m.envoy.path(clustersFile))); n != 2 {
-		t.Fatalf("%d clusters right after scale-down, want the stale one kept", n)
+	common := tls["common_tls_context"].(map[string]any)
+	if alpn, _ := json.Marshal(common["alpn_protocols"]); string(alpn) !=
+		`["x-traversal-tunnel","h2"]` {
+		t.Fatalf("ALPN %s", alpn)
 	}
-	if err := m.apply(Discovery{
-		Cell:     "0",
-		Address:  "tunnels.traversal.com:443",
-		Replicas: []string{"t-envoy-0.tunnels.traversal.com"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(readResources(t, m.envoy.path(clustersFile))); n != 1 {
-		t.Fatalf("%d clusters after the next poll, want the stale one pruned", n)
+	san, _ := json.Marshal(common["validation_context"])
+	if !strings.Contains(string(san), `"matcher":{"exact":"edge.traversal.com"}`) {
+		t.Fatalf("validation context %s", san)
 	}
 }
 
-func TestConnectToOverridesTheEntryPoint(t *testing.T) {
-	m := newTestManager(t)
-	m.cfg.ConnectTo = "vpce-123.example.internal:8443"
-	if err := m.apply(Discovery{
-		Cell:     "0",
-		Address:  "tunnels.traversal.com:443",
-		Replicas: []string{"t-envoy-0.tunnels.traversal.com"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clusters := readResources(t, m.envoy.path(clustersFile))
-	got, _ := json.Marshal(clusters[0]["load_assignment"])
-	if !strings.Contains(string(got), `"vpce-123.example.internal"`) ||
-		!strings.Contains(string(got), "8443") {
+// ConnectTo moves only where the connector dials; SNI and the certificate
+// check still name the controller's host.
+func TestConnectToOverridesOnlyTheDialAddress(t *testing.T) {
+	b := bootstrapOf(t, newTestManager(t, func(c *Config) {
+		c.ConnectTo = "vpce-123.example.internal:8443"
+	}))
+	cluster := staticResource(t, b, "clusters", tunnelCluster)
+	got, _ := json.Marshal(cluster["load_assignment"])
+	if !strings.Contains(string(got), `"address":"vpce-123.example.internal","port_value":8443`) {
 		t.Fatalf("load assignment %s", got)
+	}
+	tls := cluster["transport_socket"].(map[string]any)["typed_config"].(map[string]any)
+	if tls["sni"] != "edge.traversal.com" {
+		t.Fatalf("SNI %v after connect-to", tls["sni"])
+	}
+}
+
+func TestNewRejectsBadTunnelSettings(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"no endpoint":        func(c *Config) { c.Endpoint = "" },
+		"uppercase endpoint": func(c *Config) { c.Endpoint = "Edge.traversal.com" },
+		"endpoint with port": func(c *Config) { c.Endpoint = "edge.traversal.com:443" },
+		"no tunnels":         func(c *Config) { c.Tunnels = 0 },
+		"too many tunnels":   func(c *Config) { c.Tunnels = MaxTunnels + 1 },
+		"bad connect-to":     func(c *Config) { c.ConnectTo = "vpce.example.internal" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t)
+			mutate(&cfg)
+			if _, err := New(cfg); err == nil {
+				t.Fatal("accepted invalid tunnel settings")
+			}
+		})
 	}
 }
 
@@ -287,5 +245,27 @@ func TestBootstrapNamesTheConnector(t *testing.T) {
 	}
 	if b.Node.ID != testConnector || b.Node.Cluster != testTenant {
 		t.Fatalf("node %+v", b.Node)
+	}
+}
+
+// Readiness follows Envoy's tunnel gauges for the tunnel endpoint.
+func TestStatusFollowsTheTunnelGauge(t *testing.T) {
+	connected := "0"
+	stats := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(
+			"downstream_reverse_connection.worker_0.cluster.tunnels.connected: 0\n" +
+				"downstream_reverse_connection.worker_1.cluster.tunnels.connected: " +
+				connected + "\n"))
+	}))
+	defer stats.Close()
+	m := newTestManager(t)
+	m.admin = admin{base: stats.URL, client: stats.Client()}
+	if ready, why := m.Status(context.Background()); ready ||
+		why != "no tunnel to edge.traversal.com" {
+		t.Fatalf("no tunnel: %v %q", ready, why)
+	}
+	connected = "1"
+	if ready, why := m.Status(context.Background()); !ready {
+		t.Fatalf("one worker's tunnel up: %q", why)
 	}
 }
