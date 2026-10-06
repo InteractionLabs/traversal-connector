@@ -6,6 +6,9 @@
 {{- if or (.Values.redactionRules | default "") ($oldRedaction.enabled | default false) ($oldRedaction.rulesContent | default "") ($oldRedaction.existingConfigMap | default "") ($oldRedaction.existingSecret | default "") -}}
 {{- fail "Local redaction configuration is no longer supported; publish rules remotely and set configUpdates.enabled=true before upgrading." -}}
 {{- end -}}
+{{- if .Values.rawPipes.tunnelsPerReplica | default "" -}}
+{{- fail "rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount: the connector holds its tunnels to one endpoint, not to each replica." -}}
+{{- end -}}
 {{- if .Values.rawPipes.capabilityKeysPEM | default "" -}}
 {{- fail "rawPipes.capabilityKeysPEM is no longer supported; the chart ships each environment's keys in rawPipes.trustedKeys, selected by rawPipes.environment." -}}
 {{- end -}}
@@ -203,8 +206,16 @@ spec:
             - name: TRAVERSAL_RAW_PIPES_MAX
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.rawPipes.tunnelsPerReplica }}
-            - name: TRAVERSAL_TUNNELS_PER_REPLICA
+            {{- with .Values.rawPipes.maxLifetime }}
+            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.idleTimeout }}
+            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelCount }}
+            - name: TRAVERSAL_TUNNEL_COUNT
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.rawPipes.tunnelsConnectTo }}

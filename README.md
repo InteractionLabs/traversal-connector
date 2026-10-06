@@ -505,6 +505,49 @@ non-HTTP destinations through the connector. Each pipe carries a
 Traversal-signed capability that the connector verifies before it dials.
 Raw pipes are off by default; the Helm chart's `rawPipes` block turns them on.
 
+The connector runs its own Envoy (shipped in the image) beside connector-core.
+Envoy holds W outbound tunnels to Traversal, one per Envoy worker thread, and
+hands every pipe that arrives on them to connector-core on loopback.
+
+- **Network.** Tunnels dial the host of `TRAVERSAL_CONTROLLER_URL` on port
+  443, the same host and port the connector already reaches, with that host as
+  TLS SNI and as the name the server certificate must carry. They offer the TLS
+  ALPN protocols `x-traversal-tunnel` then `h2`; Traversal's front door routes
+  `x-traversal-tunnel` to its tunnel endpoint and everything else to the
+  controller. A TLS-intercepting proxy breaks tunnels, and tunnels through
+  `EGRESS_PROXY_URL` are not supported yet: such a connector keeps serving
+  HTTP requests only and reports why.
+- **Limits.** A pipe is reset when it has been open for
+  `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` or has moved no bytes either way for
+  `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT`. The defaults, 4h and 15m, match
+  Traversal's.
+- **Readiness.** The pod is ready once a tunnel is up. Tunnels down for longer
+  than a minute no longer hold it unready, so a network that blocks tunnels
+  never blocks HTTP requests.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRAVERSAL_RAW_PIPES` | `disabled` | `enabled` turns raw pipes on. |
+| `TRAVERSAL_CAPABILITY_ISSUER` | **required when enabled** | The `iss` claim capabilities must carry, `traversal-raw-tunnel/<environment>`. |
+| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_KEYS_FILE` | **one required when enabled** | PEM bundle (raw or base64) of P-256 `PUBLIC KEY` blocks, each naming its kid in a `Key-ID` header. The chart renders it; see below. |
+| `TRAVERSAL_RAW_PIPES_MAX` | `200` | Most pipes open at once, from 1 to 4096. Opens beyond it are refused with `capacity`. |
+| `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` | `4h` | Longest a pipe stays open. `0s` turns the limit off. |
+| `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT` | `15m` | Longest a pipe may move no bytes. `0s` turns the limit off. |
+| `TRAVERSAL_TUNNEL_COUNT` | `2` | W, tunnels per connector pod, from 1 to 8 (one Envoy worker each). `TRAVERSAL_TUNNELS_PER_REPLICA`, its earlier name, is read when it is unset. |
+| `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` the tunnels dial instead of `<controller host>:443`, such as a PrivateLink endpoint. SNI and the certificate check still use the controller's host. |
+| `TRAVERSAL_TUNNEL_STREAM_WINDOW` / `TRAVERSAL_TUNNEL_CONNECTION_WINDOW` | `2 MiB` / `1 GiB` | The tunnels' HTTP/2 receive windows, in bytes. A pipe moves at most one stream window per round trip. |
+| `TRAVERSAL_ENVOY_PATH` | `envoy` | The Envoy binary. The image sets it. |
+| `TRAVERSAL_RUN_DIR` | `$TMPDIR/traversal-tunnels` | Private, writable directory for Envoy's configuration and a copy of the connector's credentials. |
+
+Raw pipe metrics, all with closed label sets: `connector.raw_tunnels_active`,
+`connector.raw_pipes_active`, `connector.raw_opens_total` (`result`, `reason`),
+`connector.raw_pipe_closes_total` (`reason`), `connector.raw_pipe_bytes`
+(`direction`), `connector.raw_pipe_duration`, `connector.raw_resets_total`
+(`origin`), `connector.raw_drains_total`,
+`connector.raw_capability_verifications_total` (`result`),
+`connector.raw_capability_rejections_total` (`code`), and
+`connector.raw_key_loads_total`.
+
 #### Raw pipe signing keys
 
 Each Traversal environment signs capabilities with its own AWS KMS key. The

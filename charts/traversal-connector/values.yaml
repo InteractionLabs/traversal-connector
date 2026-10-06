@@ -54,9 +54,13 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # ─── Raw pipes (preview) ─────────────────────────────────────────────────────
 # Raw pipes let Traversal reach databases, kubectl exec, git, and other non-HTTP
 # destinations through this connector. The connector holds outbound tunnels to
-# Traversal (allowlist *.tunnels.<your Traversal domain>:443) and checks a
-# Traversal-signed capability for every pipe. Off by default; leaving it off,
-# or setting it back to false, keeps the connector on HTTP requests only.
+# the controller's host on port 443, the same host and port it already
+# reaches, so no new firewall rule is needed. Tunnels offer the TLS ALPN
+# protocol x-traversal-tunnel, which Traversal's front door routes to its
+# tunnel endpoint; a TLS-intercepting proxy in the path breaks them. Every
+# pipe carries a Traversal-signed capability the connector checks before it
+# dials. Off by default; leaving it off, or setting it back to false, keeps
+# the connector on HTTP requests only.
 rawPipes:
   enabled: false           # TRAVERSAL_RAW_PIPES
   # The Traversal environment whose capability signer this connector trusts.
@@ -82,9 +86,19 @@ rawPipes:
       current: {kid: "", publicKeyPEM: ""}
       next: {kid: "", publicKeyPEM: ""}
   maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
-  tunnelsPerReplica: ""    # TRAVERSAL_TUNNELS_PER_REPLICA (default 2)
-  # host:port that replaces the tunnels entry point, e.g. a PrivateLink
-  # endpoint. TLS names are unchanged.
+  # Pipe limits, as Go durations. A pipe open for maxLifetime, or that moves
+  # no bytes either way for idleTimeout, is ended with a reset, so the caller
+  # knows to reconnect. "0s" turns a limit off. Blank uses the defaults, which
+  # match Traversal's.
+  maxLifetime: ""          # TRAVERSAL_RAW_PIPES_MAX_LIFETIME (default 4h)
+  idleTimeout: ""          # TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT (default 15m)
+  # W, the tunnels each connector pod holds: one per Envoy worker thread, so
+  # pipes spread across W connections and W threads. From 1 to 8.
+  tunnelCount: ""          # TRAVERSAL_TUNNEL_COUNT (default 2)
+  # host:port the tunnels dial instead of <controller host>:443, such as a
+  # PrivateLink endpoint or an in-cluster Service. SNI and the server
+  # certificate check still use the controller's host, and whatever answers
+  # must pass TLS through with its ALPN intact.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
   # HTTP/2 receive windows on the tunnels, in bytes. A pipe moves at most one
   # stream window per round trip to Traversal; raise both for distant

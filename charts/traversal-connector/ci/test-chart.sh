@@ -169,6 +169,19 @@ assert_contains "$tmp_dir/raw-rollout.yaml" $'            - name: TRAVERSAL_CAPA
 capability_keys "$tmp_dir/raw-rollout.yaml" > "$tmp_dir/raw-rollout.pem"
 assert_contains "$tmp_dir/raw-rollout.pem" $'-----END PUBLIC KEY-----\n-----BEGIN PUBLIC KEY-----\nKey-ID: next-kid\n\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETB2QE7tjDOklDuqNznqfM5eW+1Md'
 
+render raw-tunnels "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelCount=4 \
+  --set-string rawPipes.tunnelsConnectTo=edge-istio.istio-ingress.svc.cluster.local:443 \
+  --set-string rawPipes.maxLifetime=1h \
+  --set-string rawPipes.idleTimeout=0s
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNNEL_COUNT\n              value: "4"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNNELS_CONNECT_TO\n              value: "edge-istio.istio-ingress.svc.cluster.local:443"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME\n              value: "1h"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT\n              value: "0s"'
+assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_MAX_LIFETIME'
+assert_render_fails raw-per-replica 'rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelsPerReplica=2
+
 assert_render_fails raw-no-environment 'rawPipes.environment is required' "${common[@]}" --set rawPipes.enabled=true
 assert_render_fails raw-unpackaged-environment 'packages no capability key for that environment yet' "${common[@]}" "${raw_enabled[@]}" --set-string rawPipes.environment=prod
 assert_render_fails raw-half-next 'next needs both kid and publicKeyPEM' "${common[@]}" "${raw_enabled[@]}" \
