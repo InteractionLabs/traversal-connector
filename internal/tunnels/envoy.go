@@ -286,33 +286,12 @@ func (c envoyConfig) writeBootstrap() error {
 	return writeJSON(c.path(bootstrapFile), c.bootstrap())
 }
 
-// writeJSON replaces path atomically, so a restarted Envoy never reads a
-// half-written file.
+// writeJSON writes v to path. Run writes every file Envoy reads once, before
+// it starts Envoy, so nothing reads a file while it is written.
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, data, 0o600)
-}
-
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	// #nosec G703 -- Paths are the connector's own run directory and fixed names.
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }() //nolint:gosec // our own temp file
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path) //nolint:gosec // see CreateTemp above
+	return os.WriteFile(path, data, 0o600)
 }

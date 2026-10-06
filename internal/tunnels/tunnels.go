@@ -162,7 +162,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	for name, data := range map[string][]byte{
 		certFile: m.cfg.CertPEM, keyFile: m.cfg.KeyPEM, caFile: m.cfg.CAPEM,
 	} {
-		if err := writeFileAtomic(m.envoy.path(name), data, 0o600); err != nil {
+		if err := os.WriteFile(m.envoy.path(name), data, 0o600); err != nil {
 			return err
 		}
 	}
