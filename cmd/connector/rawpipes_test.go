@@ -8,14 +8,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/url"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
 )
 
 const (
@@ -100,4 +104,60 @@ func TestRawPipeSetupFailureLeavesLegacyRunning(t *testing.T) {
 			}
 		})
 	}
+}
+
+// brokenListener fails every Accept with an error the pipe server cannot
+// retry, and records that it was closed.
+type brokenListener struct {
+	net.Listener
+	closed atomic.Bool
+}
+
+var errListenerBroken = errors.New("listener broken")
+
+func (*brokenListener) Accept() (net.Conn, error) { return nil, errListenerBroken }
+
+func (l *brokenListener) Close() error {
+	l.closed.Store(true)
+	return nil
+}
+
+// A pipe server that stops for good stops raw pipes only: the tunnels are
+// drained and Envoy stopped, so the tunnel endpoint routes pipes elsewhere,
+// and readiness falls back to the legacy transport. The process does not
+// exit: if it did, the test binary would die rather than pass.
+func TestFatalAcceptErrorStopsRawPipesOnly(t *testing.T) {
+	cfg := rawPipesConfig(t)
+	// Never start a real Envoy, even if one is installed.
+	cfg.RawPipes.EnvoyPath = filepath.Join(t.TempDir(), "no-envoy")
+	tunnelCfg, err := tunnelConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := newPipeServer(cfg, redact.NewRedactor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := tunnels.New(tunnelCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln := &brokenListener{}
+	raw := runRawPipes(context.Background(), server, manager, ln)
+
+	select {
+	case <-raw.envoyDone:
+	case <-time.After(pipeDrainGrace):
+		t.Fatal("Envoy's tunnels kept running after the pipe server failed")
+	}
+	if !ln.closed.Load() {
+		t.Fatal("the pipe listener was left open")
+	}
+	if ready, reason := manager.Status(context.Background()); ready || reason != "draining" {
+		t.Fatalf("tunnels not drained: ready %v, %q", ready, reason)
+	}
+	if ready, reason := raw.readiness()(context.Background()); !ready {
+		t.Fatalf("raw pipes failing held the connector unready: %q", reason)
+	}
+	raw.drain() // shutdown after a failure returns, without draining twice
 }

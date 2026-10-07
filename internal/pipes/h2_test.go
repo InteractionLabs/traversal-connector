@@ -172,8 +172,8 @@ func (l *flakyListener) Close() error { return nil }
 
 // A transient Accept failure, such as running out of file descriptors, must
 // not stop the pipe server: it backs off and accepts again. A listener that
-// is gone ends serve with an error, so the process can exit rather than stay
-// healthy with no pipe server.
+// is gone ends serve with an error, so the connector can stop raw pipes
+// rather than keep tunnels to a pipe server that is gone.
 func TestServeSurvivesTransientAcceptErrors(t *testing.T) {
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })

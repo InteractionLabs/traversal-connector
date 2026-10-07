@@ -11,6 +11,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
@@ -51,6 +53,10 @@ type rawPipes struct {
 	// stopTransport ends Envoy and the pipe listener, after the drain.
 	stopTransport context.CancelFunc
 	envoyDone     chan struct{}
+	// failed is set when the pipe server stopped for good, and raw pipes
+	// with it.
+	failed    atomic.Bool
+	drainOnce sync.Once
 }
 
 // startRawPipes starts serving pipes and holding tunnels. It returns nil
@@ -97,49 +103,80 @@ func setUpRawPipes(
 	if err != nil {
 		return nil, fmt.Errorf("listen for pipes: %w", err)
 	}
-	// The transport outlives ctx: pipes the tunnels already carry still arrive
-	// while Envoy drains, and are refused with CONNECTOR_DRAINING.
-	transport, stopTransport := context.WithCancel(context.WithoutCancel(ctx))
-	go func() {
-		if err := server.Serve(transport, ln); err != nil {
-			// The pipe server cannot recover, and a pod that stays healthy
-			// without it answers every pipe with connection refused until
-			// someone restarts it. Exit, so the pod restarts instead.
-			slog.Error("pipe server stopped; exiting", "err", err)
-			os.Exit(1)
-		}
-	}()
-	envoyDone := make(chan struct{})
-	go func() {
-		defer close(envoyDone)
-		if err := manager.Run(transport); err != nil {
-			slog.Error("tunnels stopped", "err", err)
-		}
-	}()
+	raw := runRawPipes(ctx, server, manager, ln)
 	slog.InfoContext(ctx, "raw pipes enabled",
 		"max_pipes", cfg.RawPipes.MaxPipes,
 		"tunnels", cfg.RawPipes.TunnelCount,
 		"issuer", cfg.RawPipes.CapabilityIssuer,
 		"max_lifetime", cfg.RawPipes.MaxLifetime,
 		"idle_timeout", cfg.RawPipes.IdleTimeout)
-	return &rawPipes{
+	return raw, nil
+}
+
+// runRawPipes serves pipes on ln and runs Envoy's tunnels until drained.
+func runRawPipes(
+	ctx context.Context,
+	server *pipes.Server,
+	manager *tunnels.Manager,
+	ln net.Listener,
+) *rawPipes {
+	// The transport outlives ctx: pipes the tunnels already carry still arrive
+	// while Envoy drains, and are refused with CONNECTOR_DRAINING.
+	transport, stopTransport := context.WithCancel(context.WithoutCancel(ctx))
+	r := &rawPipes{
 		server:        server,
 		tunnels:       manager,
 		stopTransport: stopTransport,
-		envoyDone:     envoyDone,
-	}, nil
+		envoyDone:     make(chan struct{}),
+	}
+	go r.serve(transport, ln)
+	go func() {
+		defer close(r.envoyDone)
+		if err := manager.Run(transport); err != nil {
+			slog.Error("tunnels stopped", "err", err)
+		}
+	}()
+	return r
 }
 
-// readiness is the raw pipe side's readiness gate.
+// serve runs the pipe server. If it stops for good (an Accept error it
+// cannot retry), raw pipes stop with it and the legacy transport carries on:
+// the drain sends GOAWAY on every tunnel and then stops Envoy, so the tunnel
+// endpoint routes pipes to other connector replicas instead of answering
+// them with connection refused from this one. Exiting would restart the pod
+// and cut the legacy transport too, which raw pipes never do.
+func (r *rawPipes) serve(ctx context.Context, ln net.Listener) {
+	err := r.server.Serve(ctx, ln)
+	if err == nil {
+		return
+	}
+	slog.Error("pipe server stopped; stopping raw pipes and "+
+		"serving the legacy transport only", "err", err)
+	_ = ln.Close()
+	r.failed.Store(true)
+	r.drain()
+}
+
+// readiness is the raw pipe side's readiness gate. Once raw pipes have
+// failed it no longer gates: the connector serves the legacy transport only.
 func (r *rawPipes) readiness() router.ReadinessGate {
-	return r.tunnels.Status
+	return func(ctx context.Context) (bool, string) {
+		if r.failed.Load() {
+			return true, "raw pipes stopped after the pipe server failed; " +
+				"serving the legacy transport only"
+		}
+		return r.tunnels.Status(ctx)
+	}
 }
 
 // drain stops this connector taking pipes without cutting the ones it
 // carries: GOAWAY on every tunnel so Traversal sends new pipes to another
 // connector replica, a short settle for pipes already on their way, then
-// refusals with CONNECTOR_DRAINING while open pipes finish.
-func (r *rawPipes) drain() {
+// refusals with CONNECTOR_DRAINING while open pipes finish, then Envoy
+// stops. It runs once; later calls wait for the first to finish.
+func (r *rawPipes) drain() { r.drainOnce.Do(r.drainNow) }
+
+func (r *rawPipes) drainNow() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	if err := r.tunnels.Drain(ctx); err != nil {
 		slog.Warn("could not drain Envoy's tunnels", "err", err)
