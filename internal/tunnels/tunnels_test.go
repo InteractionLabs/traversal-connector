@@ -80,6 +80,29 @@ func TestIdentityFromCertificate(t *testing.T) {
 	}
 }
 
+// The tunnel endpoint reads the first URI SAN only. A certificate with more
+// than one could pass here and be refused there, so it is refused here,
+// whichever order the SANs are in.
+func TestIdentityRequiresExactlyOneURISAN(t *testing.T) {
+	scoped := "spiffe://traversal.com/tenant/" + testTenant + "/acme/connector/" + testConnector
+	other := "spiffe://example.com/workload"
+	for name, uris := range map[string][]string{
+		"scoped first":  {scoped, other},
+		"scoped second": {other, scoped},
+		"scoped twice":  {scoped, scoped},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if id, err := IdentityFromCertificate(certWithURIs(t, uris...), testConnector); err == nil {
+				t.Fatalf("accepted %d URI SANs as %+v", len(uris), id)
+			}
+		})
+	}
+	if _, err := IdentityFromCertificate(certWithURIs(t), testConnector); !errors.Is(
+		err, ErrNoConnectorIdentity) {
+		t.Fatalf("no URI SAN: %v", err)
+	}
+}
+
 // bootstrapOf reads the Envoy configuration m writes.
 func bootstrapOf(t *testing.T, m *Manager) map[string]any {
 	t.Helper()

@@ -43,17 +43,26 @@ func IdentityFromCertificate(certPEM []byte, connectorID string) (Identity, erro
 	if err != nil {
 		return Identity{}, fmt.Errorf("parse client certificate: %w", err)
 	}
-	for _, uri := range cert.URIs {
-		m := connectorSAN.FindStringSubmatch(uri.String())
-		if m == nil {
-			continue
-		}
-		if m[2] != connectorID {
-			return Identity{}, fmt.Errorf(
-				"the client certificate is for connector %s, but TRAVERSAL_CONNECTOR_ID is %s",
-				m[2], connectorID)
-		}
-		return Identity{ConnectorID: m[2], TenantID: m[1]}, nil
+	// The tunnel endpoint reads the first URI SAN. With more than one, a
+	// certificate accepted here could be refused there, so require exactly
+	// one: both sides then read the same SAN.
+	switch len(cert.URIs) {
+	case 0:
+		return Identity{}, ErrNoConnectorIdentity
+	case 1:
+	default:
+		return Identity{}, fmt.Errorf(
+			"the client certificate has %d URI SANs; raw pipes need exactly one, "+
+				"its connector-scoped SPIFFE ID", len(cert.URIs))
 	}
-	return Identity{}, ErrNoConnectorIdentity
+	m := connectorSAN.FindStringSubmatch(cert.URIs[0].String())
+	if m == nil {
+		return Identity{}, ErrNoConnectorIdentity
+	}
+	if m[2] != connectorID {
+		return Identity{}, fmt.Errorf(
+			"the client certificate is for connector %s, but TRAVERSAL_CONNECTOR_ID is %s",
+			m[2], connectorID)
+	}
+	return Identity{ConnectorID: m[2], TenantID: m[1]}, nil
 }
