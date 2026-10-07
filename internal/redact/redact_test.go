@@ -107,17 +107,51 @@ func TestRedactor_InvalidPattern(t *testing.T) {
 	}
 }
 
-func TestRedactor_UnknownTypeSkipped(t *testing.T) {
-	r := NewRedactor()
-	if err := r.Update(&RulesFile{
-		Rules: []Rule{{Name: "x", Type: "glob", Pattern: "*.secret"}},
-	}); err != nil {
-		t.Fatalf("Update() error: %v", err)
+func TestRedactor_InvalidTypeRejectsEntireUpdate(t *testing.T) {
+	valid := Rule{
+		Name: "new", Type: ruleTypeRegex, Pattern: "secret", Replacement: "[NEW]",
 	}
-	src := []byte("some.secret text")
-	got, _ := r.Apply(context.Background(), "", src)
-	if string(got) != string(src) {
-		t.Errorf("unknown rule type should be skipped, got %q", got)
+	for _, kind := range []ruleType{"glob", ""} {
+		invalid := Rule{Name: "invalid-type", Type: kind, Pattern: "secret"}
+		for _, tc := range []struct {
+			name  string
+			rules []Rule
+		}{
+			{name: "invalid only", rules: []Rule{invalid}},
+			{name: "invalid first", rules: []Rule{invalid, valid}},
+			{name: "invalid last", rules: []Rule{valid, invalid}},
+		} {
+			for _, state := range []string{"initial", "running"} {
+				t.Run(string(kind)+"/"+tc.name+"/"+state, func(t *testing.T) {
+					r := NewRedactor()
+					want := "secret"
+					if state == "running" {
+						if err := r.Update(&RulesFile{Rules: []Rule{{
+							Name: "old", Type: ruleTypeRegex,
+							Pattern: "secret", Replacement: "[OLD]",
+						}}}); err != nil {
+							t.Fatal(err)
+						}
+						want = "[OLD]"
+					}
+					accepted := r.rules.Load()
+					err := r.Update(&RulesFile{Rules: tc.rules})
+					if err == nil {
+						t.Fatal("invalid rule type accepted")
+					}
+					if !strings.Contains(err.Error(), `rule "invalid-type"`) ||
+						!strings.Contains(err.Error(), "unsupported redaction rule type") {
+						t.Fatalf("error does not identify the invalid rule: %v", err)
+					}
+					if r.rules.Load() != accepted {
+						t.Fatal("rejected update replaced the active rules")
+					}
+					if got := string(applyBytes(r, "", []byte("secret"))); got != want {
+						t.Fatalf("got %q after rejected update, want %q", got, want)
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -143,6 +177,16 @@ func TestRedactor_AtomicUpdate(t *testing.T) {
 	}
 	if got := string(applyBytes(r, "", []byte("user@example.com"))); got != "[REDACTED_EMAIL]" {
 		t.Errorf("after update: got %q", got)
+	}
+
+	if err := r.Update(&RulesFile{Rules: []Rule{}}); err != nil {
+		t.Fatalf("explicit empty update: %v", err)
+	}
+	if r.HasRulesForHost("example.com") {
+		t.Fatal("explicit empty update did not disable redaction")
+	}
+	if got := string(applyBytes(r, "", original)); got != "user@example.com" {
+		t.Errorf("after explicit empty update: got %q", got)
 	}
 }
 

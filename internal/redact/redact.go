@@ -227,7 +227,8 @@ func NewRedactor() *Redactor {
 // set.
 //
 //   - Rules with type "regex" or "regex-structured-data" are compiled.
-//     Unrecognised types are logged and skipped.
+//     Unsupported or omitted types reject the entire update, leaving the
+//     current rules unchanged.
 //   - Each rule's replacement falls back to f.DefaultReplacement, which itself
 //     falls back to "[REDACTED]".
 //   - redact_fields / skip_fields are only meaningful on
@@ -264,9 +265,11 @@ func compileRules(f *RulesFile) ([]compiledRule, error) {
 		case ruleTypeRegexStructured:
 			structured = true
 		default:
-			slog.Warn("redaction rule has unsupported type, skipping",
-				"rule", rule.Name, "type", rule.Type)
-			continue
+			return nil, fmt.Errorf(
+				"rule %q: unsupported redaction rule type %q",
+				rule.Name,
+				rule.Type,
+			)
 		}
 
 		re, err := regexp.Compile(rule.Pattern)
