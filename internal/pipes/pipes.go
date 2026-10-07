@@ -104,7 +104,9 @@ func New(cfg Config) (*Server, error) {
 }
 
 // Serve accepts connections from the connector's Envoy on ln until ctx is
-// done. Pipes already open keep running after Serve returns; see Wait.
+// done, then returns nil. It retries transient Accept failures; any other
+// error means the server cannot accept pipes again. Pipes already open keep
+// running after Serve returns; see Wait.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	return s.h2.serve(ctx, ln)
 }

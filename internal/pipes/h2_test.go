@@ -2,11 +2,13 @@ package pipes
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"math"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -137,5 +139,72 @@ func TestStreamWindowOverflowSendsReset(t *testing.T) {
 		case <-timeout:
 			t.Fatal("no RST_STREAM after the stream's send window overflowed")
 		}
+	}
+}
+
+// flakyListener fails Accept with err a few times, then hands out conns, then
+// reports itself closed.
+type flakyListener struct {
+	net.Listener
+	mu       sync.Mutex
+	failures int
+	err      error
+	conns    []net.Conn
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case l.failures > 0:
+		l.failures--
+		return nil, l.err
+	case len(l.conns) > 0:
+		c := l.conns[0]
+		l.conns = l.conns[1:]
+		return c, nil
+	default:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *flakyListener) Close() error { return nil }
+
+// A transient Accept failure, such as running out of file descriptors, must
+// not stop the pipe server: it backs off and accepts again. A listener that
+// is gone ends serve with an error, so the process can exit rather than stay
+// healthy with no pipe server.
+func TestServeSurvivesTransientAcceptErrors(t *testing.T) {
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	ln := &flakyListener{
+		failures: 3,
+		err:      &net.OpError{Op: "accept", Net: "tcp", Err: syscall.EMFILE},
+		conns:    []net.Conn{server},
+	}
+	s := &h2server{handle: func(*h2stream) {}}
+	err := s.serve(context.Background(), ln)
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serve returned %v, want the listener's closure", err)
+	}
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	if ln.failures != 0 || len(ln.conns) != 0 {
+		t.Fatalf("serve stopped with %d failures and %d conns left", ln.failures, len(ln.conns))
+	}
+}
+
+// Closing the listener because ctx is done is a clean stop.
+func TestServeStopsCleanlyWhenCancelled(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (&h2server{handle: func(*h2stream) {}}).serve(ctx, ln) }()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve returned %v after ctx was done, want nil", err)
 	}
 }

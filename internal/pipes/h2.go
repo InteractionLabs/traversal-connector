@@ -8,6 +8,8 @@ import (
 	"math"
 	"net"
 	"sync"
+	"syscall"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -96,19 +98,55 @@ func (s *h2server) wait(ctx context.Context) error {
 	}
 }
 
+// Accept backoff after a transient failure, as net/http's server does.
+const (
+	minAcceptBackoff = 5 * time.Millisecond
+	maxAcceptBackoff = time.Second
+)
+
+// serve accepts connections until ctx is done, then returns nil. A transient
+// Accept failure, such as running out of file descriptors, is retried with
+// backoff; any other ends serve with the error, for the caller to treat as
+// fatal.
 func (s *h2server) serve(ctx context.Context, ln net.Listener) error {
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
+	backoff := time.Duration(0)
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			if !transientAcceptError(err) {
+				return err
+			}
+			backoff = min(max(2*backoff, minAcceptBackoff), maxAcceptBackoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil
+			}
+			continue
 		}
+		backoff = 0
 		go s.serveConn(nc)
 	}
+}
+
+// transientAcceptError reports whether Accept may succeed if retried: the
+// process or system is out of descriptors or buffers, or one connection was
+// aborted before it was accepted.
+func transientAcceptError(err error) bool {
+	for _, errno := range []syscall.Errno{
+		syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM,
+		syscall.ECONNABORTED, syscall.ECONNRESET, syscall.EINTR, syscall.EAGAIN,
+	} {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
 }
 
 type h2conn struct {

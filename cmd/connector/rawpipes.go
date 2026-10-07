@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"os"
 	"slices"
 	"time"
 
@@ -74,7 +75,11 @@ func startRawPipes(
 	serveCtx, stopServing := context.WithCancel(context.WithoutCancel(ctx))
 	go func() {
 		if err := server.Serve(serveCtx, ln); err != nil {
-			slog.Error("pipe server stopped", "err", err)
+			// The pipe server cannot recover, and a pod that stays healthy
+			// without it answers every pipe with connection refused until
+			// someone restarts it. Exit, so the pod restarts instead.
+			slog.Error("pipe server stopped; exiting", "err", err)
+			os.Exit(1)
 		}
 	}()
 	slog.InfoContext(ctx, "raw pipes enabled",
