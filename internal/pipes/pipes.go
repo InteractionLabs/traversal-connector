@@ -205,6 +205,11 @@ func (s *Server) serve(st *h2stream) {
 		return
 	}
 	s.metrics.verified()
+	claims := verified.Claims
+	// Who asked, on every line from here: refusals included.
+	log = log.With("jti", claims.JTI, "session_id", claims.SessionID,
+		"organization_id", claims.OrganizationID, "integration_id", claims.IntegrationID,
+		"consumer_id", claims.ConsumerID, "traffic_class", claims.TrafficClass)
 	// Admission after verification: a refused capability never takes a slot.
 	if s.open.Add(1) > s.cfg.MaxPipes {
 		s.open.Add(-1)
@@ -212,9 +217,6 @@ func (s *Server) serve(st *h2stream) {
 		return
 	}
 	defer s.open.Add(-1)
-	claims := verified.Claims
-	log = log.With("jti", claims.JTI, "session_id", claims.SessionID,
-		"organization_id", claims.OrganizationID, "integration_id", claims.IntegrationID)
 
 	// Tied to the stream: a caller that gives up stops the dial.
 	dialCtx, cancel := context.WithTimeout(st.ctx, dialTimeout)
@@ -237,6 +239,14 @@ func (s *Server) serve(st *h2stream) {
 	defer stopAbort()
 	if err := st.respond("200", nil, false); err != nil {
 		abort(dst)
+		// The destination was dialed, so the pipe is audited, though it
+		// never opened.
+		log.Info("pipe",
+			"upstream", upstreamName(route),
+			"outcome", string(outcomeOf(st, outcomeCallerAborted)),
+			"bytes_sent", 0,
+			"bytes_received", 0,
+			"duration_ms", time.Since(start).Milliseconds())
 		return
 	}
 	s.metrics.opened()
@@ -247,16 +257,20 @@ func (s *Server) serve(st *h2stream) {
 		result.outcome = reached
 	}
 	s.metrics.closed(result, time.Since(start))
-	upstream := route.Addr.String()
-	if route.Proxy != nil {
-		upstream = "proxy " + route.Proxy.Host
-	}
 	log.Info("pipe",
-		"upstream", upstream,
+		"upstream", upstreamName(route),
 		"outcome", string(result.outcome),
 		"bytes_sent", result.sent,
 		"bytes_received", result.received,
 		"duration_ms", time.Since(start).Milliseconds())
+}
+
+// upstreamName is the audited destination a route reached.
+func upstreamName(route dialpolicy.Route) string {
+	if route.Proxy != nil {
+		return "proxy " + route.Proxy.Host
+	}
+	return route.Addr.String()
 }
 
 // outcome is how a pipe ended, as audited.
@@ -366,24 +380,21 @@ func splice(st *h2stream, dst dialpolicy.Conn, touch func()) spliceResult {
 	if result.outcome != outcomeCompleted {
 		// A peer reset or lost tunnel aborts the destination from outside
 		// the copies, which then see only the destination failing.
-		if o := streamLoss(st); o != "" {
-			result.outcome = o
-		}
+		result.outcome = outcomeOf(st, result.outcome)
 	}
 	return result
 }
 
-// streamLoss is the outcome for a stream ended from Envoy's side: the caller
-// reset it or the tunnel was lost. It is "" while the stream is open or when
-// this side ended it first.
-func streamLoss(st *h2stream) outcome {
+// outcomeOf is the outcome for a stream ended from Envoy's side, the caller
+// resetting it or the tunnel being lost, or otherwise fallback.
+func outcomeOf(st *h2stream, fallback outcome) outcome {
 	switch cause := context.Cause(st.ctx); {
 	case errors.Is(cause, errStreamReset):
 		return outcomeCallerAborted
 	case errors.Is(cause, errConnClosed):
 		return outcomeTunnelUnavailable
 	default:
-		return ""
+		return fallback
 	}
 }
 

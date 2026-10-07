@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -100,6 +102,8 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 				if err := hc.dial(ctx); err != nil {
 					return nil, err
 				}
+				// The hook decided the dial succeeds, whatever ctx says now.
+				ctx = context.WithoutCancel(ctx)
 			}
 			var d net.Dialer
 			return d.DialContext(ctx, network, dest.Addr().String())
@@ -732,5 +736,124 @@ func TestAbandonedOpenStopsDialing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the dial kept going after the caller reset the open")
 	}
+	h.waitOpen(0)
+}
+
+// logBuffer collects JSON log lines; slog may write from several goroutines.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// find waits for the first line whose msg is msg and that has every field
+// in want, and returns it.
+func (b *logBuffer) find(t *testing.T, msg string, want map[string]any) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b.mu.Lock()
+		lines := strings.Split(b.buf.String(), "\n")
+		b.mu.Unlock()
+	lines:
+		for _, line := range lines {
+			var rec map[string]any
+			if json.Unmarshal([]byte(line), &rec) != nil || rec["msg"] != msg {
+				continue
+			}
+			for k, v := range want {
+				if rec[k] != v {
+					continue lines
+				}
+			}
+			return rec
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q line with %v in:\n%s", msg, want, strings.Join(lines, "\n"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// captureLogs sends the default logger to a buffer for the test.
+func captureLogs(t *testing.T) *logBuffer {
+	t.Helper()
+	b := &logBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(b, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return b
+}
+
+// The audit line records who asked: the consumer and traffic class too.
+func TestAuditLineNamesConsumer(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	_ = p.body.Close()
+	_, _ = io.ReadAll(dst)
+	_ = dst.Close()
+	_, _ = io.ReadAll(p.resp.Body)
+	logs.find(t, "pipe", map[string]any{
+		"outcome": "completed", "consumer_id": "test", "traffic_class": "standard",
+	})
+}
+
+// A capacity refusal is for a verified capability, so it is logged with it.
+func TestCapacityRefusalLogsCapability(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{maxPipes: 1})
+	h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	token := capabilityFor(t, "db.internal", 5432, func(c *capability.Claims) {
+		c.JTI = "refused-jti"
+	})
+	p, err := h.connect("db.internal:5432", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p.resp.Body.Close()
+	logs.find(t, "pipe refused", map[string]any{
+		"reason": "capacity", "jti": "refused-jti", "consumer_id": "test",
+	})
+}
+
+// A destination dialed for a caller who reset meanwhile is still audited,
+// though the pipe never opened.
+func TestDialedButUnansweredPipeIsAudited(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{dial: func(ctx context.Context) error {
+		// The dial completes just as the caller's reset arrives.
+		<-ctx.Done()
+		return nil
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "http://db.internal:5432",
+		http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "db.internal:5432"
+	req.Header.Set(HeaderCapability, capabilityFor(t, "db.internal", 5432))
+	go func() {
+		if resp, err := h.client.Transport.RoundTrip(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	go func() {
+		if conn, err := h.dest.Accept(); err == nil {
+			_ = conn.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	logs.find(t, "pipe", map[string]any{"outcome": "caller_aborted", "bytes_sent": 0.0})
 	h.waitOpen(0)
 }
