@@ -526,6 +526,13 @@ func (st *h2stream) Write(p []byte) (int, error) {
 			}
 			return c.fr.WriteData(st.id, false, chunk)
 		}); err != nil {
+			// The chunk never went out, so the peer will never credit it:
+			// return the reservation, or the connection loses it for good.
+			c.mu.Lock()
+			st.sendWin += int64(n)
+			c.sendWin += int64(n)
+			c.cond.Broadcast()
+			c.mu.Unlock()
 			return written, err
 		}
 		p, written = p[n:], written+n
