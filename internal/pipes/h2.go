@@ -198,7 +198,8 @@ func (s *h2server) serveConn(nc net.Conn) {
 var errProtocol = errors.New("pipes: peer violated HTTP/2")
 
 // write runs fn with the write lock. A failed write ends the connection;
-// errStreamReset from fn means only that the stream can no longer send.
+// errStreamReset or errConnClosed from fn means only that the stream can no
+// longer send.
 //
 // Lock order: wmu, then mu. A stream's state is re-checked under both locks
 // right before its frame is written, so no frame follows the stream's
@@ -207,17 +208,23 @@ func (c *h2conn) write(fn func() error) error {
 	c.wmu.Lock()
 	err := fn()
 	c.wmu.Unlock()
-	if err != nil && !errors.Is(err, errStreamReset) {
+	if err != nil && !errors.Is(err, errStreamReset) && !errors.Is(err, errConnClosed) {
 		_ = c.nc.Close()
 	}
 	return err
 }
 
-// sendable reports, under c.mu, whether st may still send frames.
-func (st *h2stream) sendable() bool {
-	st.c.mu.Lock()
-	defer st.c.mu.Unlock()
-	return !st.reset && !st.localEnd && st.c.err == nil
+// sendErr reports why st may no longer send frames, or nil if it may: the
+// connection is gone (errConnClosed) or the stream ended (errStreamReset).
+// c.mu must be held.
+func (st *h2stream) sendErr() error {
+	switch {
+	case st.c.err != nil:
+		return errConnClosed
+	case st.reset || st.localEnd:
+		return errStreamReset
+	}
+	return nil
 }
 
 func (c *h2conn) readLoop(s *h2server) error {
@@ -502,7 +509,9 @@ func (st *h2stream) Read(p []byte) (int, error) {
 // back: a quarter.
 const creditFraction = 4
 
-// Write sends p as DATA within both send windows.
+// Write sends p as DATA within both send windows. It fails with
+// errConnClosed once the connection is gone, and errStreamReset once only
+// the stream is.
 func (st *h2stream) Write(p []byte) (int, error) {
 	c := st.c
 	written := 0
@@ -511,9 +520,9 @@ func (st *h2stream) Write(p []byte) (int, error) {
 		for (st.sendWin <= 0 || c.sendWin <= 0) && !st.reset && c.err == nil {
 			c.cond.Wait()
 		}
-		if st.reset || c.err != nil || st.localEnd {
+		if err := st.sendErr(); err != nil {
 			c.mu.Unlock()
-			return written, errStreamReset
+			return written, err
 		}
 		n := int(min(int64(len(p)), int64(c.maxFrame), st.sendWin, c.sendWin))
 		st.sendWin -= int64(n)
@@ -521,8 +530,11 @@ func (st *h2stream) Write(p []byte) (int, error) {
 		c.mu.Unlock()
 		chunk := p[:n]
 		if err := c.write(func() error {
-			if !st.sendable() {
-				return errStreamReset
+			c.mu.Lock()
+			err := st.sendErr()
+			c.mu.Unlock()
+			if err != nil {
+				return err
 			}
 			return c.fr.WriteData(st.id, false, chunk)
 		}); err != nil {
@@ -533,6 +545,9 @@ func (st *h2stream) Write(p []byte) (int, error) {
 			c.sendWin += int64(n)
 			c.cond.Broadcast()
 			c.mu.Unlock()
+			if !errors.Is(err, errStreamReset) {
+				err = errConnClosed // a failed frame write ends the connection
+			}
 			return written, err
 		}
 		p, written = p[n:], written+n

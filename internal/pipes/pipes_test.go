@@ -16,12 +16,16 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"golang.org/x/net/http2"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -45,6 +49,9 @@ type harness struct {
 	dest     net.Listener
 	client   *http.Client
 	resolved map[string]string // host → address the fake resolver returns
+
+	mu    sync.Mutex
+	conns []net.Conn // the caller's connections to the server
 }
 
 type harnessConfig struct {
@@ -119,7 +126,13 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, network, h.addr)
+			conn, err := d.DialContext(ctx, network, h.addr)
+			if err == nil {
+				h.mu.Lock()
+				h.conns = append(h.conns, conn)
+				h.mu.Unlock()
+			}
+			return conn, err
 		},
 	}}
 	return h
@@ -575,4 +588,61 @@ func TestDestinationFailureAfterItsFINResetsCaller(t *testing.T) {
 		}
 	}
 	t.Fatal("the caller kept writing for 10 s after the destination failed")
+}
+
+// waitOpen waits for the server's open pipe count to reach want.
+func (h *harness) waitOpen(want int64) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.server.Open() != want {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("%d pipes open, want %d", h.server.Open(), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Losing the connection to Envoy is audited as a lost tunnel, not as the
+// caller giving up.
+func TestConnectionLossIsTunnelLost(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	h := newHarness(t, harnessConfig{meters: provider})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = p // the caller never reads, so the server's writes block on its window
+	go func() {
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := dst.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	h.mu.Lock()
+	for _, c := range h.conns {
+		_ = c.Close()
+	}
+	h.mu.Unlock()
+	h.waitOpen(0)
+
+	var rm metricdata.ResourceMetrics
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		if sum(t, rm, telemetry.MetricRawPipeClosesTotal) == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	lost := attribute.String(attrReason, "tunnel_lost")
+	if got := sum(t, rm, telemetry.MetricRawPipeClosesTotal, lost); got != 1 {
+		t.Fatalf("%d pipes closed as tunnel_lost, want 1 (closes: %d)",
+			got, sum(t, rm, telemetry.MetricRawPipeClosesTotal))
+	}
 }
