@@ -167,10 +167,20 @@ func TestBootstrapHoldsTunnelsToTheControllerHost(t *testing.T) {
 	hcm := filter["typed_config"].(map[string]any)
 	if filter["name"] != "envoy.filters.network.reverse_tunnel_drain_aware_http_connection_manager" ||
 		hcm["enable_drain_with_goaway"] != true {
-		t.Fatalf("tunnel listener filter %v, drain with GOAWAY %v", filter["name"], hcm["enable_drain_with_goaway"])
+		t.Fatalf(
+			"tunnel listener filter %v, drain with GOAWAY %v",
+			filter["name"],
+			hcm["enable_drain_with_goaway"],
+		)
 	}
-	if inner := hcm["hcm_config"].(map[string]any); inner["stream_idle_timeout"] != "0s" {
+	inner := hcm["hcm_config"].(map[string]any)
+	if inner["stream_idle_timeout"] != "0s" {
 		t.Fatalf("pipes HCM %v", inner)
+	}
+	// An idle tunnel must never be closed for idling: Envoy's default
+	// closes a connection with no streams after an hour.
+	if common, _ := inner["common_http_protocol_options"].(map[string]any); common["idle_timeout"] != "0s" {
+		t.Fatalf("tunnel idle timeout %v, want 0s", inner["common_http_protocol_options"])
 	}
 
 	cluster := staticResource(t, b, "clusters", tunnelCluster)

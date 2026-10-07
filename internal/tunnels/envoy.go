@@ -193,6 +193,13 @@ func (c envoyConfig) pipesHCM() map[string]any {
 		// core enforces the idle timeout and lifetime cap, so a
 		// pipe ends with a reason core audits.
 		"stream_idle_timeout": "0s",
+		// A tunnel with no pipes is still a tunnel. Envoy closes an HTTP/2
+		// connection with no active streams after an hour by default, and
+		// the reverse tunnel's pings run below HTTP so they do not count as
+		// activity: a connector idle for an hour would lose every tunnel and
+		// depend on re-dialing to get them back. 0s disables the timeout;
+		// TCP keepalive on the tunnel cluster still finds dead peers.
+		"common_http_protocol_options": map[string]any{"idle_timeout": "0s"},
 		"route_config": map[string]any{"virtual_hosts": []any{map[string]any{
 			"name":    "pipes",
 			"domains": []any{"*"},
