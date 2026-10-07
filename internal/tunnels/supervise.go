@@ -18,6 +18,32 @@ import (
 // envoyStopGrace is how long Envoy may take to exit after SIGTERM.
 const envoyStopGrace = 10 * time.Second
 
+// envoyDrainTime is Envoy's drain period (--drain-time-s). With the immediate
+// drain strategy every tunnel gets GOAWAY as soon as Drain starts; the drain
+// time is then only how long Envoy keeps its listeners before closing them.
+// It outlasts connector-core's drain (a 2 s settle, then up to 20 s for open
+// pipes) so the tunnel listener stays up while pipes finish, and ends inside
+// the pod's 30 s termination grace.
+const envoyDrainTime = 25 * time.Second
+
+// envoyArgs is Envoy's command line for bootstrap and the worker count.
+func envoyArgs(bootstrap string, workers int) []string {
+	return []string{
+		"--config-path", bootstrap,
+		"--log-level", "warn",
+		// Each worker dials its own tunnel.
+		"--concurrency", strconv.Itoa(workers),
+		// Envoy's own hot-restart shared memory is not needed: core
+		// restarts it, and two connectors may share a host network.
+		"--disable-hot-restart",
+		// GOAWAY on every tunnel at once when draining. Envoy's default,
+		// gradual over 600 s, would keep most tunnels taking new pipes
+		// long after core starts refusing them as CONNECTOR_DRAINING.
+		"--drain-strategy", "immediate",
+		"--drain-time-s", strconv.Itoa(int(envoyDrainTime / time.Second)),
+	}
+}
+
 // supervise runs Envoy with bootstrap and the given worker count until ctx is done,
 // restarting it with backoff whenever it exits. On shutdown Envoy gets
 // SIGTERM.
@@ -25,15 +51,7 @@ func supervise(ctx context.Context, envoyPath, bootstrap string, workers int, ou
 	backoff := 500 * time.Millisecond
 	for {
 		// #nosec G204 -- The Envoy path is operator configuration, not input.
-		cmd := exec.CommandContext(ctx, envoyPath,
-			"--config-path", bootstrap,
-			"--log-level", "warn",
-			// Each worker dials its own tunnel.
-			"--concurrency", strconv.Itoa(workers),
-			// Envoy's own hot-restart shared memory is not needed: core
-			// restarts it, and two connectors may share a host network.
-			"--disable-hot-restart",
-		)
+		cmd := exec.CommandContext(ctx, envoyPath, envoyArgs(bootstrap, workers)...)
 		cmd.Stdout, cmd.Stderr = out, out
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 		cmd.WaitDelay = envoyStopGrace
@@ -69,7 +87,8 @@ func newAdmin(port int) admin {
 }
 
 // drainListeners starts Envoy's graceful drain: its HTTP/2 connections, the
-// reverse tunnels included, get GOAWAY while open streams continue.
+// reverse tunnels included, get GOAWAY at once (see envoyArgs) while open
+// streams continue.
 func (a admin) drainListeners(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.base+"/drain_listeners?graceful&skip_exit", nil)

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -328,5 +329,25 @@ func TestTunnelsGaugeReportsEnvoysTunnels(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != 2 {
 		t.Fatalf("tunnels gauge %v, want [2]", got)
+	}
+}
+
+// Envoy drains immediately: every tunnel gets GOAWAY when the drain starts,
+// not spread over Envoy's 600 s default, which would leave tunnel endpoints
+// routing pipes to a connector already refusing them.
+func TestEnvoyDrainsImmediately(t *testing.T) {
+	args := strings.Join(envoyArgs("/run/envoy.json", 2), " ")
+	for _, want := range []string{
+		"--drain-strategy immediate",
+		"--drain-time-s " + strconv.Itoa(int(envoyDrainTime/time.Second)),
+		"--concurrency 2",
+		"--config-path /run/envoy.json",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("envoy args %q lack %q", args, want)
+		}
+	}
+	if envoyDrainTime <= 0 || envoyDrainTime >= 30*time.Second {
+		t.Errorf("drain time %s must be positive and inside the pod's 30 s grace", envoyDrainTime)
 	}
 }
