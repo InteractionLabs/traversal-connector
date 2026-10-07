@@ -164,35 +164,49 @@ func (c envoyConfig) listener() map[string]any {
 			"resolver_name": "envoy.resolvers.reverse_connection",
 		}},
 		"listener_filters_timeout": "0s",
+		// The drain-aware HCM is the stock HCM plus one behaviour: when the
+		// tunnel endpoint sends GOAWAY (it is draining the tunnel, for a
+		// rollout or recycling), Envoy stops counting this tunnel and dials
+		// its replacement at once, while open pipes finish on the old one.
+		// Without it a draining tunnel counts as held until its socket
+		// closes, which pipes can delay for hours.
 		"filter_chains": []any{map[string]any{"filters": []any{map[string]any{
-			"name": "envoy.filters.network.http_connection_manager",
+			"name": "envoy.filters.network.reverse_tunnel_drain_aware_http_connection_manager",
 			"typed_config": map[string]any{
 				"@type": "type.googleapis.com/envoy.extensions.filters.network." +
-					"http_connection_manager.v3.HttpConnectionManager",
-				"stat_prefix":            "pipes",
-				"codec_type":             "HTTP2",
-				"http2_protocol_options": c.tunnelServerHTTP2Options(),
-				"upgrade_configs":        []any{map[string]any{"upgrade_type": "CONNECT"}},
-				// Pipes are long-lived and may sit idle (psql, kubectl exec).
-				// core enforces the idle timeout and lifetime cap, so a
-				// pipe ends with a reason core audits.
-				"stream_idle_timeout": "0s",
-				"route_config": map[string]any{"virtual_hosts": []any{map[string]any{
-					"name":    "pipes",
-					"domains": []any{"*"},
-					"routes": []any{map[string]any{
-						"match": map[string]any{"connect_matcher": map[string]any{}},
-						"route": map[string]any{"cluster": "core", "timeout": "0s"},
-					}},
-				}}},
-				"http_filters": []any{map[string]any{
-					"name": "envoy.filters.http.router",
-					"typed_config": map[string]any{
-						"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
-					},
-				}},
+					"reverse_tunnel.v3.DrainAwareHttpConnectionManager",
+				"enable_drain_with_goaway": true,
+				"hcm_config":               c.pipesHCM(),
 			},
 		}}}},
+	}
+}
+
+// pipesHCM hands every pipe a tunnel carries to core.
+func (c envoyConfig) pipesHCM() map[string]any {
+	return map[string]any{
+		"stat_prefix":            "pipes",
+		"codec_type":             "HTTP2",
+		"http2_protocol_options": c.tunnelServerHTTP2Options(),
+		"upgrade_configs":        []any{map[string]any{"upgrade_type": "CONNECT"}},
+		// Pipes are long-lived and may sit idle (psql, kubectl exec).
+		// core enforces the idle timeout and lifetime cap, so a
+		// pipe ends with a reason core audits.
+		"stream_idle_timeout": "0s",
+		"route_config": map[string]any{"virtual_hosts": []any{map[string]any{
+			"name":    "pipes",
+			"domains": []any{"*"},
+			"routes": []any{map[string]any{
+				"match": map[string]any{"connect_matcher": map[string]any{}},
+				"route": map[string]any{"cluster": "core", "timeout": "0s"},
+			}},
+		}}},
+		"http_filters": []any{map[string]any{
+			"name": "envoy.filters.http.router",
+			"typed_config": map[string]any{
+				"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+			},
+		}},
 	}
 }
 

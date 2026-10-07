@@ -161,6 +161,17 @@ func TestBootstrapHoldsTunnelsToTheControllerHost(t *testing.T) {
 	if addr != want {
 		t.Fatalf("listener address %v, want %v", addr, want)
 	}
+	// A GOAWAY from the tunnel endpoint must dial the replacement before
+	// the draining tunnel closes.
+	filter := listener["filter_chains"].([]any)[0].(map[string]any)["filters"].([]any)[0].(map[string]any)
+	hcm := filter["typed_config"].(map[string]any)
+	if filter["name"] != "envoy.filters.network.reverse_tunnel_drain_aware_http_connection_manager" ||
+		hcm["enable_drain_with_goaway"] != true {
+		t.Fatalf("tunnel listener filter %v, drain with GOAWAY %v", filter["name"], hcm["enable_drain_with_goaway"])
+	}
+	if inner := hcm["hcm_config"].(map[string]any); inner["stream_idle_timeout"] != "0s" {
+		t.Fatalf("pipes HCM %v", inner)
+	}
 
 	cluster := staticResource(t, b, "clusters", tunnelCluster)
 	got, _ := json.Marshal(cluster["load_assignment"])
