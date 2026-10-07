@@ -329,22 +329,24 @@ func (c *h2conn) onSettings(f *http2.SettingsFrame) error {
 
 func (c *h2conn) onWindowUpdate(f *http2.WindowUpdateFrame) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	overflow := false
 	if f.StreamID == 0 {
 		c.sendWin += int64(f.Increment)
 		if c.sendWin > math.MaxInt32 {
+			c.mu.Unlock()
 			return errProtocol
 		}
 	} else if st := c.streams[f.StreamID]; st != nil {
 		st.sendWin += int64(f.Increment)
-		if st.sendWin > math.MaxInt32 {
-			// A stream error; resetting it here would take the write lock
-			// under c.mu, so the stream simply stops sending.
-			st.reset = true
-			st.cancel(errStreamReset)
-		}
+		overflow = st.sendWin > math.MaxInt32
 	}
 	c.cond.Broadcast()
+	c.mu.Unlock()
+	if overflow {
+		// A stream error (RFC 9113 §6.9.1): reset the stream on the wire,
+		// or the peer's side of it hangs.
+		c.resetStream(f.StreamID, http2.ErrCodeFlowControl)
+	}
 	return nil
 }
 

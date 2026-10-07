@@ -1,13 +1,17 @@
 package pipes
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"math"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 // newTestConn is an h2conn over one end of an in-memory pipe, with the
@@ -68,5 +72,70 @@ func TestWriteReturnsConnWindowOnReset(t *testing.T) {
 	defer c.mu.Unlock()
 	if c.sendWin != before {
 		t.Fatalf("connection send window %d after the reset, want %d", c.sendWin, before)
+	}
+}
+
+// A WINDOW_UPDATE that overflows a stream's send window is a stream error:
+// the stream must be reset on the wire, or Envoy's side of it hangs.
+func TestStreamWindowOverflowSendsReset(t *testing.T) {
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	handled := make(chan struct{})
+	s := &h2server{handle: func(st *h2stream) {
+		_ = st.respond("200", nil, false)
+		close(handled)
+		_, _ = io.Copy(io.Discard, st)
+	}}
+	go s.serveConn(server)
+
+	fr := http2.NewFramer(client, client)
+	fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+	frames := make(chan http2.Frame, 16)
+	go func() {
+		defer close(frames)
+		for {
+			f, err := fr.ReadFrame()
+			if err != nil {
+				return
+			}
+			frames <- f
+		}
+	}()
+	var hb bytes.Buffer
+	enc := hpack.NewEncoder(&hb)
+	_ = enc.WriteField(hpack.HeaderField{Name: ":method", Value: "CONNECT"})
+	_ = enc.WriteField(hpack.HeaderField{Name: ":authority", Value: "db.internal:5432"})
+	if _, err := client.Write([]byte(http2.ClientPreface)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fr.WriteSettings(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fr.WriteHeaders(http2.HeadersFrameParam{
+		StreamID: 1, BlockFragment: hb.Bytes(), EndHeaders: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-handled
+	if err := fr.WriteWindowUpdate(1, math.MaxInt32); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case f, ok := <-frames:
+			if !ok {
+				t.Fatal("connection closed without resetting the stream")
+			}
+			if rst, ok := f.(*http2.RSTStreamFrame); ok {
+				if rst.StreamID != 1 || rst.ErrCode != http2.ErrCodeFlowControl {
+					t.Fatalf("got RST_STREAM(%d, %v), want (1, FLOW_CONTROL_ERROR)",
+						rst.StreamID, rst.ErrCode)
+				}
+				return
+			}
+		case <-timeout:
+			t.Fatal("no RST_STREAM after the stream's send window overflowed")
+		}
 	}
 }
