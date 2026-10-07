@@ -54,6 +54,7 @@ func responseTestConfig() *config.Config {
 		MaxRequestBodySizeMB:         32,
 		MaxResponseBodySizeMB:        32,
 		MaxDecodedResponseBodySizeMB: 256,
+		LogRequestDetails:            telemetry.RequestDetailsOff,
 	}
 }
 
@@ -1104,7 +1105,7 @@ func TestBuildResponse_HostSpellingCannotSkipDecoding(t *testing.T) {
 			}
 
 			protoResp, err := exec.buildResponse(
-				context.Background(), resp, targetURL, "example.com",
+				context.Background(), resp, targetURL, requestLog{targetHost: "example.com"},
 			)
 			if err != nil {
 				t.Fatalf("buildResponse() error: %v", err)
@@ -1157,7 +1158,8 @@ func TestBuildResponse_NonASCIIHostScannedByEncodedRule(t *testing.T) {
 			}
 
 			protoResp, err := exec.buildResponse(
-				context.Background(), resp, targetURL, "xn--bcher-kva.example",
+				context.Background(), resp, targetURL,
+				requestLog{targetHost: "xn--bcher-kva.example"},
 			)
 			if err != nil {
 				t.Fatalf("buildResponse() error: %v", err)

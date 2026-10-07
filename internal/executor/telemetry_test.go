@@ -17,6 +17,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // queryCanary appears only inside a request's query string, so finding it
@@ -327,4 +328,250 @@ func TestExecute_BodyTooLargeKeepsRequestPathOutOfTelemetry(t *testing.T) {
 
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
+}
+
+// requestDetailsExecutor builds an executor logging request details at level.
+func requestDetailsExecutor(
+	t *testing.T,
+	level telemetry.RequestDetailLevel,
+	r *redact.Redactor,
+) *Executor {
+	t.Helper()
+	cfg := responseTestConfig()
+	cfg.RequestTimeout = 2 * time.Second
+	cfg.LogRequestDetails = level
+	cfg.LogRequestBodyMaxBytes = 2048
+	return newExecutor(t, cfg, r)
+}
+
+// recordWith returns the first captured record whose message starts with msg.
+func recordWith(t *testing.T, logs *logCapture, msg string) string {
+	t.Helper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	for _, record := range logs.records {
+		if strings.HasPrefix(record, msg+" ") {
+			return record
+		}
+	}
+	t.Fatalf("no %q record in:\n%s", msg, strings.Join(logs.records, "\n"))
+	return ""
+}
+
+func assertFields(t *testing.T, record string, fields ...string) {
+	t.Helper()
+	for _, field := range fields {
+		if !strings.Contains(record, " "+field) {
+			t.Errorf("record lacks %q:\n%s", field, record)
+		}
+	}
+}
+
+const detailsRequestID = "req-details-1"
+
+func detailsRequest(base string) *pb.HttpRequest {
+	return &pb.HttpRequest{
+		Method: "POST",
+		Url:    canaryURL(base),
+		Body:   []byte(`{"expr":"up{job=\"` + queryCanary + `\"}"}`),
+	}
+}
+
+func TestExecute_RequestDetailsOffLogsOnlySafeFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer server.Close()
+
+	for name, base := range map[string]string{
+		"completed": server.URL,
+		"failed":    "http://127.0.0.1:1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			exec := requestDetailsExecutor(t, telemetry.RequestDetailsOff, redact.NewRedactor())
+			spans := captureSpans(t, exec)
+			logs := captureLogs(t)
+			ctx := telemetry.ContextWithRequestID(context.Background(), detailsRequestID)
+
+			_, _ = exec.Execute(ctx, detailsRequest(base))
+
+			msg := "upstream request completed"
+			if name == "failed" {
+				msg = "upstream request failed"
+			}
+			record := recordWith(t, logs, msg)
+			assertFields(t, record,
+				"request_id="+detailsRequestID,
+				"method=POST",
+				"request_body_size=",
+				"timeout_seconds=2",
+				"target_host=",
+			)
+			if name == "completed" {
+				assertFields(t, record, "response_body_size=2")
+			}
+			for _, key := range []string{"target_path", "query_keys", "target_query",
+				"request_body_excerpt"} {
+				if strings.Contains(record, key+"=") {
+					t.Errorf("off level logs %s:\n%s", key, record)
+				}
+			}
+			// The URL path itself, not only the canary, must be absent.
+			if strings.Contains(logs.text(), "/orders/") {
+				t.Errorf("log carries the URL path:\n%s", logs.text())
+			}
+			assertNoCanary(t, "log", logs.text())
+			assertNoCanary(t, "span", spanText(spans.Ended()))
+		})
+	}
+}
+
+func TestExecute_RequestDetailsFullLogsPathQueryAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer server.Close()
+
+	for name, base := range map[string]string{
+		"completed": server.URL,
+		"failed":    "http://127.0.0.1:1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			exec := requestDetailsExecutor(t, telemetry.RequestDetailsFull, redact.NewRedactor())
+			spans := captureSpans(t, exec)
+			logs := captureLogs(t)
+			ctx := telemetry.ContextWithRequestID(context.Background(), detailsRequestID)
+
+			_, _ = exec.Execute(ctx, detailsRequest(base))
+
+			msg := "upstream request completed"
+			if name == "failed" {
+				msg = "upstream request failed"
+			}
+			record := recordWith(t, logs, msg)
+			assertFields(t, record,
+				"request_id="+detailsRequestID,
+				"method=POST",
+				"target_path=/orders/"+queryCanary,
+				"query_keys=[token]",
+				"target_query=token="+queryCanary,
+				`request_body_excerpt={"expr":"up{job=\"`+queryCanary,
+			)
+
+			span := spanText(spans.Ended())
+			if !strings.Contains(span, "target_path=/orders/"+queryCanary) ||
+				!strings.Contains(span, "target_query=token="+queryCanary) {
+				t.Errorf("span lacks path and query at full level:\n%s", span)
+			}
+			if strings.Contains(span, "request_body_excerpt") {
+				t.Errorf("span carries the body excerpt:\n%s", span)
+			}
+		})
+	}
+}
+
+// The other failure variants carry the same fields.
+func TestExecute_RequestDetailsOnEveryFailureVariant(t *testing.T) {
+	brotli := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "br")
+		_, _ = w.Write([]byte(`{"email":"someone@example.com"}`))
+	}))
+	defer brotli.Close()
+
+	tests := []struct {
+		name string
+		msg  string
+		req  *pb.HttpRequest
+		max  int64
+	}{
+		{
+			name: "invalid URL",
+			msg:  "upstream request failed: invalid URL",
+			req:  &pb.HttpRequest{Method: "GET", Url: "ftp://example.com/orders/" + queryCanary},
+		},
+		{
+			name: "body too large",
+			msg:  "upstream request failed: body too large",
+			req: &pb.HttpRequest{
+				Method: "POST",
+				Url:    canaryURL("https://example.com"),
+				Body:   make([]byte, 1024*1024+1),
+			},
+			max: 1,
+		},
+		{
+			name: "cannot create request",
+			msg:  "upstream request failed: cannot create request",
+			req:  &pb.HttpRequest{Method: "BAD METHOD", Url: canaryURL("https://example.com")},
+		},
+		{
+			name: "refused response",
+			msg:  "upstream response dropped: body could not be redacted",
+			req:  &pb.HttpRequest{Method: "GET", Url: canaryURL(brotli.URL)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, level := range []telemetry.RequestDetailLevel{
+				telemetry.RequestDetailsOff, telemetry.RequestDetailsPath,
+			} {
+				cfg := responseTestConfig()
+				cfg.LogRequestDetails = level
+				if tt.max > 0 {
+					cfg.MaxRequestBodySizeMB = tt.max
+				}
+				exec := newExecutor(t, cfg, newRedactor(t, emailRule()))
+				logs := captureLogs(t)
+				ctx := telemetry.ContextWithRequestID(context.Background(), detailsRequestID)
+
+				if _, err := exec.Execute(ctx, tt.req); err == nil {
+					t.Fatal("expected an error")
+				}
+
+				record := recordWith(t, logs, tt.msg)
+				assertFields(t, record, "request_id="+detailsRequestID, "method="+tt.req.Method)
+				if tt.name == "refused response" {
+					assertFields(t, record, "response_body_size=")
+				}
+				if level == telemetry.RequestDetailsOff {
+					assertNoCanary(t, "log", logs.text())
+				} else {
+					assertFields(t, record, "target_path=")
+					if strings.Contains(record, "token="+queryCanary) {
+						t.Errorf("path level logs the query value:\n%s", record)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Redaction rules for the host apply to logged query text and body excerpts.
+func TestExecute_RequestDetailsApplyRedactionRules(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer server.Close()
+
+	exec := requestDetailsExecutor(t, telemetry.RequestDetailsFull, newRedactor(t, emailRule()))
+	logs := captureLogs(t)
+
+	_, err := exec.Execute(context.Background(), &pb.HttpRequest{
+		Method: "POST",
+		Url:    server.URL + "/search?user=someone@example.com",
+		Body:   []byte(`{"user":"other@example.com"}`),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	text := logs.text()
+	if strings.Contains(text, "@example.com") {
+		t.Errorf("logged request details bypassed redaction:\n%s", text)
+	}
+	if !strings.Contains(text, "target_query=user=[REDACTED]") {
+		t.Errorf("expected redacted query in:\n%s", text)
+	}
 }

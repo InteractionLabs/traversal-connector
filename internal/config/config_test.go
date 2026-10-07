@@ -18,6 +18,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 func ptrTo[T any](v T) *T { return &v }
@@ -93,6 +94,8 @@ func TestLoad(t *testing.T) {
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
+				LogRequestDetails:            telemetry.RequestDetailsOff,
+				LogRequestBodyMaxBytes:       2048,
 			},
 		},
 		{
@@ -122,6 +125,8 @@ func TestLoad(t *testing.T) {
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
+				LogRequestDetails:            telemetry.RequestDetailsOff,
+				LogRequestBodyMaxBytes:       2048,
 			},
 		},
 		{
@@ -170,6 +175,8 @@ func TestLoad(t *testing.T) {
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
+				LogRequestDetails:            telemetry.RequestDetailsOff,
+				LogRequestBodyMaxBytes:       2048,
 			},
 		},
 		{
@@ -199,6 +206,8 @@ func TestLoad(t *testing.T) {
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
+				LogRequestDetails:            telemetry.RequestDetailsOff,
+				LogRequestBodyMaxBytes:       2048,
 			},
 		},
 		{
@@ -231,6 +240,8 @@ func TestLoad(t *testing.T) {
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
+				LogRequestDetails:            telemetry.RequestDetailsOff,
+				LogRequestBodyMaxBytes:       2048,
 			},
 		},
 	}
@@ -728,6 +739,109 @@ func TestLoad_RejectsProxyWithConnectToOverride(t *testing.T) {
 	}
 }
 
+func TestLoad_LogRequestDetails(t *testing.T) {
+	tests := []struct {
+		name         string
+		env          map[string]string
+		wantLevel    telemetry.RequestDetailLevel
+		wantInvalid  bool
+		wantMaxBytes int
+	}{
+		{
+			name:         "default is off",
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "off",
+			env:          map[string]string{"LOG_REQUEST_DETAILS": "off"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "path",
+			env:          map[string]string{"LOG_REQUEST_DETAILS": "path"},
+			wantLevel:    telemetry.RequestDetailsPath,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "full, case and whitespace insensitive",
+			env:          map[string]string{"LOG_REQUEST_DETAILS": " FULL "},
+			wantLevel:    telemetry.RequestDetailsFull,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "invalid falls back to off",
+			env:          map[string]string{"LOG_REQUEST_DETAILS": "everything"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantInvalid:  true,
+			wantMaxBytes: 2048,
+		},
+		{
+			name: "body max bytes is parsed",
+			env: map[string]string{
+				"LOG_REQUEST_DETAILS":        "full",
+				"LOG_REQUEST_BODY_MAX_BYTES": "512",
+			},
+			wantLevel:    telemetry.RequestDetailsFull,
+			wantMaxBytes: 512,
+		},
+		{
+			name:         "zero body max bytes disables the excerpt",
+			env:          map[string]string{"LOG_REQUEST_BODY_MAX_BYTES": "0"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: 0,
+		},
+		{
+			name:         "negative body max bytes uses the default",
+			env:          map[string]string{"LOG_REQUEST_BODY_MAX_BYTES": "-5"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "non-integer body max bytes uses the default",
+			env:          map[string]string{"LOG_REQUEST_BODY_MAX_BYTES": "lots"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: 2048,
+		},
+		{
+			name:         "body max bytes is capped",
+			env:          map[string]string{"LOG_REQUEST_BODY_MAX_BYTES": "100000000"},
+			wantLevel:    telemetry.RequestDetailsOff,
+			wantMaxBytes: telemetry.MaxRequestBodyExcerptBytes,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			t.Setenv("ENV_NAME", "test")
+			t.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			t.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() returned error: %v", err)
+			}
+			if cfg.LogRequestDetails != tt.wantLevel {
+				t.Errorf("LogRequestDetails = %q, want %q", cfg.LogRequestDetails, tt.wantLevel)
+			}
+			if cfg.LogRequestDetailsInvalid != tt.wantInvalid {
+				t.Errorf("LogRequestDetailsInvalid = %v, want %v",
+					cfg.LogRequestDetailsInvalid, tt.wantInvalid)
+			}
+			if cfg.LogRequestBodyMaxBytes != tt.wantMaxBytes {
+				t.Errorf("LogRequestBodyMaxBytes = %d, want %d",
+					cfg.LogRequestBodyMaxBytes, tt.wantMaxBytes)
+			}
+		})
+	}
+}
+
 func TestLoad_UpstreamTLSCASources(t *testing.T) {
 	const caPEM = "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----\n"
 	caFile := t.TempDir() + "/ca.crt"
@@ -1033,6 +1147,7 @@ func clearEnv() {
 		"OTEL_EXPORTER_OTLP_CONNECT_TO",
 		"TRAVERSAL_DISABLE_TELEMETRY",
 		"UPSTREAM_TLS_VERIFY", "UPSTREAM_TLS_CA_BASE64", "UPSTREAM_TLS_CA_FILE",
+		"LOG_REQUEST_DETAILS", "LOG_REQUEST_BODY_MAX_BYTES",
 	}
 	for _, key := range envVars {
 		_ = os.Unsetenv(key)

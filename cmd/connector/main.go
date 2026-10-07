@@ -98,6 +98,17 @@ func main() {
 				"Traversal cannot diagnose issues in this deployment",
 		)
 	}
+	// The raw value is not echoed: an operator who mistyped it may have pasted
+	// something that does not belong in an exported log.
+	if cfg.LogRequestDetailsInvalid {
+		slog.Warn("invalid LOG_REQUEST_DETAILS, falling back to off; " +
+			"expected off, path, or full")
+	}
+	if cfg.LogRequestDetails != telemetry.RequestDetailsOff {
+		slog.Info("request details enabled on per-request log lines",
+			"level", cfg.LogRequestDetails,
+			"body_excerpt_max_bytes", cfg.LogRequestBodyMaxBytes)
+	}
 
 	// --- Metrics ---
 	shutdownMetrics, err := telemetry.InitMetrics(

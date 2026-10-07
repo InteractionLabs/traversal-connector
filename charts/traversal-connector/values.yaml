@@ -51,6 +51,18 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
+# ─── Request details on log lines (optional) ─────────────────────────────────
+# Per-request log lines always carry request_id, method, request_body_size, and
+# timeout_seconds. These opt in to more, which is exported with the connector's
+# logs to Traversal telemetry:
+#   off  (default) nothing more.
+#   path adds target_path and query_keys (parameter names only, no values).
+#   full also adds target_query and request_body_excerpt, which can contain
+#        query text, identifiers, or other customer data.
+# An unrecognized value falls back to off with a startup warning.
+logRequestDetails: ""      # LOG_REQUEST_DETAILS: off | path | full (default off)
+logRequestBodyMaxBytes: "" # LOG_REQUEST_BODY_MAX_BYTES (default 2048, max 65536; 0 disables)
+
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference
 # an existing Secret with keys: tls.crt, tls.key, ca.crt.

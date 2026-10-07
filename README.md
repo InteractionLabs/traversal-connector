@@ -579,6 +579,8 @@ the connector refuses to start without it.
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | (empty) | `grpc` or `http/protobuf` selects gRPC; `http/json` (or empty) selects HTTP. |
 | `OTEL_EXPORTER_OTLP_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override shared by metrics, traces, and logs. Only the TCP connection destination changes; logical endpoint scheme and path, HTTP Host/gRPC `:authority`, TLS SNI, and certificate verification remain unchanged. All three endpoints must be reachable through the one socket. Cannot be combined with `EGRESS_PROXY_URL`; it is cleared when telemetry is disabled. |
 | `TRAVERSAL_DISABLE_TELEMETRY` | `false` | Opts out of all telemetry export. **Strongly discouraged**. Traversal cannot diagnose or assist with issues in a deployment that reports nothing. |
+| `LOG_REQUEST_DETAILS` | `off` | How much of each upstream request is attached to per-request log lines: `off`, `path`, or `full`. See [Request details in logs](#request-details-in-logs). An unrecognized value falls back to `off` with a startup warning. |
+| `LOG_REQUEST_BODY_MAX_BYTES` | `2048` | Maximum request body excerpt logged at `LOG_REQUEST_DETAILS=full` (capped at `65536`). `0` disables the excerpt; a negative or non-integer value uses the default. |
 
 Point all three endpoints either at a collector you operate or at the ingest
 endpoints supplied with your deployment. Their shape follows the protocol: `grpc`
@@ -620,6 +622,57 @@ Note what the first exemption means in practice. `ENV_LEVEL` defaults to
 custom image gets no telemetry enforcement at all until `ENV_LEVEL` says
 otherwise. This mirrors the exemption that allows an `http://`
 `TRAVERSAL_CONTROLLER_URL` in development.
+
+#### Request details in logs
+
+By default, telemetry names an upstream request only by its destination host:
+everything after the authority is supplied by the caller and can carry customer
+data, so paths, queries, and bodies stay out of logs and spans. That makes it
+hard to tell which query produced a multi-gigabyte response or a timeout, so the
+connector's per-request log lines always carry fields that are safe to export,
+and `LOG_REQUEST_DETAILS` opts in to more.
+
+| Field | Level | Content |
+|---|---|---|
+| `request_id` | always | Controller-assigned request id. The control plane logs the full request under the same id, so this joins the two. |
+| `method` | always | HTTP method. |
+| `request_body_size` | always | Request body size in bytes. |
+| `timeout_seconds` | always | Upstream request timeout (`REQUEST_TIMEOUT`). |
+| `target_path` | `path`, `full` | URL path only, truncated to 512 bytes. |
+| `query_keys` | `path`, `full` | Sorted query parameter names, without values. |
+| `target_query` | `full` | Raw query string, truncated to 4096 bytes. |
+| `request_body_excerpt` | `full` | First `LOG_REQUEST_BODY_MAX_BYTES` of the request body if it is text, otherwise `<binary N bytes>`. |
+
+The fields appear on `received http request`, `received invalid http request`,
+`upstream request completed`, every `upstream request failed` variant, and
+`upstream response dropped: body could not be redacted`. Failure lines also carry
+whatever is known about the response size (`response_body_size` or
+`response_content_length`), and `response sender: stream send failed` carries
+`request_id`, `response_size` (the encoded tunnel message), and
+`response_body_size`. Truncated values end in
+`...<truncated, N bytes total>`.
+
+At `path` and `full`, the executor span (`executor.upstream_http`) also carries
+`target_path`, `query_keys`, and at `full` `target_query`. The body excerpt is
+logged only.
+
+Choosing a level is a privacy decision, because these logs are exported to
+Traversal telemetry:
+
+- `off` keeps the existing guarantee that nothing past the host is exported.
+- `path` is usually safe. Paths name API endpoints and datasources, and query
+  parameter names are not values, but a path can still embed an identifier
+  (`/users/<id>`).
+- `full` may export query text (PromQL, LogQL, SQL), identifiers, and request
+  bodies. Enable it while chasing a problem, then turn it back off.
+
+No level ever logs request headers or URL credentials; userinfo is dropped from
+the URL before anything is read off it. The redaction rules that apply to the
+request's host are applied to `target_path`, `target_query`, and
+`request_body_excerpt` before they are logged, byte-level and ignoring any
+`redact_fields`/`skip_fields` filters, because an excerpt is generally not a
+parseable document. A match that crosses the excerpt cut can leave a fragment
+behind, so do not rely on redaction alone to make `full` safe.
 
 The connector also reads the OTel-standard
 [`OTEL_RESOURCE_ATTRIBUTES`](https://opentelemetry.io/docs/specs/otel/resource/sdk/#specifying-resource-information-via-an-environment-variable)

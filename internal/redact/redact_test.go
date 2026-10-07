@@ -744,3 +744,29 @@ func TestApplyJSON_UnparseableBodyIsNotAnErrorWithoutStructuredRules(t *testing.
 		})
 	}
 }
+
+func TestScrubForLog(t *testing.T) {
+	r := NewRedactor()
+	if err := r.Update(&RulesFile{Version: "v1", Rules: []Rule{
+		{Name: "email", Type: "regex", Pattern: `[a-z]+@example\.com`, Replacement: "[E]"},
+		{
+			Name: "token", Type: "regex-structured-data", Pattern: `tok-[0-9]+`,
+			Replacement: "[T]", RedactFields: []string{"unrelated"},
+			Hosts: []string{`grafana\.internal`},
+		},
+	}}); err != nil {
+		t.Fatalf("Update() error: %v", err)
+	}
+
+	in := []byte(`q=a@example.com&t=tok-123`)
+	if got := string(r.ScrubForLog("grafana.internal", in)); got != `q=[E]&t=[T]` {
+		t.Errorf("in-scope host: got %q", got)
+	}
+	// The structured rule is host-scoped, so another host keeps its token.
+	if got := string(r.ScrubForLog("other.internal", in)); got != `q=[E]&t=tok-123` {
+		t.Errorf("out-of-scope host: got %q", got)
+	}
+	if got := NewRedactor().ScrubForLog("grafana.internal", in); string(got) != string(in) {
+		t.Errorf("no rules: got %q", got)
+	}
+}

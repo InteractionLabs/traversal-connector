@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -163,6 +164,18 @@ type Config struct {
 	RedactionRulesFile *string
 	// RedactionReloadInterval controls local-file polling. Defaults to 10s.
 	RedactionReloadInterval time.Duration
+	// LogRequestDetails selects how much caller-supplied request content is
+	// attached to per-request log lines (and, above off, to the executor span).
+	// Read from LOG_REQUEST_DETAILS: off (default), path, or full. Any other
+	// value falls back to off and sets LogRequestDetailsInvalid.
+	LogRequestDetails telemetry.RequestDetailLevel
+	// LogRequestDetailsInvalid is true when LOG_REQUEST_DETAILS held a value
+	// that is not a level. The caller warns about it once a logger exists.
+	LogRequestDetailsInvalid bool
+	// LogRequestBodyMaxBytes caps the request body excerpt logged at the full
+	// level. Read from LOG_REQUEST_BODY_MAX_BYTES (default 2048, at most 65536).
+	// Zero disables the excerpt; a negative or non-integer value uses the default.
+	LogRequestBodyMaxBytes int
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -245,6 +258,17 @@ func Load() (Config, error) {
 		}
 	}
 
+	logRequestDetails, logRequestDetailsValid := telemetry.ParseRequestDetailLevel(
+		os.Getenv("LOG_REQUEST_DETAILS"),
+	)
+	logRequestBodyMaxBytes := env.GetEnvInt(
+		"LOG_REQUEST_BODY_MAX_BYTES", telemetry.DefaultRequestBodyExcerptBytes,
+	)
+	if logRequestBodyMaxBytes < 0 {
+		logRequestBodyMaxBytes = telemetry.DefaultRequestBodyExcerptBytes
+	}
+	logRequestBodyMaxBytes = min(logRequestBodyMaxBytes, telemetry.MaxRequestBodyExcerptBytes)
+
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL:       *traversalControllerURL,
@@ -299,8 +323,11 @@ func Load() (Config, error) {
 		ConfigRefreshInterval: env.GetEnvDuration(
 			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
-		RedactionRulesFile:      env.GetEnvOptionalString("REDACTION_RULES_FILE"),
-		RedactionReloadInterval: defaultRedactionReloadInterval,
+		RedactionRulesFile:       env.GetEnvOptionalString("REDACTION_RULES_FILE"),
+		RedactionReloadInterval:  defaultRedactionReloadInterval,
+		LogRequestDetails:        logRequestDetails,
+		LogRequestDetailsInvalid: !logRequestDetailsValid,
+		LogRequestBodyMaxBytes:   logRequestBodyMaxBytes,
 	}
 
 	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {

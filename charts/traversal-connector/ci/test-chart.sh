@@ -59,6 +59,14 @@ assert_contains "$tmp_dir/direct-connect-to.yaml" 'name: OTEL_EXPORTER_OTLP_CONN
 render override "$fixtures/direct-export-values.yaml" --set-string image.tag=v9.8.7
 assert_contains "$tmp_dir/override.yaml" 'image: "traversalext/traversal-connector:v9.8.7"'
 
+# Request details stay off unless asked for; 0 is a meaningful excerpt size.
+assert_not_contains "$tmp_dir/direct.yaml" 'LOG_REQUEST_DETAILS'
+assert_not_contains "$tmp_dir/direct.yaml" 'LOG_REQUEST_BODY_MAX_BYTES'
+render request-details "$fixtures/direct-export-values.yaml" \
+  --set-string logRequestDetails=full --set logRequestBodyMaxBytes=0
+assert_contains "$tmp_dir/request-details.yaml" $'            - name: LOG_REQUEST_DETAILS\n              value: "full"'
+assert_contains "$tmp_dir/request-details.yaml" $'            - name: LOG_REQUEST_BODY_MAX_BYTES\n              value: "0"'
+
 render upstream-inline "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.caPEM=synthetic-upstream-ca
 assert_contains "$tmp_dir/upstream-inline.yaml" $'  name: upstream-inline-traversal-connector-upstream-tls\n'
 assert_contains "$tmp_dir/upstream-inline.yaml" '  ca.crt: c3ludGhldGljLXVwc3RyZWFtLWNh'
