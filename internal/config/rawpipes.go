@@ -105,11 +105,21 @@ func loadRawPipes() (RawPipes, error) {
 		EnvoyPath: env.GetEnvString("TRAVERSAL_ENVOY_PATH", "envoy"),
 		RunDir: env.GetEnvString("TRAVERSAL_RUN_DIR",
 			filepath.Join(os.TempDir(), "traversal-tunnels")),
-		TunnelCount: env.GetEnvInt("TRAVERSAL_TUNNEL_COUNT",
-			env.GetEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelCount)),
-		TunnelsConnectTo:       env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
-		TunnelStreamWindow:     env.GetEnvInt("TRAVERSAL_TUNNEL_STREAM_WINDOW", 0),
-		TunnelConnectionWindow: env.GetEnvInt("TRAVERSAL_TUNNEL_CONNECTION_WINDOW", 0),
+		TunnelsConnectTo: env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
+	}
+	var err error
+	// A value that does not parse fails startup: a silent default would
+	// change pipe or tunnel limits without anyone noticing.
+	if cfg.TunnelCount, err = loadTunnelCount(); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.TunnelStreamWindow, err = env.ParseEnvInt(
+		"TRAVERSAL_TUNNEL_STREAM_WINDOW", 0); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.TunnelConnectionWindow, err = env.ParseEnvInt(
+		"TRAVERSAL_TUNNEL_CONNECTION_WINDOW", 0); err != nil {
+		return RawPipes{}, err
 	}
 	if cfg.TunnelCount < 1 || cfg.TunnelCount > tunnels.MaxTunnels {
 		return RawPipes{}, fmt.Errorf(
@@ -120,9 +130,6 @@ func loadRawPipes() (RawPipes, error) {
 			return RawPipes{}, err
 		}
 	}
-	var err error
-	// A value that does not parse fails startup: a silent default would
-	// change pipe limits without anyone noticing.
 	if cfg.MaxPipes, err = env.ParseEnvInt64(
 		"TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax); err != nil {
 		return RawPipes{}, err
@@ -183,6 +190,16 @@ func parseEgressProxy(raw string) (*url.URL, error) {
 		}
 	}
 	return u, nil
+}
+
+// loadTunnelCount reads TRAVERSAL_TUNNEL_COUNT, falling back to the older
+// TRAVERSAL_TUNNELS_PER_REPLICA when it is unset.
+func loadTunnelCount() (int, error) {
+	perReplica, err := env.ParseEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelCount)
+	if err != nil {
+		return 0, err
+	}
+	return env.ParseEnvInt("TRAVERSAL_TUNNEL_COUNT", perReplica)
 }
 
 func loadCapabilityKeys() (map[string]*ecdsa.PublicKey, error) {

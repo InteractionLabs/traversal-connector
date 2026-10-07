@@ -151,9 +151,13 @@ func TestLoadRawPipes(t *testing.T) {
 		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
 		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
 		for key, value := range map[string]string{
-			"TRAVERSAL_RAW_PIPES_MAX":          "fifty",
-			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME": "4 hours",
-			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "300", // no unit
+			"TRAVERSAL_RAW_PIPES_MAX":            "fifty",
+			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME":   "4 hours",
+			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT":   "300", // no unit
+			"TRAVERSAL_TUNNEL_COUNT":             "four",
+			"TRAVERSAL_TUNNELS_PER_REPLICA":      "two",
+			"TRAVERSAL_TUNNEL_STREAM_WINDOW":     "2MiB",
+			"TRAVERSAL_TUNNEL_CONNECTION_WINDOW": "1e9",
 		} {
 			t.Run(key, func(t *testing.T) {
 				t.Setenv(key, value)

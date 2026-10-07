@@ -53,6 +53,21 @@ func GetEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
+// ParseEnvInt returns the environment variable identified by key parsed as
+// an int, or defaultVal if it is empty or unset. Unlike GetEnvInt, a value
+// that does not parse is an error naming key, not a silent default.
+func ParseEnvInt(key string, defaultVal int) (int, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer, got %q", key, val)
+	}
+	return parsed, nil
+}
+
 // ParseEnvInt64 returns the environment variable identified by key parsed as
 // an int64, or defaultVal if it is empty or unset. Unlike GetEnvInt64, a value
 // that does not parse is an error naming key, not a silent default.
