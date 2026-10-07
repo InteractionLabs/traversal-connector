@@ -54,7 +54,10 @@ type ConnectionManager struct {
 	tracer      trace.Tracer
 	metrics     *connectionMetrics
 	hostname    string
-	tunnelFunc  func(ctx context.Context) error
+	// sendMaxBytes is the effective limit the client enforces on messages
+	// sent to the controller; see tunnelSendMaxBytes.
+	sendMaxBytes int
+	tunnelFunc   func(ctx context.Context) error
 
 	backoffMu sync.Mutex
 	backoff   time.Duration
@@ -84,13 +87,14 @@ func NewConnectionManager(cfg *config.Config, r *redact.Redactor) (*ConnectionMa
 	}
 
 	cm := &ConnectionManager{
-		connections: make([]*StreamConnection, 0, cfg.MaxTunnelsAllowed),
-		client:      client,
-		config:      cfg,
-		executor:    exec,
-		tracer:      otel.Tracer(InstrumentationName),
-		metrics:     metrics,
-		hostname:    hostname,
+		connections:  make([]*StreamConnection, 0, cfg.MaxTunnelsAllowed),
+		client:       client,
+		config:       cfg,
+		executor:     exec,
+		tracer:       otel.Tracer(InstrumentationName),
+		metrics:      metrics,
+		hostname:     hostname,
+		sendMaxBytes: tunnelSendMaxBytes(cfg),
 	}
 	cm.tunnelFunc = cm.RunTunnel
 	return cm, nil
