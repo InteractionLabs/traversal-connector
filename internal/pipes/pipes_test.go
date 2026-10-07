@@ -61,6 +61,8 @@ type harnessConfig struct {
 	maxLifetime time.Duration
 	idleTimeout time.Duration
 	meters      metric.MeterProvider
+	// dial, if set, runs before every destination dial; an error fails it.
+	dial func(ctx context.Context) error
 }
 
 func newHarness(t *testing.T, hc harnessConfig) *harness {
@@ -94,6 +96,11 @@ func newHarness(t *testing.T, hc harnessConfig) *harness {
 			return []netip.Addr{netip.MustParseAddr(addr)}, nil
 		},
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			if hc.dial != nil {
+				if err := hc.dial(ctx); err != nil {
+					return nil, err
+				}
+			}
 			var d net.Dialer
 			return d.DialContext(ctx, network, dest.Addr().String())
 		},
@@ -693,4 +700,37 @@ func TestConnectionLossIsTunnelLost(t *testing.T) {
 		t.Fatalf("%d pipes closed as tunnel_lost, want 1 (closes: %d)",
 			got, sum(t, rm, telemetry.MetricRawPipeClosesTotal))
 	}
+}
+
+// A caller that gives up while its destination is still being dialed stops
+// the dial, rather than leaving it to run out its timeout.
+func TestAbandonedOpenStopsDialing(t *testing.T) {
+	dialing, stopped := make(chan struct{}), make(chan struct{})
+	h := newHarness(t, harnessConfig{dial: func(ctx context.Context) error {
+		close(dialing)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "http://db.internal:5432",
+		http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "db.internal:5432"
+	req.Header.Set(HeaderCapability, capabilityFor(t, "db.internal", 5432))
+	go func() {
+		if resp, err := h.client.Transport.RoundTrip(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-dialing
+	cancel() // RST_STREAM(CANCEL)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the dial kept going after the caller reset the open")
+	}
+	h.waitOpen(0)
 }

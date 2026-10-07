@@ -214,7 +214,8 @@ func (s *Server) serve(st *h2stream) {
 	log = log.With("jti", claims.JTI, "session_id", claims.SessionID,
 		"organization_id", claims.OrganizationID, "integration_id", claims.IntegrationID)
 
-	dialCtx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	// Tied to the stream: a caller that gives up stops the dial.
+	dialCtx, cancel := context.WithTimeout(st.ctx, dialTimeout)
 	dst, route, err := s.cfg.Policy.Dial(dialCtx, host, port)
 	cancel()
 	if err != nil {
