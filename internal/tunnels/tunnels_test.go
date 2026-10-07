@@ -34,6 +34,13 @@ const (
 
 func certWithURIs(t *testing.T, uris ...string) []byte {
 	t.Helper()
+	return certWith(t, nil, uris...)
+}
+
+// certWith is a self-signed certificate with the given extended key usage
+// and URI SANs.
+func certWith(t *testing.T, eku []x509.ExtKeyUsage, uris ...string) []byte {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +50,7 @@ func certWithURIs(t *testing.T, uris ...string) []byte {
 		Subject:      pkix.Name{CommonName: "connector"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
+		ExtKeyUsage:  eku,
 	}
 	for _, u := range uris {
 		parsed, err := url.Parse(u)
@@ -146,7 +154,7 @@ func testConfig(t *testing.T) Config {
 		MaxPipes:    200,
 		Tunnels:     2,
 		Endpoint:    "edge.traversal.com",
-		CertPEM:     []byte("cert"),
+		CertPEM:     certWithURIs(t),
 		KeyPEM:      []byte("key"),
 		CAPEM:       []byte("ca"),
 	}
@@ -224,6 +232,120 @@ func TestBootstrapHoldsTunnelsToTheControllerHost(t *testing.T) {
 	san, _ := json.Marshal(common["validation_context"])
 	if !strings.Contains(string(san), `"matcher":{"exact":"edge.traversal.com"}`) {
 		t.Fatalf("validation context %s", san)
+	}
+}
+
+// tunnelChain returns the tunnel listener's filter chain.
+func tunnelChain(t *testing.T, b map[string]any) map[string]any {
+	t.Helper()
+	chains := staticResource(t, b, "listeners", tunnelListener)["filter_chains"].([]any)
+	if len(chains) != 1 {
+		t.Fatalf("want one tunnel filter chain, got %d", len(chains))
+	}
+	return chains[0].(map[string]any)
+}
+
+// By default each tunnel's data leg runs its own TLS 1.3, the connector as
+// the server: it presents the dial's client certificate and requires the
+// tunnel endpoint's, signed by the dial's roots and naming the controller's
+// host. Without it Envoy carries pipes in cleartext once the dial's TLS
+// session is dropped.
+func TestBootstrapRequiresInnerTLSByDefault(t *testing.T) {
+	m := newTestManager(t)
+	socket, ok := tunnelChain(t, bootstrapOf(t, m))["transport_socket"].(map[string]any)
+	if !ok {
+		t.Fatal("the tunnel listener has no transport socket: the data leg is cleartext")
+	}
+	tls := socket["typed_config"].(map[string]any)
+	if socket["name"] != "envoy.transport_sockets.tls" ||
+		tls["@type"] != "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3."+
+			"DownstreamTlsContext" ||
+		tls["require_client_certificate"] != true {
+		t.Fatalf("inner TLS %v", socket)
+	}
+	common := tls["common_tls_context"].(map[string]any)
+	params, _ := json.Marshal(common["tls_params"])
+	if string(params) != `{"tls_maximum_protocol_version":"TLSv1_3",`+
+		`"tls_minimum_protocol_version":"TLSv1_3"}` {
+		t.Fatalf("TLS versions %s", params)
+	}
+	if alpn, _ := json.Marshal(common["alpn_protocols"]); string(alpn) != `["h2"]` {
+		t.Fatalf("ALPN %s", alpn)
+	}
+	certs, _ := json.Marshal(common["tls_certificates"])
+	want, _ := json.Marshal([]any{map[string]any{
+		"certificate_chain": map[string]any{"filename": filepath.Join(m.cfg.Dir, certFile)},
+		"private_key":       map[string]any{"filename": filepath.Join(m.cfg.Dir, keyFile)},
+	}})
+	if string(certs) != string(want) {
+		t.Fatalf("certificates %s, want %s", certs, want)
+	}
+	validation, _ := json.Marshal(common["validation_context"])
+	want, _ = json.Marshal(map[string]any{
+		"trusted_ca": map[string]any{"filename": filepath.Join(m.cfg.Dir, caFile)},
+		"match_typed_subject_alt_names": []any{map[string]any{
+			"san_type": "DNS", "matcher": map[string]any{"exact": "edge.traversal.com"},
+		}},
+	})
+	if string(validation) != string(want) {
+		t.Fatalf("validation context %s, want %s", validation, want)
+	}
+}
+
+// Disabled inner TLS leaves the tunnel listener with no transport socket,
+// for tunnel endpoints that do not speak it yet.
+func TestBootstrapWithInnerTLSDisabled(t *testing.T) {
+	b := bootstrapOf(t, newTestManager(t, func(c *Config) { c.InnerTLS = InnerTLSDisabled }))
+	if socket, ok := tunnelChain(t, b)["transport_socket"]; ok {
+		t.Fatalf("inner TLS disabled, but the tunnel listener has %v", socket)
+	}
+}
+
+// Inner TLS makes the connector a TLS server, so a certificate restricted
+// to clientAuth cannot serve it: New says so and names the fix. A
+// certificate with no extended key usage, or with serverAuth, can.
+func TestInnerTLSNeedsAServerCapableCertificate(t *testing.T) {
+	clientOnly := certWith(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	_, err := New(func() Config { c := testConfig(t); c.CertPEM = clientOnly; return c }())
+	if !errors.Is(err, ErrCertificateNotForServers) ||
+		!strings.Contains(err.Error(), "serverAuth") ||
+		!strings.Contains(err.Error(), "TRAVERSAL_TUNNEL_INNER_TLS=disabled") {
+		t.Fatalf("clientAuth-only certificate: %v", err)
+	}
+	for name, eku := range map[string][]x509.ExtKeyUsage{
+		"no extended key usage": nil,
+		"client and server":     {x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		"any":                   {x509.ExtKeyUsageAny},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.CertPEM = certWith(t, eku)
+			if _, err := New(cfg); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("not checked with inner TLS disabled", func(t *testing.T) {
+		cfg := testConfig(t)
+		cfg.CertPEM, cfg.InnerTLS = clientOnly, InnerTLSDisabled
+		if _, err := New(cfg); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestParseInnerTLS(t *testing.T) {
+	for in, want := range map[string]InnerTLS{
+		"required": InnerTLSRequired, "disabled": InnerTLSDisabled,
+	} {
+		if got, err := ParseInnerTLS(in); err != nil || got != want || got.String() != in {
+			t.Fatalf("%q: got %v, %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"", "Required", "off", "true"} {
+		if _, err := ParseInnerTLS(in); err == nil {
+			t.Fatalf("accepted %q", in)
+		}
 	}
 }
 

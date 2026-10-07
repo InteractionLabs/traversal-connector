@@ -55,8 +55,13 @@ type Config struct {
 	// dials (host:port). SNI and certificate checks still use Endpoint.
 	ConnectTo string
 	// CertPEM and KeyPEM are the connector's client credentials; CAPEM is
-	// every root that may sign a tunnel endpoint's certificate.
+	// every root that may sign a tunnel endpoint's certificate. With inner
+	// TLS, the same credentials serve each tunnel's data leg and the same
+	// roots verify the tunnel endpoint's client certificate.
 	CertPEM, KeyPEM, CAPEM []byte
+	// InnerTLS is whether each tunnel's data leg runs its own TLS. The zero
+	// value requires it.
+	InnerTLS InnerTLS
 	// AdminPort is the Envoy admin port. Zero means AdminPort.
 	AdminPort int
 	// StreamWindow and ConnectionWindow are the tunnels' HTTP/2 receive
@@ -107,6 +112,11 @@ func New(cfg Config) (*Manager, error) {
 	case len(cfg.CertPEM) == 0 || len(cfg.KeyPEM) == 0 || len(cfg.CAPEM) == 0:
 		return nil, errors.New("tunnels: client credentials and roots are required")
 	}
+	if cfg.InnerTLS == InnerTLSRequired {
+		if err := checkServesTLS(cfg.CertPEM); err != nil {
+			return nil, fmt.Errorf("tunnels: %w", err)
+		}
+	}
 	dialHost, dialPort := cfg.Endpoint, TunnelPort
 	if cfg.ConnectTo != "" {
 		if dialHost, dialPort, err = splitAddress(cfg.ConnectTo); err != nil {
@@ -142,6 +152,7 @@ func New(cfg Config) (*Manager, error) {
 			maxPipes:         cfg.MaxPipes,
 			streamWindow:     cfg.StreamWindow,
 			connectionWindow: cfg.ConnectionWindow,
+			innerTLS:         cfg.InnerTLS,
 		},
 		admin: newAdmin(cfg.AdminPort),
 		start: time.Now(),

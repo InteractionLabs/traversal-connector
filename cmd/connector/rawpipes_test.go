@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,10 +10,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,10 +30,11 @@ const (
 	testTenant    = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 )
 
-// rawPipesConfig is a config that can hold tunnels, with a capability key.
-func rawPipesConfig(t *testing.T) *config.Config {
+// connectorCertificate is a self-signed connector certificate and its key,
+// PEM, with the given extended key usage.
+func connectorCertificate(t *testing.T, eku []x509.ExtKeyUsage) (cert, key string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,29 +46,41 @@ func rawPipesConfig(t *testing.T) *config.Config {
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		URIs:         []*url.URL{san},
+		ExtKeyUsage:  eku,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+}
+
+// rawPipesConfig is a config that can hold tunnels, with a capability key.
+func rawPipesConfig(t *testing.T) *config.Config {
+	t.Helper()
+	capabilityKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key := connectorCertificate(t,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth})
 	return &config.Config{
 		TraversalControllerURL: "https://edge.traversal.com",
 		ConnectorID:            testConnector,
 		TLSCert:                &cert,
-		TLSKey:                 &keyPEM,
+		TLSKey:                 &key,
 		TLSCA:                  &cert,
 		RawPipes: config.RawPipes{
 			Enabled:          true,
 			Listen:           "127.0.0.1:0",
 			MaxPipes:         10,
 			CapabilityIssuer: "traversal-raw-tunnel/test",
-			CapabilityKeys:   map[string]*ecdsa.PublicKey{"test": &key.PublicKey},
+			CapabilityKeys:   map[string]*ecdsa.PublicKey{"test": &capabilityKey.PublicKey},
 			EnvoyPath:        "envoy",
 			RunDir:           t.TempDir(),
 			TunnelCount:      1,
@@ -81,6 +97,10 @@ func TestRawPipeSetupFailureLeavesLegacyRunning(t *testing.T) {
 		},
 		"tunnels": func(_ *testing.T, cfg *config.Config) {
 			cfg.RawPipes.TunnelStreamWindow = 1 // below the 64 KiB minimum
+		},
+		"clientAuth-only certificate with inner TLS": func(t *testing.T, cfg *config.Config) {
+			cert, key := connectorCertificate(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+			cfg.TLSCert, cfg.TLSKey = &cert, &key
 		},
 		"listener": func(t *testing.T, cfg *config.Config) {
 			taken, err := net.Listen("tcp", "127.0.0.1:0")
@@ -134,6 +154,7 @@ func TestFatalAcceptErrorStopsRawPipesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tunnelCfg.AdminPort = unusedPort(t) // the drain must not reach a real Envoy
 	server, err := newPipeServer(cfg, redact.NewRedactor())
 	if err != nil {
 		t.Fatal(err)
@@ -160,4 +181,40 @@ func TestFatalAcceptErrorStopsRawPipesOnly(t *testing.T) {
 		t.Fatalf("raw pipes failing held the connector unready: %q", reason)
 	}
 	raw.drain() // shutdown after a failure returns, without draining twice
+}
+
+// With inner TLS disabled, startup warns that the data leg is cleartext.
+func TestInnerTLSDisabledWarnsAtStartup(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg := rawPipesConfig(t)
+	cfg.RawPipes.EnvoyPath = filepath.Join(t.TempDir(), "no-envoy")
+	cfg.RawPipes.TunnelInnerTLS = tunnels.InnerTLSDisabled
+	raw := startRawPipes(context.Background(), cfg, redact.NewRedactor())
+	if raw == nil {
+		t.Fatalf("raw pipes did not start: %s", logs.String())
+	}
+	// Stop without draining: a drain would POST to Envoy's admin port,
+	// and a developer's own Envoy may be listening there.
+	t.Cleanup(func() { raw.stopTransport(); <-raw.envoyDone })
+	if !strings.Contains(logs.String(), "level=WARN") ||
+		!strings.Contains(logs.String(), "tunnel inner TLS is disabled") ||
+		!strings.Contains(logs.String(), "cleartext") {
+		t.Fatalf("no cleartext warning in:\n%s", logs.String())
+	}
+}
+
+// unusedPort is a loopback port nothing listens on.
+func unusedPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
 }

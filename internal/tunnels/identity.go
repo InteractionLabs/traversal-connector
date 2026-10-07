@@ -35,13 +35,9 @@ var connectorSAN = regexp.MustCompile(
 // certificate and checks it names connectorID, the ID the connector already
 // presents to the legacy controller.
 func IdentityFromCertificate(certPEM []byte, connectorID string) (Identity, error) {
-	block, _ := pem.Decode(certPEM)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return Identity{}, errors.New("client certificate is not PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, err := parseLeaf(certPEM)
 	if err != nil {
-		return Identity{}, fmt.Errorf("parse client certificate: %w", err)
+		return Identity{}, err
 	}
 	// The tunnel endpoint reads the first URI SAN. With more than one, a
 	// certificate accepted here could be refused there, so require exactly
@@ -65,4 +61,18 @@ func IdentityFromCertificate(certPEM []byte, connectorID string) (Identity, erro
 			m[2], connectorID)
 	}
 	return Identity{ConnectorID: m[2], TenantID: m[1]}, nil
+}
+
+// parseLeaf parses the first certificate of a PEM chain: the connector's
+// own.
+func parseLeaf(certPEM []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("client certificate is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse client certificate: %w", err)
+	}
+	return cert, nil
 }

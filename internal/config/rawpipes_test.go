@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
 )
 
 func publicKeyBlock(t *testing.T, kid string) (string, *ecdsa.PublicKey) {
@@ -120,6 +122,28 @@ func TestLoadRawPipes(t *testing.T) {
 		t.Setenv("TRAVERSAL_TUNNEL_COUNT", "9")
 		if _, err := loadRawPipes(); err == nil {
 			t.Fatal("accepted 9 tunnels")
+		}
+	})
+	t.Run("tunnel inner TLS is required unless disabled", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		for value, want := range map[string]tunnels.InnerTLS{
+			"":         tunnels.InnerTLSRequired,
+			"required": tunnels.InnerTLSRequired,
+			"disabled": tunnels.InnerTLSDisabled,
+		} {
+			t.Setenv("TRAVERSAL_TUNNEL_INNER_TLS", value)
+			cfg, err := loadRawPipes()
+			if err != nil || cfg.TunnelInnerTLS != want {
+				t.Fatalf("%q: got %v, %v", value, cfg.TunnelInnerTLS, err)
+			}
+		}
+		t.Setenv("TRAVERSAL_TUNNEL_INNER_TLS", "off")
+		if _, err := loadRawPipes(); err == nil ||
+			!strings.Contains(err.Error(), "TRAVERSAL_TUNNEL_INNER_TLS") {
+			t.Fatalf("accepted off: %v", err)
 		}
 	})
 	t.Run("pipe limits default to 4h and 15m idle", func(t *testing.T) {

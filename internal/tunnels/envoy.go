@@ -61,6 +61,8 @@ type envoyConfig struct {
 	maxPipes int64
 	// streamWindow and connectionWindow are the HTTP/2 windows, in bytes.
 	streamWindow, connectionWindow int
+	// innerTLS is whether the tunnels' data leg runs its own TLS.
+	innerTLS InnerTLS
 }
 
 // endpoint is the Traversal tunnel endpoint the connector holds tunnels to.
@@ -164,21 +166,62 @@ func (c envoyConfig) listener() map[string]any {
 			"resolver_name": "envoy.resolvers.reverse_connection",
 		}},
 		"listener_filters_timeout": "0s",
-		// The drain-aware HCM is the stock HCM plus one behaviour: when the
-		// tunnel endpoint sends GOAWAY (it is draining the tunnel, for a
-		// rollout or recycling), Envoy stops counting this tunnel and dials
-		// its replacement at once, while open pipes finish on the old one.
-		// Without it a draining tunnel counts as held until its socket
-		// closes, which pipes can delay for hours.
-		"filter_chains": []any{map[string]any{"filters": []any{map[string]any{
-			"name": "envoy.filters.network.reverse_tunnel_drain_aware_http_connection_manager",
-			"typed_config": map[string]any{
-				"@type": "type.googleapis.com/envoy.extensions.filters.network." +
-					"reverse_tunnel.v3.DrainAwareHttpConnectionManager",
-				"enable_drain_with_goaway": true,
-				"hcm_config":               c.pipesHCM(),
+		"filter_chains":            []any{c.tunnelFilterChain()},
+	}
+}
+
+// tunnelFilterChain serves the pipes each tunnel carries, over inner TLS
+// unless it is disabled.
+//
+// The drain-aware HCM is the stock HCM plus one behaviour: when the tunnel
+// endpoint sends GOAWAY (it is draining the tunnel, for a rollout or
+// recycling), Envoy stops counting this tunnel and dials its replacement at
+// once, while open pipes finish on the old one. Without it a draining tunnel
+// counts as held until its socket closes, which pipes can delay for hours.
+func (c envoyConfig) tunnelFilterChain() map[string]any {
+	chain := map[string]any{"filters": []any{map[string]any{
+		"name": "envoy.filters.network.reverse_tunnel_drain_aware_http_connection_manager",
+		"typed_config": map[string]any{
+			"@type": "type.googleapis.com/envoy.extensions.filters.network." +
+				"reverse_tunnel.v3.DrainAwareHttpConnectionManager",
+			"enable_drain_with_goaway": true,
+			"hcm_config":               c.pipesHCM(),
+		},
+	}}}
+	if c.innerTLS == InnerTLSRequired {
+		chain["transport_socket"] = c.innerTLSContext()
+	}
+	return chain
+}
+
+// innerTLSContext is the connector's side of each tunnel's data-leg TLS.
+//
+// Envoy duplicates the raw socket once a tunnel registers and drops the
+// dial's TLS session (see InnerTLS), so without this the data leg is
+// cleartext. This is a second handshake, owned by the listener, with the
+// roles reversed: the connector is the TLS server. It presents the
+// connector certificate (the dial's client certificate) and requires the
+// tunnel endpoint's, signed by the roots the dial already trusts and naming
+// the controller's host, the same name the dial verifies.
+func (c envoyConfig) innerTLSContext() map[string]any {
+	return map[string]any{
+		"name": "envoy.transport_sockets.tls",
+		"typed_config": map[string]any{
+			"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3." +
+				"DownstreamTlsContext",
+			"require_client_certificate": true,
+			"common_tls_context": map[string]any{
+				"tls_params": map[string]any{
+					"tls_minimum_protocol_version": "TLSv1_3",
+					"tls_maximum_protocol_version": "TLSv1_3",
+				},
+				// Only h2: the tunnel ALPN selects the front door's route
+				// on the dial and means nothing on the data leg.
+				"alpn_protocols":     []any{"h2"},
+				"tls_certificates":   c.tlsCertificates(),
+				"validation_context": c.endpointValidation(),
 			},
-		}}}},
+		},
 	}
 }
 
@@ -242,18 +285,9 @@ func (c envoyConfig) cluster() map[string]any {
 						"tls_minimum_protocol_version": "TLSv1_3",
 						"tls_maximum_protocol_version": "TLSv1_3",
 					},
-					"alpn_protocols": []any{tunnelALPN, "h2"},
-					"tls_certificates": []any{map[string]any{
-						"certificate_chain": map[string]any{"filename": c.path(certFile)},
-						"private_key":       map[string]any{"filename": c.path(keyFile)},
-					}},
-					"validation_context": map[string]any{
-						"trusted_ca": map[string]any{"filename": c.path(caFile)},
-						"match_typed_subject_alt_names": []any{map[string]any{
-							"san_type": "DNS",
-							"matcher":  map[string]any{"exact": e.sni},
-						}},
-					},
+					"alpn_protocols":     []any{tunnelALPN, "h2"},
+					"tls_certificates":   c.tlsCertificates(),
+					"validation_context": c.endpointValidation(),
 				},
 			},
 		},
@@ -286,6 +320,27 @@ func (c envoyConfig) http2Options() map[string]any {
 		"allow_connect":                  true,
 		"initial_stream_window_size":     c.streamWindow,
 		"initial_connection_window_size": c.connectionWindow,
+	}
+}
+
+// tlsCertificates is the connector certificate, on the dial and the data
+// leg alike.
+func (c envoyConfig) tlsCertificates() []any {
+	return []any{map[string]any{
+		"certificate_chain": map[string]any{"filename": c.path(certFile)},
+		"private_key":       map[string]any{"filename": c.path(keyFile)},
+	}}
+}
+
+// endpointValidation verifies the tunnel endpoint's certificate: signed by
+// a trusted root and naming the controller's host.
+func (c envoyConfig) endpointValidation() map[string]any {
+	return map[string]any{
+		"trusted_ca": map[string]any{"filename": c.path(caFile)},
+		"match_typed_subject_alt_names": []any{map[string]any{
+			"san_type": "DNS",
+			"matcher":  map[string]any{"exact": c.endpoint.sni},
+		}},
 	}
 }
 

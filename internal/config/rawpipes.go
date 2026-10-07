@@ -88,6 +88,9 @@ type RawPipes struct {
 	// receive windows in bytes (TRAVERSAL_TUNNEL_STREAM_WINDOW,
 	// TRAVERSAL_TUNNEL_CONNECTION_WINDOW). Zero uses the defaults.
 	TunnelStreamWindow, TunnelConnectionWindow int
+	// TunnelInnerTLS is whether each tunnel's data leg runs its own TLS
+	// (TRAVERSAL_TUNNEL_INNER_TLS: required, the default, or disabled).
+	TunnelInnerTLS tunnels.InnerTLS
 }
 
 func loadRawPipes() (RawPipes, error) {
@@ -120,6 +123,11 @@ func loadRawPipes() (RawPipes, error) {
 	if cfg.TunnelConnectionWindow, err = env.ParseEnvInt(
 		"TRAVERSAL_TUNNEL_CONNECTION_WINDOW", 0); err != nil {
 		return RawPipes{}, err
+	}
+	if cfg.TunnelInnerTLS, err = tunnels.ParseInnerTLS(
+		env.GetEnvString("TRAVERSAL_TUNNEL_INNER_TLS", tunnels.InnerTLSRequired.String()),
+	); err != nil {
+		return RawPipes{}, fmt.Errorf("TRAVERSAL_TUNNEL_INNER_TLS %w", err)
 	}
 	if cfg.TunnelCount < 1 || cfg.TunnelCount > tunnels.MaxTunnels {
 		return RawPipes{}, fmt.Errorf(

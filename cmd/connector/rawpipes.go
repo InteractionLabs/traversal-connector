@@ -104,9 +104,15 @@ func setUpRawPipes(
 		return nil, fmt.Errorf("listen for pipes: %w", err)
 	}
 	raw := runRawPipes(ctx, server, manager, ln)
+	if tunnelCfg.InnerTLS == tunnels.InnerTLSDisabled {
+		slog.WarnContext(ctx, "tunnel inner TLS is disabled: pipes cross the internet in "+
+			"cleartext once each tunnel is up; set TRAVERSAL_TUNNEL_INNER_TLS=required "+
+			"as soon as Traversal's tunnel endpoint supports it")
+	}
 	slog.InfoContext(ctx, "raw pipes enabled",
 		"max_pipes", cfg.RawPipes.MaxPipes,
 		"tunnels", cfg.RawPipes.TunnelCount,
+		"tunnel_inner_tls", tunnelCfg.InnerTLS.String(),
 		"issuer", cfg.RawPipes.CapabilityIssuer,
 		"max_lifetime", cfg.RawPipes.MaxLifetime,
 		"idle_timeout", cfg.RawPipes.IdleTimeout)
@@ -266,6 +272,7 @@ func tunnelConfig(cfg *config.Config) (tunnels.Config, error) {
 		CertPEM:          []byte(*cfg.TLSCert),
 		KeyPEM:           []byte(*cfg.TLSKey),
 		CAPEM:            roots,
+		InnerTLS:         cfg.RawPipes.TunnelInnerTLS,
 	}, nil
 }
 
