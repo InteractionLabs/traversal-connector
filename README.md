@@ -278,6 +278,17 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
+Request and response bodies travel to and from the control plane inside single
+tunnel messages, so they are also bounded by the gRPC framing limit of just
+under 4 GiB per message. The connector clamps the message limits derived from
+`MAX_REQUEST_BODY_SIZE_MB`, `MAX_RESPONSE_BODY_SIZE_MB`, and
+`MAX_DECODED_RESPONSE_BODY_SIZE_MB` to that ceiling: a value of `0` or below
+means unlimited up to the protocol maximum, not unlimited, and a larger value has
+no further effect. A response whose tunnel message would exceed the effective
+limit is not forwarded; the requester receives an `UPSTREAM_ERROR` naming the
+response size and the limit, and `connector.oversized_responses_total` counts it
+per target host.
+
 ### mTLS to the control plane
 
 mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.

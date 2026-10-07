@@ -16,6 +16,7 @@ type connectionMetrics struct {
 	reconnectsTotal         metric.Int64Counter
 	concurrentRequests      metric.Int64UpDownCounter
 	responseSendWaitLatency metric.Float64Histogram
+	oversizedResponses      metric.Int64Counter
 }
 
 // initConnectionMetrics initializes metrics for the connection manager.
@@ -71,10 +72,24 @@ func initConnectionMetrics() (*connectionMetrics, error) {
 		)
 	}
 
+	oversizedResponses, err := meter.Int64Counter(
+		telemetry.MetricOversizedResponsesTotal,
+		metric.WithDescription(
+			"Upstream responses replaced with an error because they exceed "+
+				"the tunnel message limit, per target host",
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create oversized responses counter: %w", err,
+		)
+	}
+
 	return &connectionMetrics{
 		streamsActive:           streamsActive,
 		reconnectsTotal:         reconnectsTotal,
 		concurrentRequests:      concurrentRequests,
 		responseSendWaitLatency: responseSendWaitLatency,
+		oversizedResponses:      oversizedResponses,
 	}, nil
 }
