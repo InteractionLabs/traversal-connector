@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"buf.build/go/protovalidate"
@@ -430,18 +431,19 @@ func (cm *ConnectionManager) handleMessage(
 			),
 		)
 		defer span.End()
+		// The executor reads the id back off the context for its own lines, so
+		// every record about this request can be joined with the controller's.
+		reqCtx = telemetry.ContextWithRequestID(reqCtx, msg.RequestId)
+		// Clipped so each branch's append below gets a fresh backing array.
+		reqAttrs := slices.Clip(append([]any{"target_host", targetHost},
+			cm.executor.DescribeRequest(msg.RequestId, m.HttpRequest).LogAttrs()...))
 
-		slog.DebugContext(reqCtx, "received http request",
-			"request_id", msg.RequestId,
-			"method", m.HttpRequest.Method,
-			"target_host", targetHost)
+		slog.DebugContext(reqCtx, "received http request", reqAttrs...)
 
 		if err := protovalidate.Validate(m.HttpRequest); err != nil {
 			safeErr := telemetry.RecordError(span, err)
 			slog.WarnContext(reqCtx, "received invalid http request",
-				"request_id", msg.RequestId,
-				"target_host", targetHost,
-				"error", safeErr)
+				append(reqAttrs, "error", safeErr)...)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
@@ -455,12 +457,15 @@ func (cm *ConnectionManager) handleMessage(
 
 		httpResp, err := cm.executor.Execute(reqCtx, m.HttpRequest)
 		if err != nil {
-			_ = telemetry.RecordError(span, err)
+			safeErr := telemetry.RecordError(span, err)
+			code := connector.ErrorCodeFor(err)
+			slog.DebugContext(reqCtx, "sending error response for http request",
+				append(reqAttrs, "error_code", code, "error", safeErr)...)
 			return stream.Send(&pb.ConnectorMessage{
 				RequestId: msg.RequestId,
 				Message: &pb.ConnectorMessage_ErrorResponse{
 					ErrorResponse: &pb.ErrorResponse{
-						Code:    string(connector.ErrorCodeFor(err)),
+						Code:    string(code),
 						Message: err.Error(),
 					},
 				},

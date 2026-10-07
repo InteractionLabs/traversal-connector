@@ -356,6 +356,28 @@ func toFieldSet(fields []string) map[string]struct{} {
 	return s
 }
 
+// ScrubForLog applies every rule in scope for host, byte-level, to text that is
+// about to be logged rather than forwarded, such as a request's query string or
+// a body excerpt.
+//
+// Structured rules fire here too, with their field filters ignored: a log
+// excerpt is a fragment that usually cannot be parsed, and erring toward
+// removing more is the right failure for text leaving in telemetry. Nothing is
+// recorded in the redaction metrics, which describe forwarded responses.
+func (r *Redactor) ScrubForLog(host string, text []byte) []byte {
+	rules := *r.rules.Load()
+	if len(rules) == 0 || len(text) == 0 {
+		return text
+	}
+	canonical := canonicalHost(host)
+	for i := range rules {
+		if rules[i].appliesToHost(canonical) {
+			text = rules[i].re.ReplaceAll(text, rules[i].replacement)
+		}
+	}
+	return text
+}
+
 // Apply runs legacy "regex" rules over src and returns the result. Structured
 // ("regex-structured-data") rules are skipped here — they're designed for the
 // per-field ApplyJSON path and their redact_fields / skip_fields filters can't

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -68,6 +70,8 @@ func (ss *responseSender) run(ctx context.Context) {
 			if err := ss.sender.Send(item.msg); err != nil {
 				slog.ErrorContext(ctx, "response sender: stream send failed",
 					"request_id", item.msg.RequestId,
+					"response_size", proto.Size(item.msg),
+					"response_body_size", len(item.msg.GetHttpResponse().GetBody()),
 					"error", telemetry.SanitizeError(err))
 			}
 		case <-ctx.Done():

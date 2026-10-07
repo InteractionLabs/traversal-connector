@@ -2,10 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,12 +17,14 @@ import (
 	"github.com/google/uuid"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/executor"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // queryCanary appears only inside a request's path and query, so finding it
@@ -53,6 +58,8 @@ func newTelemetryTestManager(
 		MaxConcurrentRequests: 10,
 		RequestTimeout:        timeout,
 		MaxRequestBodySizeMB:  32,
+		// Pinned so these tests keep asserting the default keeps paths out.
+		LogRequestDetails: telemetry.RequestDetailsOff,
 	}
 	exec, err := executor.NewExecutor(cfg, redact.NewRedactor())
 	if err != nil {
@@ -280,4 +287,143 @@ func TestHandleMessage_InvalidHTTPRequestKeepsRequestPathOutOfTelemetry(t *testi
 
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
+}
+
+// Every line logged while serving one request names its request id, including
+// the executor's, which read it from the context.
+func TestHandleMessage_EveryRequestLineCarriesRequestID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	for name, base := range map[string]string{
+		"success":     server.URL,
+		"unreachable": "http://127.0.0.1:1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			const reqID = "req-every-line"
+			cm, _ := newTelemetryTestManager(t, 2*time.Second)
+			logs := captureLogs(t)
+
+			msg := &pb.ControllerMessage{
+				RequestId: reqID,
+				Message: &pb.ControllerMessage_HttpRequest{
+					HttpRequest: &pb.HttpRequest{Method: "GET", Url: canaryURL(base)},
+				},
+			}
+			if err := cm.handleMessage(context.Background(), &mockSender{}, uuid.New(), msg); err != nil {
+				t.Fatalf("handleMessage() = %v", err)
+			}
+
+			logs.mu.Lock()
+			records := slices.Clone(logs.records)
+			logs.mu.Unlock()
+			// Header helpers in connector-lib log without request context, so
+			// only the handler's and executor's own lines are checked.
+			perRequest := []string{"received http request", "executing upstream",
+				"upstream request", "sending error response"}
+			checked := 0
+			for _, record := range records {
+				if !slices.ContainsFunc(perRequest, func(prefix string) bool {
+					return strings.HasPrefix(record, prefix)
+				}) {
+					continue
+				}
+				checked++
+				if !strings.Contains(record, "request_id="+reqID) ||
+					!strings.Contains(record, "method=GET") {
+					t.Errorf("record lacks request_id or method:\n%s", record)
+				}
+			}
+			if checked < 3 {
+				t.Errorf("expected handler and executor records, got:\n%s", logs.text())
+			}
+			assertNoCanary(t, "log", logs.text())
+		})
+	}
+}
+
+func TestHandleMessage_RequestDetailsFullOnHandlerLines(t *testing.T) {
+	const reqID = "req-invalid-full"
+	cm, _ := newTelemetryTestManager(t, 5*time.Second)
+	cfg := *cm.config
+	cfg.LogRequestDetails = telemetry.RequestDetailsFull
+	exec, err := executor.NewExecutor(&cfg, redact.NewRedactor())
+	if err != nil {
+		t.Fatalf("NewExecutor() failed: %v", err)
+	}
+	cm.executor = exec
+	logs := captureLogs(t)
+
+	// A relative target fails validation, so only handler lines are logged.
+	msg := &pb.ControllerMessage{
+		RequestId: reqID,
+		Message: &pb.ControllerMessage_HttpRequest{
+			HttpRequest: &pb.HttpRequest{
+				Method: "GET",
+				Url:    "/orders/" + queryCanary + "?token=" + queryCanary,
+			},
+		},
+	}
+	if err := cm.handleMessage(context.Background(), &mockSender{}, uuid.New(), msg); err != nil {
+		t.Fatalf("handleMessage() = %v", err)
+	}
+
+	text := logs.text()
+	for _, want := range []string{
+		"received invalid http request",
+		"request_id=" + reqID,
+		"target_path=/orders/" + queryCanary,
+		"query_keys=[token]",
+		"target_query=token=" + queryCanary,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("log lacks %q:\n%s", want, text)
+		}
+	}
+}
+
+type failingSender struct{}
+
+func (failingSender) Send(*pb.ConnectorMessage) error {
+	return errors.New("envelope too large")
+}
+
+func TestResponseSender_SendFailureLogsResponseSize(t *testing.T) {
+	logs := captureLogs(t)
+	ss := newResponseSender(failingSender{}, 1, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ss.run(ctx)
+		close(done)
+	}()
+
+	msg := &pb.ConnectorMessage{
+		RequestId: "req-oversized",
+		Message: &pb.ConnectorMessage_HttpResponse{
+			HttpResponse: &pb.HttpResponse{HttpStatus: 200, Body: make([]byte, 4096)},
+		},
+	}
+	if err := ss.Send(msg); err != nil {
+		t.Fatalf("Send() = %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logs.text(), "stream send failed") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	text := logs.text()
+	for _, want := range []string{
+		"request_id=req-oversized",
+		"response_size=" + strconv.Itoa(proto.Size(msg)),
+		"response_body_size=4096",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("log lacks %q:\n%s", want, text)
+		}
+	}
 }

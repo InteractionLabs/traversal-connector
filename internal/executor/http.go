@@ -68,6 +68,22 @@ type Executor struct {
 	tracer                          trace.Tracer
 	metrics                         *executorMetrics
 	redactor                        *redact.Redactor
+	requestLog                      telemetry.RequestLogPolicy
+}
+
+// requestLog is what every log line about one upstream request carries: the
+// destination host, plus the request details the configured policy allows.
+type requestLog struct {
+	targetHost string
+	attrs      []any
+}
+
+// with returns the request's attributes followed by extra, for one slog call.
+func (rl requestLog) with(extra ...any) []any {
+	out := make([]any, 0, 2+len(rl.attrs)+len(extra))
+	out = append(out, "target_host", rl.targetHost)
+	out = append(out, rl.attrs...)
+	return append(out, extra...)
 }
 
 // NewExecutor creates a new HTTP executor with the given configuration.
@@ -116,12 +132,32 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 		tracer:   otel.Tracer(InstrumentationName),
 		metrics:  metrics,
 		redactor: r,
+		requestLog: telemetry.NewRequestLogPolicy(
+			cfg.LogRequestDetails,
+			cfg.LogRequestBodyMaxBytes,
+			cfg.RequestTimeout,
+			r.ScrubForLog,
+		),
 	}, nil
+}
+
+// DescribeRequest reduces req to the details the configured LOG_REQUEST_DETAILS
+// level allows on a log line. The tunnel handler uses it so its lines carry the
+// same fields as the executor's. A nil Executor describes at the off level.
+func (e *Executor) DescribeRequest(requestID string, req *pb.HttpRequest) telemetry.RequestDetails {
+	var policy telemetry.RequestLogPolicy
+	if e != nil {
+		policy = e.requestLog
+	}
+	return policy.Describe(requestID, req)
 }
 
 // Execute converts a protobuf HttpRequest into a real HTTP request, executes it
 // against the upstream service, and returns the response as a protobuf HttpResponse.
 // On failure (invalid URL, network error, timeout, etc.) it returns an error.
+//
+// The request id logged with each line is read from ctx, where the tunnel
+// handler puts it with telemetry.ContextWithRequestID.
 func (e *Executor) Execute(
 	ctx context.Context,
 	protoReq *pb.HttpRequest,
@@ -129,6 +165,8 @@ func (e *Executor) Execute(
 	startTime := time.Now()
 
 	targetHost := telemetry.HostFromURL(protoReq.Url)
+	details := e.DescribeRequest(telemetry.RequestIDFromContext(ctx), protoReq)
+	rl := requestLog{targetHost: targetHost, attrs: details.LogAttrs()}
 	requestStatus := connector.StatusError
 	defer func() {
 		duration := float64(
@@ -142,11 +180,14 @@ func (e *Executor) Execute(
 		e.metrics.upstreamLatency.Record(ctx, duration, attrs)
 	}()
 
+	// Above the off level the span carries the same path and query fields as
+	// the log, so a slow trace can be tied to the query behind it.
 	ctx, span := e.tracer.Start(ctx, telemetry.SpanExecutorUpstreamHTTP,
 		trace.WithAttributes(
 			attribute.String(connector.AttrTargetHost, targetHost),
 			attribute.String(connector.AttrMethod, protoReq.Method),
 		),
+		trace.WithAttributes(details.SpanAttrs()...),
 	)
 	defer span.End()
 
@@ -154,16 +195,13 @@ func (e *Executor) Execute(
 	e.metrics.upstreamRequestBodySizeBytes.Record(ctx, int64(len(protoReq.Body)),
 		metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
 
-	slog.DebugContext(ctx, "executing upstream HTTP request",
-		"method", protoReq.Method,
-		"target_host", targetHost)
+	slog.DebugContext(ctx, "executing upstream HTTP request", rl.with()...)
 
 	// Validate the target URL.
 	if err := connector.ValidateTargetURL(protoReq.Url); err != nil {
 		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: invalid URL",
-			"error", safeErr,
-			"target_host", targetHost)
+			rl.with("error", safeErr)...)
 		return nil, fmt.Errorf("invalid target URL: %w", err)
 	}
 
@@ -177,9 +215,10 @@ func (e *Executor) Execute(
 		_ = telemetry.RecordError(span, bodySizeErr)
 		e.metrics.requestBodySizeLimitHit.Add(ctx, 1)
 		slog.WarnContext(ctx, "upstream request failed: body too large",
-			"body_size", len(protoReq.Body),
-			"max_size", e.maxRequestBodySizeBytes,
-			"target_host", targetHost)
+			rl.with(
+				"body_size", len(protoReq.Body),
+				"max_size", e.maxRequestBodySizeBytes,
+			)...)
 		return nil, fmt.Errorf(
 			"request body size %d exceeds limit %d",
 			len(protoReq.Body),
@@ -197,8 +236,7 @@ func (e *Executor) Execute(
 	if err != nil {
 		safeErr := telemetry.RecordError(span, err)
 		slog.ErrorContext(ctx, "upstream request failed: cannot create request",
-			"error", safeErr,
-			"target_host", targetHost)
+			rl.with("error", safeErr)...)
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
@@ -219,14 +257,15 @@ func (e *Executor) Execute(
 		safeErr := telemetry.RecordError(span, err)
 		duration := time.Since(startTime)
 		slog.ErrorContext(ctx, "upstream request failed",
-			"error", safeErr,
-			"target_host", targetHost,
-			"duration_ms", duration.Milliseconds())
+			rl.with(
+				"error", safeErr,
+				"duration_ms", duration.Milliseconds(),
+			)...)
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
+	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, rl)
 	if err != nil {
 		_ = telemetry.RecordError(span, err)
 		return nil, err
@@ -241,10 +280,11 @@ func (e *Executor) Execute(
 
 	duration := time.Since(startTime)
 	slog.InfoContext(ctx, "upstream request completed",
-		"target_host", targetHost,
-		"status", resp.StatusCode,
-		"duration_ms", duration.Milliseconds(),
-		"response_body_size", len(protoResp.Body))
+		rl.with(
+			"status", resp.StatusCode,
+			"duration_ms", duration.Milliseconds(),
+			"response_body_size", len(protoResp.Body),
+		)...)
 
 	return protoResp, nil
 }
@@ -265,19 +305,26 @@ func (e *Executor) buildResponse(
 	ctx context.Context,
 	resp *http.Response,
 	targetURL string,
-	targetHost string,
+	rl requestLog,
 ) (*pb.HttpResponse, error) {
+	targetHost := rl.targetHost
 	body, err := readLimited(resp.Body, e.maxResponseBodySizeBytes)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			return nil, e.refuse(ctx, targetHost, refusalBodyTooLarge,
+			// Only the declared length is known: reading stopped at the limit.
+			return nil, e.refuse(ctx, rl, refusalBodyTooLarge,
 				connector.ErrorCodeUpstreamError,
 				fmt.Errorf("upstream response body exceeds %d bytes",
-					e.maxResponseBodySizeBytes))
+					e.maxResponseBodySizeBytes),
+				"response_content_length", resp.ContentLength,
+				"max_size", e.maxResponseBodySizeBytes)
 		}
 		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
-			"error", telemetry.SanitizeError(err),
-			"target_host", targetHost)
+			rl.with(
+				"error", telemetry.SanitizeError(err),
+				"status", resp.StatusCode,
+				"response_content_length", resp.ContentLength,
+			)...)
 		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
 
@@ -309,16 +356,18 @@ func (e *Executor) buildResponse(
 	// A pattern straddling a chunk boundary is invisible to both halves, so a
 	// partial body cannot be redacted soundly.
 	if resp.StatusCode == http.StatusPartialContent {
-		return nil, e.refuse(ctx, targetHost, refusalPartialContent,
+		return nil, e.refuse(ctx, rl, refusalPartialContent,
 			connector.ErrorCodeUpstreamError,
-			errors.New("partial response cannot be redacted"))
+			errors.New("partial response cannot be redacted"),
+			"response_body_size", len(body))
 	}
 
 	if !coding.canDecode() {
-		return nil, e.refuse(ctx, targetHost, refusalUnsupportedEncoding,
+		return nil, e.refuse(ctx, rl, refusalUnsupportedEncoding,
 			connector.ErrorCodeUnsupportedEncoding,
 			fmt.Errorf("response content encoding %q cannot be redacted",
-				resp.Header.Get(headerContentEncoding)))
+				resp.Header.Get(headerContentEncoding)),
+			"response_body_size", len(body))
 	}
 
 	plaintext := body
@@ -329,8 +378,10 @@ func (e *Executor) buildResponse(
 			if errors.Is(err, errBodyTooLarge) {
 				reason = refusalDecodedTooLarge
 			}
-			return nil, e.refuse(ctx, targetHost, reason,
-				connector.ErrorCodeUpstreamError, err)
+			return nil, e.refuse(ctx, rl, reason,
+				connector.ErrorCodeUpstreamError, err,
+				"response_body_size", len(body),
+				"max_decoded_size", e.maxDecodedResponseBodySizeBytes)
 		}
 		e.metrics.decodedResponseBodySizeBytes.Record(ctx, int64(len(plaintext)),
 			metric.WithAttributes(attribute.String(connector.AttrTargetHost, targetHost)))
@@ -349,8 +400,9 @@ func (e *Executor) buildResponse(
 		ctx, redactHost, resp.Header.Get(headerContentType), plaintext,
 	)
 	if err != nil {
-		return nil, e.refuse(ctx, targetHost, refusalMalformedJSON,
-			connector.ErrorCodeUpstreamError, err)
+		return nil, e.refuse(ctx, rl, refusalMalformedJSON,
+			connector.ErrorCodeUpstreamError, err,
+			"response_body_size", len(body))
 	}
 
 	finalBody := redacted
@@ -471,21 +523,26 @@ func (e *Executor) redactBody(
 //
 // The reason rides on a counter separate from the encoding metric, so an
 // operator can alert on refusals without watching ordinary traffic.
+//
+// sizes are extra key/value pairs for the log line describing how large the
+// response was, as far as the caller knows.
 func (e *Executor) refuse(
 	ctx context.Context,
-	targetHost string,
+	rl requestLog,
 	reason string,
 	code connector.ErrorCode,
 	err error,
+	sizes ...any,
 ) error {
 	e.metrics.responseRefusals.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(connector.AttrTargetHost, targetHost),
+		attribute.String(connector.AttrTargetHost, rl.targetHost),
 		attribute.String(attrRefusalReason, reason),
 	))
 	slog.ErrorContext(ctx, "upstream response dropped: body could not be redacted",
-		"target_host", targetHost,
-		"reason", reason,
-		"error", telemetry.SanitizeError(err))
+		rl.with(append([]any{
+			"reason", reason,
+			"error", telemetry.SanitizeError(err),
+		}, sizes...)...)...)
 	return connector.NewCodedError(code, err)
 }
 

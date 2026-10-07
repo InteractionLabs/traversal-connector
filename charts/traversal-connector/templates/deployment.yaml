@@ -183,6 +183,14 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.logRequestDetails }}
+            - name: LOG_REQUEST_DETAILS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (eq (toString .Values.logRequestBodyMaxBytes) "") }}
+            - name: LOG_REQUEST_BODY_MAX_BYTES
+              value: {{ .Values.logRequestBodyMaxBytes | quote }}
+            {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY
               value: "true"

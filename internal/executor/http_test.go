@@ -14,6 +14,7 @@ import (
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 func findHeader(headers []*pb.Header, key string) (string, bool) {
@@ -30,6 +31,9 @@ func newTestExecutor(t *testing.T, timeout time.Duration, maxBodyMB int64) *Exec
 	cfg := &config.Config{
 		RequestTimeout:       timeout,
 		MaxRequestBodySizeMB: maxBodyMB,
+		// Pinned so the tests asserting that no path or query reaches
+		// telemetry keep asserting it about the default.
+		LogRequestDetails: telemetry.RequestDetailsOff,
 	}
 	exec, err := NewExecutor(cfg, redact.NewRedactor())
 	if err != nil {
