@@ -156,6 +156,7 @@ capability_keys() {
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_RAW_PIPES'
 
 render raw-current "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}"
+assert_contains "$tmp_dir/raw-current.yaml" $'            - name: TRAVERSAL_TUNNEL_INNER_TLS\n              value: "required"'
 assert_contains "$tmp_dir/raw-current.yaml" $'            - name: TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"'
 capability_keys "$tmp_dir/raw-current.yaml" > "$tmp_dir/raw-current.pem"
 assert_contains "$tmp_dir/raw-current.pem" $'-----BEGIN PUBLIC KEY-----\nKey-ID: current-kid\n\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEo3xiyBylNeUhamEsm1ZUta1LQKYx'
@@ -179,6 +180,12 @@ assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNN
 assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME\n              value: "1h"'
 assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT\n              value: "0s"'
 assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_MAX_LIFETIME'
+render raw-inner-tls-disabled "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelInnerTLS=disabled
+assert_contains "$tmp_dir/raw-inner-tls-disabled.yaml" $'            - name: TRAVERSAL_TUNNEL_INNER_TLS\n              value: "disabled"'
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_TUNNEL_INNER_TLS'
+assert_render_fails raw-inner-tls-invalid 'rawPipes.tunnelInnerTLS must be required or disabled, got "off"' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelInnerTLS=off
 assert_render_fails raw-per-replica 'rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount' "${common[@]}" "${raw_enabled[@]}" \
   --set-string rawPipes.tunnelsPerReplica=2
 

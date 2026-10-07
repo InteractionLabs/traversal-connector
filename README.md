@@ -517,6 +517,11 @@ hands every pipe that arrives on them to connector-core on loopback.
   controller. A TLS-intercepting proxy breaks tunnels, and tunnels through
   `EGRESS_PROXY_URL` are not supported yet: such a connector keeps serving
   HTTP requests only and reports why.
+- **Certificate.** With `TRAVERSAL_TUNNEL_INNER_TLS=required`, the default,
+  the connector is the TLS server inside each tunnel, so its certificate's
+  extended key usage must include `serverAuth` as well as `clientAuth` (or be
+  absent). A `clientAuth`-only certificate keeps raw pipes off, with an error
+  saying so; HTTP requests are unaffected.
 - **Limits.** A pipe is reset when it has been open for
   `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` or has moved no bytes either way for
   `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT`. The defaults, 4h and 15m, match
@@ -535,6 +540,7 @@ hands every pipe that arrives on them to connector-core on loopback.
 | `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT` | `15m` | Longest a pipe may move no bytes. `0s` turns the limit off. |
 | `TRAVERSAL_TUNNEL_COUNT` | `2` | W, tunnels per connector pod, from 1 to 8 (one Envoy worker each). `TRAVERSAL_TUNNELS_PER_REPLICA`, its earlier name, is read when it is unset. |
 | `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` the tunnels dial instead of `<controller host>:443`, such as a PrivateLink endpoint. SNI and the certificate check still use the controller's host. |
+| `TRAVERSAL_TUNNEL_INNER_TLS` | `required` | TLS 1.3 on each tunnel's data leg, with the connector as the TLS server, presenting its client certificate and requiring the tunnel endpoint's. `disabled` leaves pipes in cleartext once a tunnel is up, for a tunnel endpoint that does not support inner TLS yet, and logs a warning at startup. The chart sets it from `rawPipes.tunnelInnerTLS`. |
 | `TRAVERSAL_TUNNEL_STREAM_WINDOW` / `TRAVERSAL_TUNNEL_CONNECTION_WINDOW` | `2 MiB` / `1 GiB` | The tunnels' HTTP/2 receive windows, in bytes. A pipe moves at most one stream window per round trip. |
 | `TRAVERSAL_ENVOY_PATH` | `envoy` | The Envoy binary. The image sets it. |
 | `TRAVERSAL_RUN_DIR` | `$TMPDIR/traversal-tunnels` | Private, writable directory for Envoy's configuration and a copy of the connector's credentials. |

@@ -9,6 +9,9 @@
 {{- if .Values.rawPipes.tunnelsPerReplica | default "" -}}
 {{- fail "rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount: the connector holds its tunnels to one endpoint, not to each replica." -}}
 {{- end -}}
+{{- if not (has .Values.rawPipes.tunnelInnerTLS (list "required" "disabled")) -}}
+{{- fail (printf "rawPipes.tunnelInnerTLS must be required or disabled, got %q" (toString .Values.rawPipes.tunnelInnerTLS)) -}}
+{{- end -}}
 {{- if .Values.rawPipes.capabilityKeysPEM | default "" -}}
 {{- fail "rawPipes.capabilityKeysPEM is no longer supported; the chart ships each environment's keys in rawPipes.trustedKeys, selected by rawPipes.environment." -}}
 {{- end -}}
@@ -214,6 +217,8 @@ spec:
             - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT
               value: {{ . | quote }}
             {{- end }}
+            - name: TRAVERSAL_TUNNEL_INNER_TLS
+              value: {{ .Values.rawPipes.tunnelInnerTLS | quote }}
             {{- with .Values.rawPipes.tunnelCount }}
             - name: TRAVERSAL_TUNNEL_COUNT
               value: {{ . | quote }}

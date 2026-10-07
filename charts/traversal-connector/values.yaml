@@ -105,6 +105,15 @@ rawPipes:
   # deployments. Blank uses the defaults.
   tunnelStreamWindow: ""     # TRAVERSAL_TUNNEL_STREAM_WINDOW
   tunnelConnectionWindow: "" # TRAVERSAL_TUNNEL_CONNECTION_WINDOW
+  # TLS on each tunnel's data leg, inside the tunnel: required or disabled.
+  # Without it pipes cross the internet in cleartext once a tunnel is up, so
+  # disable it only for a Traversal tunnel endpoint that does not support it
+  # yet; the connector warns at startup when it is off. When required, the
+  # connector is the TLS server on each tunnel, so its certificate
+  # (controllerTLS) must allow serverAuth in its extended key usage as well
+  # as clientAuth, or have no extended key usage; otherwise raw pipes stay
+  # off and say why.
+  tunnelInnerTLS: required   # TRAVERSAL_TUNNEL_INNER_TLS
 
 # Pod termination grace period, in seconds. Empty uses Kubernetes' default
 # (30), or 45 when rawPipes.enabled, which a raw pipe drain needs.
