@@ -25,7 +25,7 @@ func newTestConn(t *testing.T, id uint32) (*h2conn, *h2stream, net.Conn) {
 		streams:       map[uint32]*h2stream{},
 	}
 	c.cond = sync.NewCond(&c.mu)
-	st := &h2stream{c: c, id: id, sendWin: c.peerStreamWin}
+	st := newStream(c, id)
 	c.streams[id] = st
 	return c, st, peer
 }

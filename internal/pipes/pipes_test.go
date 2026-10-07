@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -600,6 +601,53 @@ func (h *harness) waitOpen(want int64) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// A caller reset after its END_STREAM must still reach the destination: no
+// one is reading the stream then, so the reset alone has to end the pipe.
+func TestCallerResetAfterEndStreamReachesDestination(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = p.body.Close() // END_STREAM
+	_ = dst.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(dst); err != nil {
+		t.Fatalf("destination did not see the caller's FIN: %v", err)
+	}
+	_ = dst.SetReadDeadline(time.Time{})
+	_ = p.resp.Body.Close() // the response is not over: RST_STREAM(CANCEL)
+
+	h.waitOpen(0)
+	// After a TCP reset the very first write fails; after a FIN it would
+	// succeed and only a later one fail.
+	time.Sleep(50 * time.Millisecond) // let the RST cross loopback
+	if _, err := dst.Write([]byte("still here")); !errors.Is(err, syscall.ECONNRESET) &&
+		!errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("destination write after the caller's reset: %v, want a TCP reset", err)
+	}
+}
+
+// A caller reset while the destination is not reading must free the pipe
+// even though the copy toward the destination is blocked.
+func TestCallerResetWhileDestinationStalledFreesPipe(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = dst.SetReadBuffer(4 << 10)
+	go func() {
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := p.body.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond) // fill the destination's socket buffers
+	_ = p.resp.Body.Close()            // RST_STREAM(CANCEL)
+	_ = p.body.CloseWithError(errors.New("caller gave up"))
+	h.waitOpen(0)
 }
 
 // Losing the connection to Envoy is audited as a lost tunnel, not as the

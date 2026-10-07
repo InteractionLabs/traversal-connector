@@ -227,6 +227,11 @@ func (s *Server) serve(st *h2stream) {
 		return
 	}
 	defer func() { _ = dst.Close() }()
+	// A reset or a lost tunnel ends the destination too, even while nothing
+	// reads the stream: after the caller's END_STREAM, or while a write to
+	// the destination is blocked.
+	stopAbort := context.AfterFunc(st.ctx, func() { abort(dst) })
+	defer stopAbort()
 	if err := st.respond("200", nil, false); err != nil {
 		abort(dst)
 		return
@@ -355,7 +360,28 @@ func splice(st *h2stream, dst dialpolicy.Conn, touch func()) spliceResult {
 	case callerAborted.Load():
 		result.outcome = outcomeCallerAborted
 	}
+	if result.outcome != outcomeCompleted {
+		// A peer reset or lost tunnel aborts the destination from outside
+		// the copies, which then see only the destination failing.
+		if o := streamLoss(st); o != "" {
+			result.outcome = o
+		}
+	}
 	return result
+}
+
+// streamLoss is the outcome for a stream ended from Envoy's side: the caller
+// reset it or the tunnel was lost. It is "" while the stream is open or when
+// this side ended it first.
+func streamLoss(st *h2stream) outcome {
+	switch cause := context.Cause(st.ctx); {
+	case errors.Is(cause, errStreamReset):
+		return outcomeCallerAborted
+	case errors.Is(cause, errConnClosed):
+		return outcomeTunnelUnavailable
+	default:
+		return ""
+	}
 }
 
 // limits ends a pipe at its lifetime cap or after it has idled too long,

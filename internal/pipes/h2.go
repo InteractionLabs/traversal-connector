@@ -43,6 +43,9 @@ const (
 var (
 	errStreamReset = errors.New("pipes: stream reset")
 	errConnClosed  = errors.New("pipes: connection closed")
+	// errLocalReset is the cause of a stream this side ended: an abort, or
+	// a handler that returned.
+	errLocalReset = errors.New("pipes: stream ended here")
 )
 
 // h2server accepts HTTP/2 cleartext connections and runs handle for every
@@ -135,6 +138,12 @@ type h2stream struct {
 	method    string
 	authority string
 	header    map[string]string
+	// ctx is cancelled once the stream is reset or its connection is lost,
+	// with errStreamReset (the peer reset it), errConnClosed, or
+	// errLocalReset as the cause. It lets a handler stop work no one will
+	// read, even while it is not reading the stream.
+	ctx    context.Context
+	cancel context.CancelCauseFunc
 
 	// Guarded by c.mu.
 	sendWin  int64
@@ -143,6 +152,11 @@ type h2stream struct {
 	inErr    error // io.EOF after END_STREAM; errStreamReset after RST_STREAM
 	reset    bool  // RST_STREAM sent or received: no more frames
 	localEnd bool  // END_STREAM sent
+}
+
+func newStream(c *h2conn, id uint32) *h2stream {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	return &h2stream{c: c, id: id, sendWin: c.peerStreamWin, ctx: ctx, cancel: cancel}
 }
 
 func (s *h2server) serveConn(nc net.Conn) {
@@ -190,6 +204,7 @@ func (s *h2server) serveConn(nc net.Conn) {
 			st.inErr = errConnClosed
 		}
 		st.reset = true
+		st.cancel(errConnClosed)
 	}
 	c.cond.Broadcast()
 	c.mu.Unlock()
@@ -276,6 +291,7 @@ func (c *h2conn) readLoop(s *h2server) error {
 			if st := c.streams[f.StreamID]; st != nil {
 				dropped = st.dropBuffered()
 				st.inErr, st.reset = errStreamReset, true
+				st.cancel(errStreamReset)
 				c.cond.Broadcast()
 			}
 			c.mu.Unlock()
@@ -325,6 +341,7 @@ func (c *h2conn) onWindowUpdate(f *http2.WindowUpdateFrame) error {
 			// A stream error; resetting it here would take the write lock
 			// under c.mu, so the stream simply stops sending.
 			st.reset = true
+			st.cancel(errStreamReset)
 		}
 	}
 	c.cond.Broadcast()
@@ -354,14 +371,10 @@ func (c *h2conn) onHeaders(s *h2server, f *http2.MetaHeadersFrame) {
 		c.resetStream(f.StreamID, http2.ErrCodeRefusedStream)
 		return
 	}
-	st := &h2stream{
-		c:         c,
-		id:        f.StreamID,
-		method:    f.PseudoValue("method"),
-		authority: f.PseudoValue("authority"),
-		header:    map[string]string{},
-		sendWin:   c.peerStreamWin,
-	}
+	st := newStream(c, f.StreamID)
+	st.method = f.PseudoValue("method")
+	st.authority = f.PseudoValue("authority")
+	st.header = map[string]string{}
 	for _, hf := range f.RegularFields() {
 		st.header[hf.Name] = hf.Value
 	}
@@ -423,6 +436,7 @@ func (c *h2conn) resetStream(id uint32, code http2.ErrCode) {
 	if st := c.streams[id]; st != nil {
 		dropped = st.dropBuffered()
 		st.inErr, st.reset = errStreamReset, true
+		st.cancel(errStreamReset)
 		c.cond.Broadcast()
 	}
 	c.mu.Unlock()
@@ -613,6 +627,7 @@ func (st *h2stream) Abort() {
 		if st.inErr == nil {
 			st.inErr = errStreamReset
 		}
+		st.cancel(errLocalReset)
 		c.cond.Broadcast()
 		c.mu.Unlock()
 		return c.fr.WriteRSTStream(st.id, http2.ErrCodeInternal)
@@ -637,6 +652,7 @@ func (st *h2stream) finish() {
 	// Nothing may follow on this stream once it is forgotten: a late Abort
 	// (a lifetime timer) or Write sends no frame.
 	st.reset = true
+	st.cancel(errLocalReset)
 	delete(c.streams, st.id)
 	c.mu.Unlock()
 	if unfinished {
