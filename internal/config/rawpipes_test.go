@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,38 @@ func TestLoadRawPipes(t *testing.T) {
 		t.Setenv("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", "-1s")
 		if _, err := loadRawPipes(); err == nil {
 			t.Fatal("accepted a negative idle timeout")
+		}
+	})
+	t.Run("rejects values that do not parse, rather than using defaults", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		for key, value := range map[string]string{
+			"TRAVERSAL_RAW_PIPES_MAX":          "fifty",
+			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME": "4 hours",
+			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "300", // no unit
+		} {
+			t.Run(key, func(t *testing.T) {
+				t.Setenv(key, value)
+				if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("%s=%q: %v, want an error naming it", key, value, err)
+				}
+			})
+		}
+	})
+	t.Run("caps the pipe count", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		t.Setenv("TRAVERSAL_RAW_PIPES_MAX", strconv.Itoa(maxRawPipesMax))
+		if _, err := loadRawPipes(); err != nil {
+			t.Fatalf("the cap itself: %v", err)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_MAX", strconv.Itoa(maxRawPipesMax+1))
+		if _, err := loadRawPipes(); err == nil {
+			t.Fatal("accepted a pipe count over the cap")
 		}
 	})
 }

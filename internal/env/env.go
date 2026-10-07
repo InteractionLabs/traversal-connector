@@ -1,6 +1,7 @@
 package env
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -50,6 +51,37 @@ func GetEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	}
 	// If environment value is invalid, return the default
 	return defaultVal
+}
+
+// ParseEnvInt64 returns the environment variable identified by key parsed as
+// an int64, or defaultVal if it is empty or unset. Unlike GetEnvInt64, a value
+// that does not parse is an error naming key, not a silent default.
+func ParseEnvInt64(key string, defaultVal int64) (int64, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer, got %q", key, val)
+	}
+	return parsed, nil
+}
+
+// ParseEnvDuration returns the environment variable identified by key parsed
+// as a time.Duration, or defaultVal if it is empty or unset. Unlike
+// GetEnvDuration, a value that does not parse, such as "300" with no unit, is
+// an error naming key, not a silent default.
+func ParseEnvDuration(key string, defaultVal time.Duration) (time.Duration, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal, nil
+	}
+	parsed, err := time.ParseDuration(val)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration such as 15m, got %q", key, val)
+	}
+	return parsed, nil
 }
 
 // GetEnvBool returns the value of the environment variable identified by key

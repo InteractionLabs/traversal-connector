@@ -15,6 +15,10 @@ import (
 
 const (
 	defaultRawPipesMax = 200
+	// maxRawPipesMax keeps every pipe able to stall without stalling the
+	// rest: connector-core's 1 GiB connection window holds 4,096 stalled
+	// 256 KiB streams.
+	maxRawPipesMax = 4096
 	// Pipe limits (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT).
 	// They match the Traversal side's, so neither side ends a pipe the other
 	// would still keep.
@@ -65,17 +69,27 @@ func loadRawPipes() (RawPipes, error) {
 		return RawPipes{}, fmt.Errorf(
 			"TRAVERSAL_RAW_PIPES must be enabled or disabled, got %q", mode)
 	}
-	cfg := RawPipes{
-		Enabled:  true,
-		Listen:   rawPipesListen,
-		MaxPipes: env.GetEnvInt64("TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax),
-		MaxLifetime: env.GetEnvDuration(
-			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME", defaultRawPipesMaxLifetime),
-		IdleTimeout: env.GetEnvDuration(
-			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", defaultRawPipesIdleTimeout),
+	cfg := RawPipes{Enabled: true, Listen: rawPipesListen}
+	var err error
+	// A value that does not parse fails startup: a silent default would
+	// change pipe limits without anyone noticing.
+	if cfg.MaxPipes, err = env.ParseEnvInt64(
+		"TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax); err != nil {
+		return RawPipes{}, err
 	}
-	if cfg.MaxPipes <= 0 {
-		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_MAX must be positive")
+	if cfg.MaxLifetime, err = env.ParseEnvDuration(
+		"TRAVERSAL_RAW_PIPES_MAX_LIFETIME", defaultRawPipesMaxLifetime); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.IdleTimeout, err = env.ParseEnvDuration(
+		"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", defaultRawPipesIdleTimeout); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.MaxPipes <= 0 || cfg.MaxPipes > maxRawPipesMax {
+		return RawPipes{}, fmt.Errorf(
+			"TRAVERSAL_RAW_PIPES_MAX must be between 1 and %d",
+			maxRawPipesMax,
+		)
 	}
 	if cfg.MaxLifetime < 0 || cfg.IdleTimeout < 0 {
 		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_MAX_LIFETIME and " +
