@@ -35,6 +35,9 @@ func TestFileLoaderInitial(t *testing.T) {
 		{name: "invalid TOML", content: "CUSTOMER_CANARY = [", wantErr: true},
 		{name: "invalid pattern", content: strings.ReplaceAll(localRules, "'secret'", "'[CUSTOMER_CANARY'"), wantErr: true},
 		{name: "invalid host", content: localRules + "\nhosts=['.*', '[CUSTOMER_CANARY']", wantErr: true},
+		{name: "unsupported type", content: strings.ReplaceAll(localRules, `"regex"`, `"CUSTOMER_CANARY"`), wantErr: true},
+		{name: "omitted type", content: strings.ReplaceAll(localRules, "type = \"regex\"\n", ""), wantErr: true},
+		{name: "mixed valid and invalid types", content: localRules + "\n[[rules]]\nname='bad'\ntype='CUSTOMER_CANARY'\npattern='secret'", wantErr: true},
 		{name: "unknown top-level field", content: "owner='security'\n" + localRules, want: "[LOCAL]"},
 		{name: "unknown rule field", content: localRules + "\nCUSTOMER_CANARY=true", want: "[LOCAL]"},
 		{name: "unknown rule table", content: localRules + "\n[rules.metadata]\nowner='security'", want: "[LOCAL]"},
@@ -106,7 +109,15 @@ func TestFileLoaderReload(t *testing.T) {
 		t.Fatalf("unchanged rules recompiled: %v", err)
 	}
 	acceptedHash := l.lastHash
-	for _, bad := range []string{"invalid = [", strings.ReplaceAll(localRules, "'secret'", "'['"), remoteRules} {
+	for _, bad := range []string{
+		"invalid = [",
+		strings.ReplaceAll(localRules, "'secret'", "'['"),
+		remoteRules,
+		strings.ReplaceAll(localRules, `"regex"`, `"glob"`),
+		strings.ReplaceAll(localRules, "type = \"regex\"\n", ""),
+		localRules + "\n[[rules]]\nname='bad'\ntype='glob'\npattern='secret'",
+		localRules + "\n[[rules]]\nname='bad'\npattern='secret'",
+	} {
 		writeLocalRules(t, path, bad)
 		if err := l.refresh(); err == nil {
 			t.Fatal("invalid update accepted")
