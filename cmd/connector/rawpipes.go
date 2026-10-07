@@ -53,23 +53,41 @@ type rawPipes struct {
 	envoyDone     chan struct{}
 }
 
-// startRawPipes starts serving pipes and holding tunnels. It returns nil,
-// nil when this connector cannot hold tunnels yet, after saying why: raw
-// pipes never stop the legacy transport from starting.
+// startRawPipes starts serving pipes and holding tunnels. It returns nil
+// when raw pipes cannot run on this connector, after saying why: raw pipes
+// never stop the legacy transport, so no raw pipe failure reaches main.
 func startRawPipes(
 	ctx context.Context,
 	cfg *config.Config,
 	redactor *redact.Redactor,
-) (*rawPipes, error) {
+) *rawPipes {
 	tunnelCfg, err := tunnelConfig(cfg)
 	if err != nil {
 		slog.WarnContext(ctx, "raw pipes are enabled but this connector cannot hold tunnels; "+
 			"serving the legacy transport only", "reason", err.Error())
-		return nil, nil
+		return nil
 	}
+	raw, err := setUpRawPipes(ctx, cfg, tunnelCfg, redactor)
+	if err != nil {
+		// Configuration the operator must fix, not a network that blocks
+		// tunnels: an error, though the legacy transport carries on.
+		slog.ErrorContext(ctx, "raw pipes are enabled but failed to start; "+
+			"serving the legacy transport only", "err", err)
+		return nil
+	}
+	return raw
+}
+
+// setUpRawPipes builds the pipe server and tunnels and starts them.
+func setUpRawPipes(
+	ctx context.Context,
+	cfg *config.Config,
+	tunnelCfg tunnels.Config,
+	redactor *redact.Redactor,
+) (*rawPipes, error) {
 	server, err := newPipeServer(cfg, redactor)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pipe server: %w", err)
 	}
 	manager, err := tunnels.New(tunnelCfg)
 	if err != nil {

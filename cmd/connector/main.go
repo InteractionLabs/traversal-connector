@@ -208,12 +208,7 @@ func main() {
 
 	var gates []router.ReadinessGate
 	if cfg.RawPipes.Enabled {
-		raw, pipesErr := startRawPipes(ctx, &cfg, redactor)
-		if pipesErr != nil {
-			slog.Error("failed to start raw pipes", "err", pipesErr)
-			return
-		}
-		if raw != nil {
+		if raw := startRawPipes(ctx, &cfg, redactor); raw != nil {
 			gates = append(gates, raw.readiness())
 			defer raw.drain()
 		}
