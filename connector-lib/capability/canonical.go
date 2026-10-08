@@ -99,6 +99,11 @@ func SplitAuthority(authority string) (host string, port uint16, ok bool) {
 	if err != nil || p == 0 || strconv.FormatUint(p, 10) != portText {
 		return "", 0, false
 	}
+	// SplitHostPort strips brackets from any host, so [1.2.3.4]:443 and
+	// [db.internal]:5432 would split. Only IPv6 hosts are bracketed.
+	if CanonicalAuthority(host, uint16(p)) != authority {
+		return "", 0, false
+	}
 	return host, uint16(p), true
 }
 
