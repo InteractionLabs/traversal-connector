@@ -327,6 +327,10 @@ func (v *Verifier) parse(token string) (*Claims, error) {
 	if err != nil || len(sig) != 64 {
 		return nil, fail(CodeInvalidSignature, "signature is not 64-byte r||s")
 	}
+	// ecdsa.Verify accepts both s and n-s, so a holder can mint a second valid
+	// encoding of any token (high-S malleability). That is harmless here:
+	// nothing keys on the token's bytes. The open limit and audit key on jti,
+	// a signed claim the variant shares, so it opens no more pipes.
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	r, s := new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])
 	if !ecdsa.Verify(key, digest[:], r, s) {
