@@ -61,6 +61,12 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # pipe carries a Traversal-signed capability the connector checks before it
 # dials. Off by default; leaving it off, or setting it back to false, keeps
 # the connector on HTTP requests only.
+# The controllerTLS certificate may be org-scoped
+# (spiffe://traversal.com/tenant/<org-uuid>/<org-name>), as Traversal issues
+# it, and connectorID must be a lower-case UUID. The tunnel endpoint binds
+# tunnels to the certificate's org; within an org it trusts connectorID, so
+# any holder of the org's certificate can claim any connector ID in it, a
+# known limit until per-connector handshake tokens.
 rawPipes:
   enabled: false           # TRAVERSAL_RAW_PIPES
   # The Traversal environment whose capability signer this connector trusts.
@@ -110,9 +116,9 @@ rawPipes:
   # disable it only for a Traversal tunnel endpoint that does not support it
   # yet; the connector warns at startup when it is off. When required, the
   # connector is the TLS server on each tunnel, so its certificate
-  # (controllerTLS) must allow serverAuth in its extended key usage as well
-  # as clientAuth, or have no extended key usage; otherwise raw pipes stay
-  # off and say why.
+  # (controllerTLS), org-scoped or not, must allow serverAuth in its
+  # extended key usage as well as clientAuth, or have no extended key usage;
+  # otherwise raw pipes stay off and say why.
   tunnelInnerTLS: required   # TRAVERSAL_TUNNEL_INNER_TLS
 
 # Pod termination grace period, in seconds. Empty uses Kubernetes' default

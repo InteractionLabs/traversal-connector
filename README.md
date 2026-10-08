@@ -517,10 +517,21 @@ hands every pipe that arrives on them to connector-core on loopback.
   controller. A TLS-intercepting proxy breaks tunnels, and tunnels through
   `EGRESS_PROXY_URL` are not supported yet: such a connector keeps serving
   HTTP requests only and reports why.
+- **Identity.** The connector's certificate must carry exactly one URI SAN, a
+  Traversal SPIFFE ID: the org-scoped
+  `spiffe://traversal.com/tenant/<org-uuid>/<org-name>` that Traversal issues,
+  or a connector-scoped one ending `/connector/<connector-uuid>`, which must
+  name `TRAVERSAL_CONNECTOR_ID`. `TRAVERSAL_CONNECTOR_ID` must be a lower-case
+  UUID. The tunnel endpoint binds each tunnel to the certificate's org, so a
+  connector can never claim another org's tunnels. Within an org it trusts the
+  connector ID the connector presents: any holder of the org's certificate
+  can claim any connector ID in that org. This is a known limit until
+  per-connector handshake tokens. Any other certificate keeps raw pipes off,
+  with an error saying why.
 - **Certificate.** With `TRAVERSAL_TUNNEL_INNER_TLS=required`, the default,
   the connector is the TLS server inside each tunnel, so its certificate's
-  extended key usage must include `serverAuth` as well as `clientAuth` (or be
-  absent). A `clientAuth`-only certificate keeps raw pipes off, with an error
+  extended key usage, org-scoped or not, must include `serverAuth` as well as
+  `clientAuth` (or be absent). A `clientAuth`-only certificate keeps raw pipes off, with an error
   saying so; HTTP requests are unaffected.
 - **Limits.** A pipe is reset when it has been open for
   `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` or has moved no bytes either way for
