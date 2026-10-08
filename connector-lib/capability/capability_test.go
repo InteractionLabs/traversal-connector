@@ -567,6 +567,8 @@ func TestCheckShapeMatchesVerify(t *testing.T) {
 			capability.CodeWrongAudience},
 		{"lifetime too long", func(c *capability.Claims) { c.ExpiresAt = c.IssuedAt + 301 },
 			capability.CodeLifetimeTooLong},
+		{"unknown mode", func(c *capability.Claims) { c.Mode = "tls-terminate" },
+			capability.CodeUnsupportedMode},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := validClaims(testNow)
