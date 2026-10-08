@@ -29,8 +29,11 @@ var builtinForbidden = []netip.Prefix{
 	netip.MustParsePrefix("::/96"),
 	netip.MustParsePrefix("fe80::/10"),
 	netip.MustParsePrefix("ff00::/8"),
-	// AWS metadata over IPv6.
-	netip.MustParsePrefix("fd00:ec2::254/128"),
+	// AWS's IPv6 link services: the metadata service at fd00:ec2::254 and EKS
+	// Pod Identity credentials at fd00:ec2::23.
+	netip.MustParsePrefix("fd00:ec2::/32"),
+	// GCE metadata over IPv6.
+	netip.MustParsePrefix("fd20:ce::254/128"),
 }
 
 // nat64Prefixes embed an IPv4 address in their last 32 bits. 64:ff9b::/96 is
