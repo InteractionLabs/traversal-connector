@@ -337,7 +337,11 @@ func TestProxyHandshakeHonorsContext(t *testing.T) {
 	}
 }
 
-func TestEnvironmentProxy(t *testing.T) {
+// TestNilProxyIgnoresEnvironment checks that a nil Config.Proxy dials
+// directly even when HTTPS_PROXY is set: the connector's proxy variables are
+// for its own traffic, and raw pipes go through a forward proxy only when the
+// caller opts in.
+func TestNilProxyIgnoresEnvironment(t *testing.T) {
 	echo := echoServer(t)
 	h := &connectProxy{targets: map[string]string{"db.internal.:5432": echo}}
 	proxy := httptest.NewServer(h)
@@ -347,32 +351,26 @@ func TestEnvironmentProxy(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	t.Setenv("HTTPS_PROXY", proxy.URL)
-	t.Setenv("NO_PROXY", "direct.internal")
+	t.Setenv("HTTP_PROXY", proxy.URL)
 
 	f := &fakeNet{t: t,
-		addrs:  map[string][]string{"direct.internal": {"192.0.2.10"}},
+		addrs:  map[string][]string{"db.internal": {"192.0.2.10"}},
 		listen: map[string]string{"192.0.2.10:5432": echo},
 	}
 	p, err := New(Config{AllowDelegatedProxyChecks: true, LookupNetIP: f.lookup})
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.dial = f.dial
 	c, route, err := p.Dial(context.Background(), "db.internal", 5432)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Proxy == nil {
-		t.Fatalf("route = %+v, want the HTTPS_PROXY", route)
-	}
-	roundTrip(t, c, "proxied")
-
-	p.dial = f.dial
-	c, route, err = p.Dial(context.Background(), "direct.internal", 5432)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if route.Proxy != nil || route.Addr.String() != "192.0.2.10:5432" {
-		t.Fatalf("route = %+v, want a direct dial for NO_PROXY", route)
+		t.Fatalf("route = %+v, want a direct dial despite HTTPS_PROXY", route)
 	}
 	roundTrip(t, c, "direct")
+	if got := h.got(); len(got) != 0 {
+		t.Fatalf("proxy saw %d CONNECTs, want none", len(got))
+	}
 }
