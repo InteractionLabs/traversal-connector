@@ -380,8 +380,8 @@ func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
 // CheckShape returns the *Error any Verifier would reject c with on the claims
 // alone, before issuer, time, or caller checks: an empty or oversized string
 // claim, a non-canonical host, a zero port, an inverted validity window, the
-// wrong audience, or a lifetime over MaxLifetime. An issuer calls it to refuse
-// claims before signing them.
+// wrong audience, a lifetime over MaxLifetime, or a mode other than
+// ModePassthrough. An issuer calls it to refuse claims before signing them.
 func (c *Claims) CheckShape() error {
 	if err := checkShape(c); err != nil {
 		return err
@@ -389,13 +389,17 @@ func (c *Claims) CheckShape() error {
 	return checkTerms(c)
 }
 
-// checkTerms rejects claims with the wrong audience or too long a lifetime.
+// checkTerms rejects claims with the wrong audience, too long a lifetime, or
+// a mode no verifier accepts.
 func checkTerms(c *Claims) error {
 	if c.Audience != Audience {
 		return fail(CodeWrongAudience, "unexpected aud")
 	}
 	if c.ExpiresAt-c.IssuedAt > int64(MaxLifetime/time.Second) {
 		return fail(CodeLifetimeTooLong, "exp - iat exceeds the maximum lifetime")
+	}
+	if c.Mode != ModePassthrough {
+		return fail(CodeUnsupportedMode, "unknown mode")
 	}
 	return nil
 }
