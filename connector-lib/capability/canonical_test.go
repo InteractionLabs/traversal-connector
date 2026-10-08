@@ -104,6 +104,8 @@ func TestSplitAuthority(t *testing.T) {
 		{"[fe80::1%eth0]:5432", nil},
 		{"2001:db8::1:5432", nil},
 		{":5432", nil},
+		{"[1.2.3.4]:443", nil},
+		{"[db.internal]:5432", nil},
 	} {
 		host, port, ok := capability.SplitAuthority(tc.authority)
 		if tc.want == nil {
