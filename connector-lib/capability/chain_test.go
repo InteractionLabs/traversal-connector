@@ -35,7 +35,11 @@ func testRoot(t *testing.T, key *ecdsa.PrivateKey) *capabilitytest.Root {
 	return root
 }
 
-func envCert(t *testing.T, root *capabilitytest.Root, mutate func(*capabilitytest.EnvironmentCert)) []byte {
+func envCert(
+	t *testing.T,
+	root *capabilitytest.Root,
+	mutate func(*capabilitytest.EnvironmentCert),
+) []byte {
 	t.Helper()
 	spec := capabilitytest.EnvironmentCert{
 		Key:       &envKey.PublicKey,
@@ -79,7 +83,12 @@ func chainedClaims() capability.Claims {
 	return c
 }
 
-func signChained(t *testing.T, key *ecdsa.PrivateKey, claims capability.Claims, x5c ...[]byte) string {
+func signChained(
+	t *testing.T,
+	key *ecdsa.PrivateKey,
+	claims capability.Claims,
+	x5c ...[]byte,
+) string {
 	t.Helper()
 	token, err := capabilitytest.SignChained(key, "env-kid", x5c, claims)
 	if err != nil {
@@ -114,8 +123,11 @@ func TestChainedCapabilityRejections(t *testing.T) {
 			return signChained(t, envKey, chainedClaims(), envCert(t, other, nil))
 		}, capability.CodeUntrustedChain, ""},
 		{"certificate for another controller host", func(t *testing.T) string {
-			return signChained(t, envKey, chainedClaims(), envCert(t, root,
-				func(c *capabilitytest.EnvironmentCert) { c.Hosts = []string{"edge.prod.traversal.com"} }))
+			return signChained(t, envKey, chainedClaims(), envCert(
+				t,
+				root,
+				func(c *capabilitytest.EnvironmentCert) { c.Hosts = []string{"edge.prod.traversal.com"} },
+			))
 		}, capability.CodeUntrustedChain, ""},
 		{"expired certificate", func(t *testing.T) string {
 			return signChained(t, envKey, chainedClaims(), envCert(t, root,
@@ -233,7 +245,10 @@ func TestPinnedKeysAndRootsTogether(t *testing.T) {
 		t.Fatalf("chained with another issuer = %v, want wrong_issuer", err)
 	}
 	sameIssuer := envCert(t, root, func(c *capabilitytest.EnvironmentCert) {
-		c.Issuer = capability.IssuerURIPrefix + strings.TrimPrefix(testIssuer, capability.IssuerPrefix)
+		c.Issuer = capability.IssuerURIPrefix + strings.TrimPrefix(
+			testIssuer,
+			capability.IssuerPrefix,
+		)
 	})
 	claims := validClaims(testNow)
 	if _, err := v.Verify(signChained(t, envKey, claims, sameIssuer),
@@ -246,7 +261,9 @@ func TestPinnedOnlyVerifierRefusesChains(t *testing.T) {
 	root := testRoot(t, rootKey)
 	v := newVerifier(t, func() time.Time { return testNow })
 	token := signChained(t, envKey, chainedClaims(), envCert(t, root, nil))
-	if _, err := v.Verify(token, connectorExpected()); codeOf(err) != capability.CodeUntrustedChain {
+	if _, err := v.Verify(token, connectorExpected()); codeOf(
+		err,
+	) != capability.CodeUntrustedChain {
 		t.Fatalf("verify = %v, want untrusted_chain", err)
 	}
 }
