@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"strings"
 	"sync"
@@ -480,7 +481,9 @@ func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v an
 	if _, err := dec.Token(); err != nil {
 		return errors.New("invalid JSON")
 	}
-	if _, err := dec.Token(); err == nil {
+	// Only a clean end of input means nothing follows the object. A syntax
+	// error from Token is trailing data too: a stray "}", "x", or NUL.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data")
 	}
 	if len(fields) != len(want) {

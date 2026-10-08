@@ -587,6 +587,45 @@
       "loose_result": "malformed"
     },
     {
+      "name": "trailing brace",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imp0aS0xIiwiaWF0IjoxNzg5OTk5OTkwLCJleHAiOjE3OTAwMDAxMTB9fQ.TYmz59o21zb6WO4FC4Lz-cMdlO7jJuV-FWcjGwbwr-AvpC87yZfcNN2GEahwwsm3vt_1Wvegv0YKXpmUSdbT1w",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "malformed",
+      "loose_result": "malformed"
+    },
+    {
+      "name": "trailing letter",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imp0aS0xIiwiaWF0IjoxNzg5OTk5OTkwLCJleHAiOjE3OTAwMDAxMTB9eA.2h4WYubyOK0RfaJwpbaGKZBD9JnJkvGNWkd9X04YNX-4NWyhoSjLQLrqOismfFjO2itm2k7EOK3Kc3gwKfUHYQ",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "malformed",
+      "loose_result": "malformed"
+    },
+    {
+      "name": "trailing NUL",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6InRlc3Qta2V5LWN1cnJlbnQiLCJ0eXAiOiJ0cmF2ZXJzYWwtY2FwYWJpbGl0eStqd3QifQ.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imp0aS0xIiwiaWF0IjoxNzg5OTk5OTkwLCJleHAiOjE3OTAwMDAxMTB9AA.8gKfwRKB1PL5cwLg39ac0PLxP84SikYNPX-vVKC20ob8HZTnMzBM6oW5M69y3JPf25ZPxrapIS-gW-XoelBMOw",
+      "expected": {
+        "connector_id": "connector-1",
+        "organization_id": "org-1",
+        "host": "db.internal",
+        "port": 5432,
+        "mode": "passthrough"
+      },
+      "result": "malformed",
+      "loose_result": "malformed"
+    },
+    {
       "name": "alg none",
       "token": "eyJhbGciOiJub25lIiwia2lkIjoidGVzdC1rZXktY3VycmVudCIsInR5cCI6InRyYXZlcnNhbC1jYXBhYmlsaXR5K2p3dCJ9.eyJpc3MiOiJ0cmF2ZXJzYWwtcmF3LXR1bm5lbC90ZXN0IiwiYXVkIjoidHJhdmVyc2FsLXJhdy10dW5uZWwiLCJzdWIiOiJwbGF0Zm9ybS1jb25mb3JtYW5jZSIsIm9yZ2FuaXphdGlvbl9pZCI6Im9yZy0xIiwiaW50ZWdyYXRpb25faWQiOiJpbnRlZ3JhdGlvbi0xIiwiY29ubmVjdG9yX2lkIjoiY29ubmVjdG9yLTEiLCJob3N0IjoiZGIuaW50ZXJuYWwiLCJwb3J0Ijo1NDMyLCJtb2RlIjoicGFzc3Rocm91Z2giLCJjb25zdW1lcl9pZCI6InBsYXRmb3JtLWNvbmZvcm1hbmNlIiwidHJhZmZpY19jbGFzcyI6InN0YW5kYXJkIiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMSIsImp0aSI6Imp0aS0xIiwiaWF0IjoxNzg5OTk5OTkwLCJleHAiOjE3OTAwMDAxMTB9.vh2DPri4qKeSe1tdv_tW9j867pIsCcIK6cinqgkilxXKYUl7qX-NKeJBuClx0eefP_Z8FpFzHtMwDp4IJEOYJA",
       "expected": {
