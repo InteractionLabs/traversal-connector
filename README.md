@@ -604,8 +604,9 @@ on which Traversal's tunnel gateway opens pipes as HTTP/2 streams.
 | Variable | Default | Description |
 |---|---|---|
 | `TRAVERSAL_RAW_PIPES` | `disabled` | `enabled` turns raw pipes on. |
-| `TRAVERSAL_CAPABILITY_ISSUER` | **required when enabled** | The `iss` claim capabilities must carry, `traversal-raw-tunnel/<environment>`. |
-| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_KEYS_FILE` | **one required when enabled** | PEM bundle (raw or base64) of P-256 `PUBLIC KEY` blocks, each naming its kid in a `Key-ID` header. The chart renders it; see below. |
+| `TRAVERSAL_CAPABILITY_ROOTS` / `TRAVERSAL_CAPABILITY_ROOTS_FILE` | roots or keys required when enabled | PEM bundle (raw or base64) of Traversal's capability root `CERTIFICATE`s. A capability whose `x5c` certificate chains to one and names this connector's controller host is trusted. The chart renders it; see below. |
+| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_KEYS_FILE` | roots or keys required when enabled | PEM bundle (raw or base64) of P-256 `PUBLIC KEY` blocks, each naming its kid in a `Key-ID` header: pinned keys, the earlier trust model. The chart renders it; see below. |
+| `TRAVERSAL_CAPABILITY_ISSUER` | required with keys | The `iss` claim pinned-key capabilities must carry, `traversal-raw-tunnel/<environment>`. With roots alone it is unset: each environment's certificate names its issuer. |
 | `TRAVERSAL_RAW_PIPES_MAX` | `200` | Most pipes open at once, from 1 to 4096. Opens beyond it are refused with `capacity`. |
 | `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` | `4h` | Longest a pipe stays open. `0s` turns the limit off. |
 | `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT` | `15m` | Longest a pipe may move no bytes. `0s` turns the limit off. |
@@ -631,8 +632,29 @@ the `helm install` command, as it does the controller URL, so a connector for
 any Traversal environment installs with no chart release. Set, it replaces
 that environment's packaged entry in `rawPipes.trustedKeys`. A key rotation is
 then a `helm upgrade` with the next key in `rawPipes.capabilityKey.next`
-first; the chain of trust below removes that step.
+first; roots (below) remove that step.
 
+**Roots (`rawPipes.trustedRoots`).** The chart packages Traversal's
+capability root certificates, the current one and, during a root rotation,
+the next. Each environment's KMS signing key is certified by a root in a
+short-lived environment certificate, which the Integration Proxy sends in
+every capability's `x5c` header. The connector verifies that certificate
+offline against the roots (no network lookups) and requires it to:
+
+- chain to a packaged root and be within its validity;
+- be a code-signing leaf for a P-256 key;
+- name, as a DNS SAN, the host in `TRAVERSAL_CONTROLLER_URL`, which binds
+  the capability to this connector's environment;
+- name, as its one URI SAN, `spiffe://traversal.com/capability-issuer/<env>`,
+  the capability's `iss` then being `traversal-raw-tunnel/<env>`.
+
+A new Traversal environment, or a rotated environment key, needs no connector
+change: Traversal issues the environment a certificate. A root rotation ships
+the next root as `trustedRoots.next` in a chart release ahead of use. Refusals
+are `unknown_key`. With roots, `rawPipes.environment` and `trustedKeys` can
+stay empty; set both only while moving from pinned keys.
+
+**Pinned keys (`rawPipes.trustedKeys`), the earlier model.**
 Each Traversal environment signs capabilities with its own AWS KMS key. The
 Helm chart packages every environment's public keys under
 `rawPipes.trustedKeys.<environment>`, and `rawPipes.environment` selects one

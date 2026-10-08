@@ -176,14 +176,31 @@ func (r *rawPipes) drainNow() {
 	<-r.tunnelsDone
 }
 
-func newPipeServer(cfg *config.Config, redactor *redact.Redactor) (*pipes.Server, error) {
-	verifier, err := capability.NewVerifier(capability.VerifierConfig{
+// newCapabilityVerifier trusts the configured capability roots, the pinned
+// capability keys, or both.
+func newCapabilityVerifier(cfg *config.Config) (*capability.Verifier, error) {
+	verifierCfg := capability.VerifierConfig{
 		Issuer:          cfg.RawPipes.CapabilityIssuer,
 		Keys:            cfg.RawPipes.CapabilityKeys,
 		AllowedSubjects: []string{capabilitySubject},
 		// A capability claim added later must not force a customer upgrade.
 		AllowUnknownClaims: true,
-	})
+	}
+	if roots := cfg.RawPipes.CapabilityRoots; roots != nil {
+		// A chained capability must be certified for the controller this
+		// connector dials, which is what binds it to this environment.
+		controller, err := url.Parse(cfg.TraversalControllerURL)
+		if err != nil || controller.Hostname() == "" {
+			return nil, errors.New("capability roots need a TRAVERSAL_CONTROLLER_URL with a host")
+		}
+		verifierCfg.Roots = roots
+		verifierCfg.ControllerHost = strings.ToLower(controller.Hostname())
+	}
+	return capability.NewVerifier(verifierCfg)
+}
+
+func newPipeServer(cfg *config.Config, redactor *redact.Redactor) (*pipes.Server, error) {
+	verifier, err := newCapabilityVerifier(cfg)
 	if err != nil {
 		return nil, err
 	}

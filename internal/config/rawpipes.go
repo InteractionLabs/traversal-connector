@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -56,6 +57,13 @@ type RawPipes struct {
 	// or TRAVERSAL_CAPABILITY_KEYS_FILE. Each PUBLIC KEY block names its kid
 	// in a Key-ID header.
 	CapabilityKeys map[string]*ecdsa.PublicKey
+	// CapabilityRoots are the trusted capability root certificates
+	// (TRAVERSAL_CAPABILITY_ROOTS, raw or base64-encoded PEM, or
+	// TRAVERSAL_CAPABILITY_ROOTS_FILE). A capability whose x5c certificate
+	// chains to one, and names this connector's controller host, is trusted
+	// without its environment's key being configured. Either these or
+	// CapabilityKeys are required; both may be set while moving to roots.
+	CapabilityRoots []*x509.Certificate
 	// EgressProxy, if set, is the http:// or https:// forward proxy raw pipes
 	// reach their destinations through (TRAVERSAL_RAW_PIPES_EGRESS_PROXY).
 	// Nil, the default, dials every destination directly. HTTPS_PROXY and
@@ -129,17 +137,24 @@ func loadRawPipes() (RawPipes, error) {
 		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_MAX_LIFETIME and " +
 			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT must not be negative")
 	}
-	issuer := env.GetEnvOptionalString("TRAVERSAL_CAPABILITY_ISSUER")
-	if issuer == nil {
-		return RawPipes{}, errors.New(
-			"TRAVERSAL_CAPABILITY_ISSUER is required when TRAVERSAL_RAW_PIPES=enabled")
+	if cfg.CapabilityRoots, err = loadCapabilityRoots(); err != nil {
+		return RawPipes{}, err
 	}
-	cfg.CapabilityIssuer = *issuer
-	keys, err := loadCapabilityKeys()
+	keys, err := loadCapabilityKeys(cfg.CapabilityRoots != nil)
 	if err != nil {
 		return RawPipes{}, err
 	}
 	cfg.CapabilityKeys = keys
+	issuer := env.GetEnvOptionalString("TRAVERSAL_CAPABILITY_ISSUER")
+	switch {
+	case issuer != nil:
+		cfg.CapabilityIssuer = *issuer
+	case keys != nil:
+		// Pinned keys carry no issuer of their own; roots certify theirs.
+		return RawPipes{}, errors.New("TRAVERSAL_CAPABILITY_ISSUER is required with " +
+			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_KEYS_FILE")
+	default:
+	}
 	if cfg.EgressProxy, err = parseEgressProxy(
 		env.GetEnvString("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", "")); err != nil {
 		return RawPipes{}, err
@@ -200,27 +215,56 @@ func loadTunnelCount() (int, error) {
 	return env.ParseEnvInt("TRAVERSAL_TUNNEL_COUNT", perReplica)
 }
 
-func loadCapabilityKeys() (map[string]*ecdsa.PublicKey, error) {
-	inline := env.GetEnvOptionalString("TRAVERSAL_CAPABILITY_KEYS")
-	path := env.GetEnvOptionalString("TRAVERSAL_CAPABILITY_KEYS_FILE")
-	var bundle string
+// loadCapabilityKeys reads the pinned capability keys. They are optional
+// when roots are configured.
+func loadCapabilityKeys(haveRoots bool) (map[string]*ecdsa.PublicKey, error) {
+	bundle, ok, err := loadPEMSetting("TRAVERSAL_CAPABILITY_KEYS")
+	switch {
+	case err != nil:
+		return nil, err
+	case !ok && haveRoots:
+		return nil, nil
+	case !ok:
+		return nil, errors.New("TRAVERSAL_CAPABILITY_ROOTS or TRAVERSAL_CAPABILITY_KEYS " +
+			"(or their _FILE forms) is required when TRAVERSAL_RAW_PIPES=enabled")
+	}
+	return ParseCapabilityKeys(bundle)
+}
+
+// loadCapabilityRoots reads the trusted capability roots, or nil if none are
+// configured.
+func loadCapabilityRoots() ([]*x509.Certificate, error) {
+	bundle, ok, err := loadPEMSetting("TRAVERSAL_CAPABILITY_ROOTS")
+	if err != nil || !ok {
+		return nil, err
+	}
+	roots, err := capability.ParseRootsPEM(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
+	}
+	return roots, nil
+}
+
+// loadPEMSetting reads a PEM bundle from name (raw or base64-encoded) or from
+// the file name_FILE names. ok is false when neither is set.
+func loadPEMSetting(name string) ([]byte, bool, error) {
+	inline := env.GetEnvOptionalString(name)
+	path := env.GetEnvOptionalString(name + "_FILE")
 	switch {
 	case inline != nil && path != nil:
-		return nil, errors.New("TRAVERSAL_CAPABILITY_KEYS and " +
-			"TRAVERSAL_CAPABILITY_KEYS_FILE are mutually exclusive: set only one")
+		return nil, false, fmt.Errorf("%s and %s_FILE are mutually exclusive: set only one",
+			name, name)
 	case inline != nil:
-		bundle = *decodeCertificate(inline)
+		return []byte(*decodeCertificate(inline)), true, nil
 	case path != nil:
 		contents, err := os.ReadFile(*path)
 		if err != nil {
-			return nil, fmt.Errorf("read TRAVERSAL_CAPABILITY_KEYS_FILE: %w", err)
+			return nil, false, fmt.Errorf("read %s_FILE: %w", name, err)
 		}
-		bundle = string(contents)
+		return contents, true, nil
 	default:
-		return nil, errors.New("TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_KEYS_FILE " +
-			"is required when TRAVERSAL_RAW_PIPES=enabled")
+		return nil, false, nil
 	}
-	return ParseCapabilityKeys([]byte(bundle))
 }
 
 // ParseCapabilityKeys reads a PEM bundle of P-256 PUBLIC KEY blocks, each

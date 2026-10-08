@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/net/http2"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -334,3 +336,50 @@ type noServer struct{}
 func (noServer) ServeConn(net.Conn, func()) {}
 
 func discardStatus(func() *pb.RawPipesStatus) {}
+
+// With capability roots, the connector trusts a capability certified for the
+// controller host it dials, and refuses one certified for any other: that is
+// what keeps one environment's capabilities out of another's connectors.
+func TestCapabilityRootsBindTheControllerHost(t *testing.T) {
+	now := time.Now()
+	rootKey := capabilitytest.Key("connector test capability root")
+	envKey := capabilitytest.Key("connector test environment key")
+	root, err := capabilitytest.NewRoot(rootKey, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{TraversalControllerURL: "https://Edge.Dev.Traversal.com:443/connect"}
+	cfg.RawPipes.CapabilityRoots = []*x509.Certificate{root.Certificate}
+	verifier, err := newCapabilityVerifier(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := capability.Claims{
+		Issuer: capability.IssuerPrefix + "dev", Audience: capability.Audience,
+		Subject: capabilitySubject, OrganizationID: testTenant, IntegrationID: "i",
+		ConnectorID: testConnector, Host: "db.internal", Port: 5432,
+		Mode: capability.ModePassthrough, ConsumerID: "c", TrafficClass: "standard",
+		SessionID: "s", JTI: "j", IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	}
+	want := capability.Expected{
+		ConnectorID: testConnector, Host: "db.internal", Port: 5432,
+		Mode: pb.RawPipeMode_RAW_PIPE_MODE_PASSTHROUGH,
+	}
+	for host, ok := range map[string]bool{"edge.dev.traversal.com": true, "edge.prod.traversal.com": false} {
+		cert, err := root.Issue(capabilitytest.EnvironmentCert{
+			Key: &envKey.PublicKey, Issuer: capability.IssuerURIPrefix + "dev",
+			Hosts: []string{host}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims.JTI = host
+		token, err := capabilitytest.SignChained(envKey, "dev", [][]byte{cert}, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := verifier.Verify(token, want); (err == nil) != ok {
+			t.Errorf("certificate for %s: verify = %v, want accepted %v", host, err, ok)
+		}
+	}
+}
