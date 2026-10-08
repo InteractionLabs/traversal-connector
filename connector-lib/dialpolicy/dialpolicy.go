@@ -75,7 +75,7 @@ func (r *Refusal) Unwrap() error {
 	return r.err
 }
 
-// OpenFailureReason maps the refusal to the reason sent in RawOpenError.
+// OpenFailureReason maps the refusal to the reason a refused open reports.
 func (r *Refusal) OpenFailureReason() pb.RawOpenFailureReason {
 	switch r.Code {
 	case CodeInvalidDestination:

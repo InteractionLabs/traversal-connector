@@ -42,7 +42,8 @@ const (
 	Algorithm = "ES256"
 	// ModePassthrough is the mode claim for RAW_PIPE_MODE_PASSTHROUGH pipes.
 	ModePassthrough = "passthrough"
-	// MaxTokenBytes matches RawOpen.capability's limit.
+	// MaxTokenBytes is the longest capability a verifier reads, bounding the
+	// work an unauthenticated open can cause.
 	MaxTokenBytes = 4096
 	// MaxClockSkew is how far a validator's clock may differ from the signer's.
 	MaxClockSkew = 30 * time.Second
@@ -124,7 +125,7 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("capability: %s: %s", e.Code, e.detail)
 }
 
-// OpenFailureReason maps the failure to the reason sent in RawOpenError.
+// OpenFailureReason maps the failure to the reason a refused open reports.
 func (e *Error) OpenFailureReason() pb.RawOpenFailureReason {
 	switch e.Code {
 	case CodeUnknownKey:
@@ -173,8 +174,9 @@ type VerifierConfig struct {
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// AllowUnknownClaims ignores payload keys this verifier does not know.
-	// Required claims are still required. The connector sets this. The
-	// controller leaves it false so a token and a strict parser cannot disagree.
+	// Required claims are still required. The connector sets this. A verifier
+	// in Traversal, such as the Integration Proxy, leaves it false so a token
+	// and a strict parser cannot disagree.
 	AllowUnknownClaims bool
 }
 
@@ -237,7 +239,7 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 // ConsumerID, SessionID, and TrafficClass empty because the open frame does
 // not independently authenticate the caller.
 //
-// Controller and future Integration Proxy verifiers must set every claim their
+// Integration Proxy and other Traversal-side verifiers must set every claim their
 // authenticated context knows, including Subject. AllowedSubjects only says a
 // subject may open pipes somewhere. It does not stop caller A from presenting
 // a token whose subject is the also-allowlisted caller B. Optional fields on
@@ -245,8 +247,8 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 type Expected struct {
 	ConnectorID string
 	// Subject, when set, must equal the claim. Leave empty on the connector,
-	// which does not authenticate the original caller. Controller and
-	// Integration Proxy verifiers set it from the authenticated transport or
+	// which does not authenticate the original caller. Integration Proxy and
+	// other Traversal-side verifiers set it from the authenticated transport or
 	// execution context.
 	Subject string
 	// OrganizationID, when set, must equal the claim. Leave empty on the
@@ -254,8 +256,8 @@ type Expected struct {
 	OrganizationID string
 	// IntegrationID, ConsumerID, SessionID, and TrafficClass, when set, must
 	// equal the matching claim. Leave them empty on the connector: the open
-	// frame does not independently authenticate the caller. Controller and
-	// Integration Proxy verifiers must set each one they know.
+	// frame does not independently authenticate the caller. Integration Proxy
+	// and other Traversal-side verifiers must set each one they know.
 	IntegrationID string
 	ConsumerID    string
 	SessionID     string
