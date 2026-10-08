@@ -152,4 +152,40 @@ func TestLoadRawPipes(t *testing.T) {
 			t.Fatal("accepted a pipe count over the cap")
 		}
 	})
+	t.Run("dials directly unless an egress proxy is named", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		// The connector's own proxy variables never route raw pipes.
+		t.Setenv("HTTPS_PROXY", "http://corporate.proxy:3128")
+		t.Setenv("EGRESS_PROXY_URL", "http://corporate.proxy:3128")
+		cfg, err := loadRawPipes()
+		if err != nil || cfg.EgressProxy != nil {
+			t.Fatalf("got proxy %v, %v; want a direct dial", cfg.EgressProxy, err)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", "")
+		if cfg, err = loadRawPipes(); err != nil || cfg.EgressProxy != nil {
+			t.Fatalf("empty value: got proxy %v, %v; want a direct dial", cfg.EgressProxy, err)
+		}
+		const proxy = "https://user:pw@pipes.proxy:8443" //nolint:gosec // G101: test fixture, intentional userinfo
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", proxy)
+		if cfg, err = loadRawPipes(); err != nil || cfg.EgressProxy == nil ||
+			cfg.EgressProxy.String() != proxy {
+			t.Fatalf("got proxy %v, %v", cfg.EgressProxy, err)
+		}
+		for _, bad := range []string{
+			"pipes.proxy:3128", "socks5://pipes.proxy:1080", "http://", "http://pipes.proxy:3128/path",
+			"http://pipes.proxy:99999", "http://pipes.proxy:3128?x=1", "://bad",
+		} {
+			t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", bad)
+			_, err := loadRawPipes()
+			if err == nil || !strings.Contains(err.Error(), "TRAVERSAL_RAW_PIPES_EGRESS_PROXY") {
+				t.Errorf("%q: %v, want an error naming the variable", bad, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "pw") {
+				t.Errorf("%q: error quotes credentials: %v", bad, err)
+			}
+		}
+	})
 }

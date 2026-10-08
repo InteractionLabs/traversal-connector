@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/url"
 	"os"
 	"slices"
 	"time"
@@ -45,11 +46,17 @@ func startRawPipes(
 	if err != nil {
 		return nil, nil, err
 	}
-	policy, err := dialpolicy.New(dialpolicy.Config{
+	policyCfg := dialpolicy.Config{
 		RequiresInspection: func(host string, _ uint16) bool {
 			return redactor.RequiresInspection(host)
 		},
-	})
+	}
+	// Raw pipes dial directly unless TRAVERSAL_RAW_PIPES_EGRESS_PROXY names a
+	// proxy. Hostnames through it are still refused as delegated.
+	if proxy := cfg.EgressProxy; proxy != nil {
+		policyCfg.Proxy = func(string, uint16) (*url.URL, error) { return proxy, nil }
+	}
+	policy, err := dialpolicy.New(policyCfg)
 	if err != nil {
 		return nil, nil, err
 	}

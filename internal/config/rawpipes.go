@@ -5,7 +5,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +60,11 @@ type RawPipes struct {
 	// or TRAVERSAL_CAPABILITY_KEYS_FILE. Each PUBLIC KEY block names its kid
 	// in a Key-ID header.
 	CapabilityKeys map[string]*ecdsa.PublicKey
+	// EgressProxy, if set, is the http:// or https:// forward proxy raw pipes
+	// reach their destinations through (TRAVERSAL_RAW_PIPES_EGRESS_PROXY).
+	// Nil, the default, dials every destination directly. HTTPS_PROXY and
+	// EGRESS_PROXY_URL never apply: they route the connector's own traffic.
+	EgressProxy *url.URL
 }
 
 func loadRawPipes() (RawPipes, error) {
@@ -106,7 +113,33 @@ func loadRawPipes() (RawPipes, error) {
 		return RawPipes{}, err
 	}
 	cfg.CapabilityKeys = keys
+	if cfg.EgressProxy, err = parseEgressProxy(
+		env.GetEnvString("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", "")); err != nil {
+		return RawPipes{}, err
+	}
 	return cfg, nil
+}
+
+// parseEgressProxy parses TRAVERSAL_RAW_PIPES_EGRESS_PROXY. Empty means no
+// proxy. Errors never quote the value, which can carry proxy credentials.
+func parseEgressProxy(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	invalid := errors.New("TRAVERSAL_RAW_PIPES_EGRESS_PROXY must be an http:// or " +
+		"https:// URL with a host, an optional port, and no path or query")
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" ||
+		u.Opaque != "" {
+		return nil, invalid
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > maxTCPPort {
+			return nil, invalid
+		}
+	}
+	return u, nil
 }
 
 func loadCapabilityKeys() (map[string]*ecdsa.PublicKey, error) {
