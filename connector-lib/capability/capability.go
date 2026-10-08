@@ -51,8 +51,9 @@ const (
 	// capability (by jti). It is a local authorized-attempt limit on that
 	// Verifier, not a global count of pipes successfully opened and not
 	// complete replay protection. A hard distributed limit belongs in shared
-	// admission or issuer state.
-	MaxOpensPerToken = 64
+	// admission or issuer state. The issuer mints one jti per CONNECT, so
+	// four covers retries without widening what a leaked token can replay.
+	MaxOpensPerToken = 4
 	// maxClaimBytes bounds every string claim except host.
 	maxClaimBytes = 256
 )

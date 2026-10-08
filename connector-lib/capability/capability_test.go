@@ -166,6 +166,11 @@ func TestVerifyAllowsThirtySecondsOfSkew(t *testing.T) {
 }
 
 func TestOpenLimitPerCapability(t *testing.T) {
+	// The issuer mints one jti per CONNECT, so a capability needs only a few
+	// opens for retries. More only widens what a leaked token can replay.
+	if capability.MaxOpensPerToken != 4 {
+		t.Fatalf("MaxOpensPerToken = %d, want 4", capability.MaxOpensPerToken)
+	}
 	now := testNow
 	v := newVerifier(t, func() time.Time { return now })
 	token := sign(t, validClaims(testNow))
