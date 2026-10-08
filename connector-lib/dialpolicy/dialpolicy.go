@@ -8,13 +8,14 @@
 // the dialed address: callers keep it for audit, and a proxied dial sends the
 // absolute name to the proxy.
 //
-// A proxied dial sends CONNECT host:port to the customer's forward proxy, which
-// resolves the host and connects on its own. The connector then enforces only a
-// floor: an IP-literal destination is checked like a direct one, and names that
-// always reach the local host or cloud metadata are refused. Which addresses a
-// hostname reaches through the proxy is delegated to the proxy's own policy, so
-// proxied hostnames are refused unless Config.AllowDelegatedProxyChecks records
-// that the operator accepted this.
+// A proxied dial, made only when Config.Proxy names a proxy, sends CONNECT
+// host:port to the customer's forward proxy, which resolves the host and
+// connects on its own. The connector then enforces only a floor: an IP-literal
+// destination is checked like a direct one, and names that always reach the
+// local host or cloud metadata are refused. Which addresses a hostname reaches
+// through the proxy is delegated to the proxy's own policy, so proxied
+// hostnames are refused unless Config.AllowDelegatedProxyChecks records that
+// the operator accepted this.
 package dialpolicy
 
 import (
@@ -26,8 +27,6 @@ import (
 	"net/netip"
 	"net/url"
 	"time"
-
-	"golang.org/x/net/http/httpproxy"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -107,8 +106,9 @@ type Config struct {
 	// means none do.
 	RequiresInspection func(host string, port uint16) bool
 	// Proxy returns the forward proxy for a destination, or nil to dial it
-	// directly. Nil uses HTTPS_PROXY and NO_PROXY (or their lowercase forms),
-	// because CONNECT is how a forward proxy carries TLS.
+	// directly. Nil dials every destination directly. The proxy environment
+	// variables are never read: they configure the host's own traffic, and a
+	// pipe goes through a forward proxy only when the caller opts in.
 	Proxy func(host string, port uint16) (*url.URL, error)
 	// AllowDelegatedProxyChecks permits proxied dials to hostnames. Set it
 	// only where the customer's proxy refuses loopback, link-local, and
@@ -151,8 +151,7 @@ type Policy struct {
 	proxyTLS       *tls.Config
 }
 
-// New returns a Policy for cfg. It snapshots the host's interface addresses
-// and, when cfg.Proxy is nil, the proxy environment variables.
+// New returns a Policy for cfg. It snapshots the host's interface addresses.
 func New(cfg Config) (*Policy, error) {
 	self, err := interfacePrefixes()
 	if err != nil {
@@ -175,9 +174,6 @@ func New(cfg Config) (*Policy, error) {
 		dial:           cfg.DialContext,
 		proxyTLS:       cfg.ProxyTLS,
 	}
-	if p.proxy == nil {
-		p.proxy = environmentProxy()
-	}
 	if p.lookup == nil {
 		p.lookup = net.DefaultResolver.LookupNetIP
 	}
@@ -185,13 +181,6 @@ func New(cfg Config) (*Policy, error) {
 		p.dial = (&net.Dialer{KeepAlive: KeepAlive}).DialContext
 	}
 	return p, nil
-}
-
-func environmentProxy() func(string, uint16) (*url.URL, error) {
-	proxyFor := httpproxy.FromEnvironment().ProxyFunc()
-	return func(host string, port uint16) (*url.URL, error) {
-		return proxyFor(&url.URL{Scheme: "https", Host: capability.CanonicalAuthority(host, port)})
-	}
 }
 
 // Dial connects to host:port, where host is canonical as
@@ -213,10 +202,12 @@ func (p *Policy) Dial(ctx context.Context, host string, port uint16) (Conn, Rout
 	if p.inspect != nil && p.inspect(host, port) {
 		return nil, Route{}, refuse(CodeInspectionRequired, nil)
 	}
-	proxy, err := p.proxy(host, port)
-	if err != nil {
-		// The error can quote the proxy URL, credentials included.
-		return nil, Route{}, refuse(CodeDialFailed, errors.New("invalid forward proxy"))
+	var proxy *url.URL
+	if p.proxy != nil {
+		if proxy, err = p.proxy(host, port); err != nil {
+			// The error can quote the proxy URL, credentials included.
+			return nil, Route{}, refuse(CodeDialFailed, errors.New("invalid forward proxy"))
+		}
 	}
 	if proxy != nil {
 		if !isLiteral && !p.allowDelegated {
