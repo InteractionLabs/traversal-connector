@@ -237,6 +237,12 @@ var tokenCases = []tokenCase{
 	}), capability.CodeMalformed},
 	{"trailing data", rawPayload(func(p string) string { return p + "{}" }),
 		capability.CodeMalformed},
+	{"trailing brace", rawPayload(func(p string) string { return p + "}" }),
+		capability.CodeMalformed},
+	{"trailing letter", rawPayload(func(p string) string { return p + "x" }),
+		capability.CodeMalformed},
+	{"trailing NUL", rawPayload(func(p string) string { return p + "\x00" }),
+		capability.CodeMalformed},
 	{"alg none", rawHeader(`{"alg":"none","kid":"` + currentKID + `","typ":"` +
 		capability.TokenType + `"}`), capability.CodeMalformed},
 	{"wrong typ", rawHeader(`{"alg":"ES256","kid":"` + currentKID + `","typ":"JWT"}`),
