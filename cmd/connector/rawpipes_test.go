@@ -30,16 +30,16 @@ const (
 	testTenant    = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 )
 
-// connectorCertificate is a self-signed connector certificate and its key,
-// PEM, with the given extended key usage.
+// connectorCertificate is a self-signed org-scoped connector certificate,
+// the shape production issues, and its key, PEM, with the given extended
+// key usage.
 func connectorCertificate(t *testing.T, eku []x509.ExtKeyUsage) (cert, key string) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	san, _ := url.Parse(
-		"spiffe://traversal.com/tenant/" + testTenant + "/acme/connector/" + testConnector)
+	san, _ := url.Parse("spiffe://traversal.com/tenant/" + testTenant + "/acme")
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "connector"},

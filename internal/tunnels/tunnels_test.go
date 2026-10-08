@@ -66,25 +66,96 @@ func certWith(t *testing.T, eku []x509.ExtKeyUsage, uris ...string) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-func TestIdentityFromCertificate(t *testing.T) {
-	scoped := "spiffe://traversal.com/tenant/" + testTenant + "/acme/connector/" + testConnector
-	id, err := IdentityFromCertificate(certWithURIs(t, scoped), testConnector)
-	if err != nil || id != (Identity{ConnectorID: testConnector, TenantID: testTenant}) {
-		t.Fatalf("got %+v, %v", id, err)
-	}
+const (
+	orgSAN       = "spiffe://traversal.com/tenant/" + testTenant + "/acme"
+	connectorSAN = orgSAN + "/connector/" + testConnector
+)
 
-	tenantOnly := "spiffe://traversal.com/tenant/" + testTenant + "/acme"
-	if _, err := IdentityFromCertificate(certWithURIs(t, tenantOnly), testConnector); !errors.Is(
-		err, ErrNoConnectorIdentity) {
-		t.Fatalf("tenant-only certificate: %v", err)
+// An org-scoped certificate, the production shape, binds the tenant from
+// its SAN and takes the connector ID from TRAVERSAL_CONNECTOR_ID. A
+// connector-scoped certificate binds the same identity, and must name it.
+func TestIdentityFromCertificate(t *testing.T) {
+	want := Identity{ConnectorID: testConnector, TenantID: testTenant}
+	for name, san := range map[string]string{"org-scoped": orgSAN, "connector-scoped": connectorSAN} {
+		t.Run(name, func(t *testing.T) {
+			id, err := IdentityFromCertificate(certWithURIs(t, san), testConnector)
+			if err != nil || id != want {
+				t.Fatalf("got %+v, %v; want %+v", id, err, want)
+			}
+		})
 	}
-	other := "spiffe://traversal.com/tenant/" + testTenant +
-		"/acme/connector/99999999-2222-4333-8444-555555555555"
-	if _, err := IdentityFromCertificate(certWithURIs(t, other), testConnector); err == nil {
-		t.Fatal("accepted a certificate for another connector")
+	// Another connector of the same org shares the org-scoped certificate:
+	// the known within-org limit.
+	sibling := "99999999-2222-4333-8444-555555555555"
+	id, err := IdentityFromCertificate(certWithURIs(t, orgSAN), sibling)
+	if err != nil || id != (Identity{ConnectorID: sibling, TenantID: testTenant}) {
+		t.Fatalf("sibling connector: %+v, %v", id, err)
+	}
+}
+
+func TestIdentityRefusesCertificatesThatCannotHoldTunnels(t *testing.T) {
+	for name, san := range map[string]string{
+		"another connector":   orgSAN + "/connector/99999999-2222-4333-8444-555555555555",
+		"processor":           orgSAN + "/processor/" + testConnector,
+		"non-Traversal":       "spiffe://example.com/tenant/" + testTenant + "/acme",
+		"not SPIFFE":          "https://traversal.com/tenant/" + testTenant + "/acme",
+		"no org name":         "spiffe://traversal.com/tenant/" + testTenant,
+		"malformed org UUID":  "spiffe://traversal.com/tenant/not-a-uuid/acme",
+		"upper-case org UUID": "spiffe://traversal.com/tenant/" + strings.ToUpper(testTenant) + "/acme",
+		"unknown workload":    orgSAN + "/agent/" + testConnector,
+		"malformed connector": orgSAN + "/connector/not-a-uuid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if id, err := IdentityFromCertificate(certWithURIs(t, san), testConnector); err == nil {
+				t.Fatalf("accepted %s as %+v", san, id)
+			}
+		})
 	}
 	if _, err := IdentityFromCertificate([]byte("not pem"), testConnector); err == nil {
 		t.Fatal("accepted garbage")
+	}
+}
+
+// T-Envoy routes by the connector ID as a lower-case canonical UUID, so
+// any other form is refused before the certificate is read.
+func TestIdentityRequiresACanonicalConnectorID(t *testing.T) {
+	for _, id := range []string{
+		"", "connector-1", strings.ToUpper(testTenant),
+		"{" + testConnector + "}", strings.ReplaceAll(testConnector, "-", ""),
+	} {
+		t.Run(id, func(t *testing.T) {
+			for _, san := range []string{orgSAN, orgSAN + "/connector/" + id} {
+				if got, err := IdentityFromCertificate(certWithURIs(t, san), id); err == nil {
+					t.Fatalf("accepted connector ID %q with %s as %+v", id, san, got)
+				}
+			}
+		})
+	}
+}
+
+// An org-scoped certificate, as production issues, carries through to
+// Envoy: the tunnel claims the certificate's org and the configured
+// connector, and New accepts it for the data leg's inner TLS.
+func TestOrgScopedCertificateBootstrap(t *testing.T) {
+	const org = "cccccccc-dddd-4eee-8fff-000000000000"
+	cert := certWith(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		"spiffe://traversal.com/tenant/"+org+"/acme")
+	id, err := IdentityFromCertificate(cert, testConnector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestManager(t, func(c *Config) { c.Identity, c.CertPEM = id, cert })
+	b := bootstrapOf(t, m)
+	socket := staticResource(t, b, "listeners", tunnelListener)["address"].(map[string]any)
+	addr := socket["socket_address"].(map[string]any)["address"]
+	if want := "rc://" + testConnector + ":" + org + ":" + org + "@tunnels:1"; addr != want {
+		t.Fatalf("listener address %v, want %v", addr, want)
+	}
+	if node := b["node"].(map[string]any); node["id"] != testConnector || node["cluster"] != org {
+		t.Fatalf("node %v", node)
+	}
+	if _, ok := tunnelChain(t, b)["transport_socket"]; !ok {
+		t.Fatal("no inner TLS with an org-scoped certificate")
 	}
 }
 
@@ -92,12 +163,13 @@ func TestIdentityFromCertificate(t *testing.T) {
 // than one could pass here and be refused there, so it is refused here,
 // whichever order the SANs are in.
 func TestIdentityRequiresExactlyOneURISAN(t *testing.T) {
-	scoped := "spiffe://traversal.com/tenant/" + testTenant + "/acme/connector/" + testConnector
 	other := "spiffe://example.com/workload"
 	for name, uris := range map[string][]string{
-		"scoped first":  {scoped, other},
-		"scoped second": {other, scoped},
-		"scoped twice":  {scoped, scoped},
+		"scoped first":      {connectorSAN, other},
+		"scoped second":     {other, connectorSAN},
+		"scoped twice":      {connectorSAN, connectorSAN},
+		"org and connector": {orgSAN, connectorSAN},
+		"two orgs":          {orgSAN, "spiffe://traversal.com/tenant/" + testConnector + "/other"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if id, err := IdentityFromCertificate(certWithURIs(t, uris...), testConnector); err == nil {
@@ -106,7 +178,7 @@ func TestIdentityRequiresExactlyOneURISAN(t *testing.T) {
 		})
 	}
 	if _, err := IdentityFromCertificate(certWithURIs(t), testConnector); !errors.Is(
-		err, ErrNoConnectorIdentity) {
+		err, ErrNoTenantIdentity) {
 		t.Fatalf("no URI SAN: %v", err)
 	}
 }
