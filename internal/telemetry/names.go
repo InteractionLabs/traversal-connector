@@ -26,3 +26,18 @@ const (
 	MetricResponseRefusalsTotal            = "connector.response_refusals_total"
 	MetricDecodedResponseBodySize          = "connector.decoded_response_body_size"
 )
+
+// Raw pipe metric names. They follow traversal-connector#77's raw tunnel
+// names where the meaning is the same.
+const (
+	MetricRawPipesActive                  = "connector.raw_pipes_active"
+	MetricRawOpensTotal                   = "connector.raw_opens_total"
+	MetricRawPipeClosesTotal              = "connector.raw_pipe_closes_total"
+	MetricRawPipeBytes                    = "connector.raw_pipe_bytes"
+	MetricRawPipeDuration                 = "connector.raw_pipe_duration"
+	MetricRawResetsTotal                  = "connector.raw_resets_total"
+	MetricRawDrainsTotal                  = "connector.raw_drains_total"
+	MetricRawCapabilityVerificationsTotal = "connector.raw_capability_verifications_total"
+	MetricRawCapabilityRejectionsTotal    = "connector.raw_capability_rejections_total"
+	MetricRawKeyLoadsTotal                = "connector.raw_key_loads_total"
+)

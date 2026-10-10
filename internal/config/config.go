@@ -163,6 +163,8 @@ type Config struct {
 	RedactionRulesFile *string
 	// RedactionReloadInterval controls local-file polling. Defaults to 10s.
 	RedactionReloadInterval time.Duration
+	// RawPipes configures raw pipes over Envoy reverse tunnels.
+	RawPipes RawPipes
 }
 
 // Load reads configuration from environment variables and returns a Config
@@ -235,6 +237,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	rawPipes, err := loadRawPipes()
+	if err != nil {
+		return Config{}, err
+	}
 
 	configEnabled := false
 	if raw := os.Getenv("TRAVERSAL_CONFIG_ENABLED"); raw != "" {
@@ -301,6 +307,7 @@ func Load() (Config, error) {
 		),
 		RedactionRulesFile:      env.GetEnvOptionalString("REDACTION_RULES_FILE"),
 		RedactionReloadInterval: defaultRedactionReloadInterval,
+		RawPipes:                rawPipes,
 	}
 
 	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {

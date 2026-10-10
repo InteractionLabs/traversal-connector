@@ -247,6 +247,40 @@ func TestHasRulesForHost(t *testing.T) {
 	}
 }
 
+func TestRequiresInspection(t *testing.T) {
+	scoped := []Rule{{Name: "token", Type: "regex", Pattern: "a", Hosts: []string{`.*github\.com`}}}
+	tests := []struct {
+		name  string
+		rules []Rule
+		host  string
+		want  bool
+	}{
+		{name: "no rules: names pass", host: "db.internal"},
+		{name: "no rules: IP literals pass", host: "10.0.0.5"},
+		{name: "scoped rule refuses its host", rules: scoped, host: "api.github.com", want: true},
+		{name: "scoped rule passes other hosts", rules: scoped, host: "db.internal"},
+		{name: "scoped rule refuses IPv4 literals", rules: scoped, host: "10.0.0.5", want: true},
+		{name: "scoped rule refuses IPv6 literals", rules: scoped, host: "fd00::5", want: true},
+		{
+			name:  "unscoped rule refuses everything",
+			rules: []Rule{{Name: "email", Type: "regex", Pattern: "a"}},
+			host:  "db.internal",
+			want:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRedactor()
+			if err := r.Update(&RulesFile{Version: "v1", Rules: tt.rules}); err != nil {
+				t.Fatalf("Update() error: %v", err)
+			}
+			if got := r.RequiresInspection(tt.host); got != tt.want {
+				t.Errorf("RequiresInspection(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestHostMatchingFollowsDNSSpelling checks every entry point that takes a host
 // against the same cases. The gate and per-rule matching have to reach the same
 // verdict for a given spelling: if the gate said no while a rule said yes, the
