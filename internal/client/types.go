@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -55,6 +56,9 @@ type ConnectionManager struct {
 	metrics     *connectionMetrics
 	hostname    string
 	tunnelFunc  func(ctx context.Context) error
+	// rawPipes reports raw pipe status in metadata responses. Nil until
+	// SetRawPipesStatus; it is read on every metadata request.
+	rawPipes atomic.Pointer[func() *pb.RawPipesStatus]
 
 	backoffMu sync.Mutex
 	backoff   time.Duration
@@ -94,4 +98,16 @@ func NewConnectionManager(cfg *config.Config, r *redact.Redactor) (*ConnectionMa
 	}
 	cm.tunnelFunc = cm.RunTunnel
 	return cm, nil
+}
+
+// SetRawPipesStatus makes metadata responses report raw pipe status from f.
+func (cm *ConnectionManager) SetRawPipesStatus(f func() *pb.RawPipesStatus) {
+	cm.rawPipes.Store(&f)
+}
+
+func (cm *ConnectionManager) rawPipesStatus() *pb.RawPipesStatus {
+	if f := cm.rawPipes.Load(); f != nil {
+		return (*f)()
+	}
+	return nil
 }

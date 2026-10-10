@@ -14,7 +14,10 @@ RUN go mod download
 COPY . .
 
 # Build statically linked binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/connector
+ARG VERSION=""
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-X github.com/InteractionLabs/traversal-connector/internal/buildinfo.version=${VERSION}" \
+    -o server ./cmd/connector
 
 # --- Development stage (with hot reload) ---
 FROM ${GO_IMAGE} AS dev
@@ -46,4 +49,4 @@ ENV ENV_LEVEL=production
 
 EXPOSE 8080
 
-CMD ["./server"]
+ENTRYPOINT ["/app/server"]

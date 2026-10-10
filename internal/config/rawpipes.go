@@ -61,6 +61,13 @@ type RawPipes struct {
 	// Nil, the default, dials every destination directly. HTTPS_PROXY and
 	// EGRESS_PROXY_URL never apply: they route the connector's own traffic.
 	EgressProxy *url.URL
+	// EgressProxyResolves lets raw pipes send hostnames to EgressProxy
+	// (TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES=true). Which addresses a
+	// hostname reaches is then the proxy's policy, not the connector's, so it
+	// is off by default and only IP literals go through the proxy. Set it
+	// only where the proxy refuses loopback, link-local and metadata
+	// addresses itself.
+	EgressProxyResolves bool
 	// TunnelCount is W, the tunnels this connector holds to Traversal's tunnel
 	// gateway (TRAVERSAL_TUNNEL_COUNT; the older TRAVERSAL_TUNNELS_PER_REPLICA
 	// is still read when it is unset).
@@ -137,6 +144,14 @@ func loadRawPipes() (RawPipes, error) {
 		env.GetEnvString("TRAVERSAL_RAW_PIPES_EGRESS_PROXY", "")); err != nil {
 		return RawPipes{}, err
 	}
+	if cfg.EgressProxyResolves, err = parseEnvBool(
+		"TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.EgressProxyResolves && cfg.EgressProxy == nil {
+		return RawPipes{}, errors.New("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES needs " +
+			"TRAVERSAL_RAW_PIPES_EGRESS_PROXY")
+	}
 	return cfg, nil
 }
 
@@ -160,6 +175,19 @@ func parseEgressProxy(raw string) (*url.URL, error) {
 		}
 	}
 	return u, nil
+}
+
+// parseEnvBool reads a true/false setting, false when unset. Anything else
+// is an error naming key, not a silent default.
+func parseEnvBool(key string) (bool, error) {
+	switch v := os.Getenv(key); v {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false, got %q", key, v)
+	}
 }
 
 // loadTunnelCount reads TRAVERSAL_TUNNEL_COUNT, falling back to the older

@@ -79,6 +79,24 @@ message MetadataResponse {
   string hostname = 2;
   // Maximum concurrent requests the connector can handle per tunnel.
   int32 max_concurrent_requests = 3;
+  // The connector's release version, such as "v0.9.0". Traversal uses it to
+  // tell a connector too old for raw pipes (CONNECTOR_UPGRADE_REQUIRED) from
+  // one whose tunnels are briefly down (NO_RAW_TUNNEL).
+  string connector_version = 4;
+  // Raw pipe status when this tunnel connected, for diagnostics. Unset on
+  // connectors that predate raw pipes.
+  RawPipesStatus raw_pipes = 5;
+}
+
+// RawPipesStatus describes a connector's raw pipe side.
+message RawPipesStatus {
+  // Raw pipes are turned on (TRAVERSAL_RAW_PIPES=enabled).
+  bool enabled = 1;
+  // The connector holds a tunnel to every Traversal tunnel endpoint replica
+  // it was told about.
+  bool tunnels_up = 2;
+  // Why raw pipes are unavailable, if they are. Fixed text, never secrets.
+  string detail = 3;
 }
 
 // Connection management request

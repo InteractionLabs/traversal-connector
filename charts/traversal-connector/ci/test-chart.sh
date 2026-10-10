@@ -174,6 +174,114 @@ assert_render_fails both-sources 'mutually exclusive' \
   "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
+# Raw pipes: the chart renders the selected environment's capability keys as
+# one Key-ID-headed PEM bundle and refuses a key set that would break a rollout.
+current_pem=$'-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEo3xiyBylNeUhamEsm1ZUta1LQKYx\nTzRrOrE3xfzEK8/BS+jCv0KlrvDtXa5PDV0bllsTfYXTAZbbRoc16rPH+g==\n-----END PUBLIC KEY-----\n'
+next_pem=$'-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETB2QE7tjDOklDuqNznqfM5eW+1Md\nFlXc+/8Eo9vbPH8QLN6iVUjjPVe/yUUSXLTShFU1Y0c2emRLMS/2Ufqh5A==\n-----END PUBLIC KEY-----\n'
+raw_enabled=(
+  --set rawPipes.enabled=true
+  --set-string rawPipes.environment=ci
+  --set-string rawPipes.trustedKeys.ci.current.kid=current-kid
+  --set-string rawPipes.trustedKeys.ci.current.publicKeyPEM="$current_pem"
+)
+capability_keys() {
+  awk '/name: TRAVERSAL_CAPABILITY_KEYS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
+}
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_RAW_PIPES'
+
+render raw-current "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}"
+assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_TUNNEL_INNER_TLS'
+assert_contains "$tmp_dir/raw-current.yaml" $'            - name: TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"'
+capability_keys "$tmp_dir/raw-current.yaml" > "$tmp_dir/raw-current.pem"
+assert_contains "$tmp_dir/raw-current.pem" $'-----BEGIN PUBLIC KEY-----\nKey-ID: current-kid\n\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEo3xiyBylNeUhamEsm1ZUta1LQKYx'
+[[ $(grep -c 'BEGIN PUBLIC KEY' "$tmp_dir/raw-current.pem") == 1 ]] || fail "expected only the current key"
+
+render raw-rollout "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.next.kid=next-kid \
+  --set-string rawPipes.trustedKeys.ci.next.publicKeyPEM="$next_pem" \
+  --set-string rawPipes.capabilityIssuer=custom-issuer
+assert_contains "$tmp_dir/raw-rollout.yaml" $'            - name: TRAVERSAL_CAPABILITY_ISSUER\n              value: "custom-issuer"'
+capability_keys "$tmp_dir/raw-rollout.yaml" > "$tmp_dir/raw-rollout.pem"
+assert_contains "$tmp_dir/raw-rollout.pem" $'-----END PUBLIC KEY-----\n-----BEGIN PUBLIC KEY-----\nKey-ID: next-kid\n\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETB2QE7tjDOklDuqNznqfM5eW+1Md'
+
+render raw-tunnels "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelCount=4 \
+  --set-string rawPipes.tunnelsConnectTo=edge-istio.istio-ingress.svc.cluster.local:443 \
+  --set-string rawPipes.maxLifetime=1h \
+  --set-string rawPipes.idleTimeout=0s
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNNEL_COUNT\n              value: "4"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNNELS_CONNECT_TO\n              value: "edge-istio.istio-ingress.svc.cluster.local:443"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME\n              value: "1h"'
+assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT\n              value: "0s"'
+assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_MAX_LIFETIME'
+render raw-egress "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.egressProxy=http://pipes-proxy.acme.svc:3128 \
+  --set rawPipes.egressProxyResolves=true
+assert_contains "$tmp_dir/raw-egress.yaml" $'            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY\n              value: "http://pipes-proxy.acme.svc:3128"'
+assert_contains "$tmp_dir/raw-egress.yaml" $'            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"'
+assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_EGRESS_PROXY'
+assert_render_fails raw-resolves-no-proxy 'rawPipes.egressProxyResolves needs rawPipes.egressProxy' "${common[@]}" "${raw_enabled[@]}" \
+  --set rawPipes.egressProxyResolves=true
+# Settings for the removed inner TLS fail rather than being ignored.
+for old in tunnelInnerTLS tunnelRoots tunnelStreamWindow tunnelConnectionWindow; do
+  assert_render_fails "raw-removed-$(printf %s "$old" | tr "[:upper:]" "[:lower:]")" "rawPipes.$old is no longer supported" "${common[@]}" "${raw_enabled[@]}" \
+    --set-string "rawPipes.$old=x"
+done
+assert_render_fails raw-per-replica 'rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.tunnelsPerReplica=2
+
+# The install command's key: any environment, no packaged keys needed.
+render raw-given-key "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.environment=byoc-acme \
+  --set-string rawPipes.capabilityKey.kid=acme-kid \
+  --set-string rawPipes.capabilityKey.publicKeyPEM="$current_pem"
+assert_contains "$tmp_dir/raw-given-key.yaml" $'            - name: TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/byoc-acme"'
+capability_keys "$tmp_dir/raw-given-key.yaml" > "$tmp_dir/raw-given-key.pem"
+assert_contains "$tmp_dir/raw-given-key.pem" $'-----BEGIN PUBLIC KEY-----\nKey-ID: acme-kid'
+# It replaces the packaged entry rather than adding to it.
+render raw-given-key-over-packaged "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.capabilityKey.kid=given-kid \
+  --set-string rawPipes.capabilityKey.publicKeyPEM="$next_pem"
+capability_keys "$tmp_dir/raw-given-key-over-packaged.yaml" > "$tmp_dir/raw-given-key-over-packaged.pem"
+assert_contains "$tmp_dir/raw-given-key-over-packaged.pem" 'Key-ID: given-kid'
+[[ $(grep -c 'BEGIN PUBLIC KEY' "$tmp_dir/raw-given-key-over-packaged.pem") == 1 ]] || fail "the given key must replace the packaged ones"
+assert_render_fails raw-given-key-half 'rawPipes.capabilityKey.current needs a kid and publicKeyPEM' "${common[@]}" \
+  --set rawPipes.enabled=true --set-string rawPipes.environment=byoc-acme \
+  --set-string rawPipes.capabilityKey.kid=acme-kid
+assert_render_fails raw-given-key-arn 'rawPipes.capabilityKey.current.kid must be the bare KMS key ID' "${common[@]}" \
+  --set rawPipes.enabled=true --set-string rawPipes.environment=byoc-acme \
+  --set-string rawPipes.capabilityKey.kid=arn:aws:kms:us-west-2:111122223333:key/k1 \
+  --set-string rawPipes.capabilityKey.publicKeyPEM="$current_pem"
+
+# The install command sends PEMs base64-encoded: one shell argument each.
+current_pem_b64=$(printf '%s' "$current_pem" | base64 | tr -d '\n')
+render raw-given-key-b64 "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.environment=byoc-acme \
+  --set-string rawPipes.capabilityKey.kid=acme-kid \
+  --set-string rawPipes.capabilityKey.publicKeyPEM="$current_pem_b64"
+capability_keys "$tmp_dir/raw-given-key-b64.yaml" > "$tmp_dir/raw-given-key-b64.pem"
+assert_contains "$tmp_dir/raw-given-key-b64.pem" $'-----BEGIN PUBLIC KEY-----\nKey-ID: acme-kid'
+
+assert_render_fails raw-no-environment 'rawPipes.environment is required' "${common[@]}" --set rawPipes.enabled=true
+assert_render_fails raw-unpackaged-environment 'set rawPipes.capabilityKey from Traversal' "${common[@]}" "${raw_enabled[@]}" --set-string rawPipes.environment=prod
+assert_render_fails raw-half-next 'next needs both kid and publicKeyPEM' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.next.kid=next-kid
+assert_render_fails raw-reused-kid 'next.kid must differ from current.kid' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.next.kid=current-kid \
+  --set-string rawPipes.trustedKeys.ci.next.publicKeyPEM="$next_pem"
+assert_render_fails raw-arn-kid 'current.kid must be the bare KMS key ID' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.current.kid=arn:aws:kms:us-west-2:111122223333:key/k1
+assert_render_fails raw-alias-kid 'next.kid must be the bare KMS key ID' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.next.kid=alias/capability \
+  --set-string rawPipes.trustedKeys.ci.next.publicKeyPEM="$next_pem"
+assert_render_fails raw-der-key 'next.publicKeyPEM must be one PEM PUBLIC KEY block' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.next.kid=next-kid \
+  --set-string rawPipes.trustedKeys.ci.next.publicKeyPEM=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE
+assert_render_fails raw-certificate 'current.publicKeyPEM must be one PEM PUBLIC KEY block' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedKeys.ci.current.publicKeyPEM=$'-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----'
+assert_render_fails raw-old-keys 'rawPipes.capabilityKeysPEM is no longer supported' "${common[@]}" "${raw_enabled[@]}" \
+  --set-string rawPipes.capabilityKeysPEM="$current_pem"
+
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'

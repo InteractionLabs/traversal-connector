@@ -3,6 +3,17 @@
 {{- $hasControllerTLS := or .Values.controllerTLS.existingSecret .Values.controllerTLS.certPEM .Values.controllerTLS.keyPEM .Values.controllerTLS.caPEM -}}
 {{- $hasUpstreamTLS  := or .Values.upstreamTLS.existingSecret  .Values.upstreamTLS.caPEM -}}
 {{- $redactionEnabled := include "traversal-connector.redactionEnabled" . -}}
+{{- if .Values.rawPipes.tunnelsPerReplica | default "" -}}
+{{- fail "rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount: the connector holds its tunnels to one endpoint, not to each replica." -}}
+{{- end -}}
+{{- range $old := list "tunnelInnerTLS" "tunnelRoots" "tunnelStreamWindow" "tunnelConnectionWindow" -}}
+{{- if hasKey $.Values.rawPipes $old -}}
+{{- fail (printf "rawPipes.%s is no longer supported: tunnels no longer run inner TLS, so no tunnel root or window settings apply. Remove it." $old) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.rawPipes.capabilityKeysPEM | default "" -}}
+{{- fail "rawPipes.capabilityKeysPEM is no longer supported; the chart ships each environment's keys in rawPipes.trustedKeys, selected by rawPipes.environment." -}}
+{{- end -}}
 {{- if not (kindIs "bool" .Values.configUpdates.enabled) -}}
 {{- fail "configUpdates.enabled must be a boolean" -}}
 {{- end -}}
@@ -110,6 +121,12 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
+      {{- with (.Values.terminationGracePeriodSeconds | default (ternary 45 "" .Values.rawPipes.enabled)) }}
+      # A connector with raw pipes drains them for up to ~35 s on SIGTERM:
+      # it stops redialing, settles, refuses new pipes while open ones finish,
+      # then closes its tunnels.
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -182,6 +199,48 @@ spec:
             {{- with .Values.maxDecodedResponseBodySizeMB }}
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.rawPipes.enabled }}
+            - name: TRAVERSAL_RAW_PIPES
+              value: "enabled"
+            - name: TRAVERSAL_CAPABILITY_ISSUER
+              value: {{ .Values.rawPipes.capabilityIssuer | default (printf "traversal-raw-tunnel/%s" .Values.rawPipes.environment) | quote }}
+            - name: TRAVERSAL_CAPABILITY_KEYS
+              value: {{ include "traversal-connector.capabilityKeys" . | trim | b64enc | quote }}
+            {{- with .Values.rawPipes.maxPipes }}
+            - name: TRAVERSAL_RAW_PIPES_MAX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.maxLifetime }}
+            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.idleTimeout }}
+            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelCount }}
+            - name: TRAVERSAL_TUNNEL_COUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.tunnelsConnectTo }}
+            - name: TRAVERSAL_TUNNELS_CONNECT_TO
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.rawPipes.egressProxy }}
+            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (kindIs "bool" .Values.rawPipes.egressProxyResolves) }}
+            {{- fail "rawPipes.egressProxyResolves must be true or false" }}
+            {{- end }}
+            {{- if .Values.rawPipes.egressProxyResolves }}
+            {{- if not .Values.rawPipes.egressProxy }}
+            {{- fail "rawPipes.egressProxyResolves needs rawPipes.egressProxy" }}
+            {{- end }}
+            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY

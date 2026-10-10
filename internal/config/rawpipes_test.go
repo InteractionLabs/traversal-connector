@@ -164,6 +164,17 @@ func TestLoadRawPipes(t *testing.T) {
 			})
 		}
 	})
+	t.Run("hostnames through the egress proxy need a proxy", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES", "true")
+		if _, err := loadRawPipes(); err == nil ||
+			!strings.Contains(err.Error(), "needs TRAVERSAL_RAW_PIPES_EGRESS_PROXY") {
+			t.Fatalf("got %v, want an error asking for the proxy", err)
+		}
+	})
 	t.Run("caps the pipe count", func(t *testing.T) {
 		block, _ := publicKeyBlock(t, "prod-current")
 		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
@@ -200,6 +211,16 @@ func TestLoadRawPipes(t *testing.T) {
 			cfg.EgressProxy.String() != proxy {
 			t.Fatalf("got proxy %v, %v", cfg.EgressProxy, err)
 		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES", "true")
+		if cfg, err = loadRawPipes(); err != nil || !cfg.EgressProxyResolves {
+			t.Fatalf("resolves: %+v, %v", cfg.EgressProxyResolves, err)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES", "yes")
+		if _, err = loadRawPipes(); err == nil ||
+			!strings.Contains(err.Error(), "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES") {
+			t.Fatalf("resolves=yes: %v, want an error naming the variable", err)
+		}
+		t.Setenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES", "")
 		for _, bad := range []string{
 			"pipes.proxy:3128", "socks5://pipes.proxy:1080", "http://", "http://pipes.proxy:3128/path",
 			"http://pipes.proxy:99999", "http://pipes.proxy:3128?x=1", "://bad",

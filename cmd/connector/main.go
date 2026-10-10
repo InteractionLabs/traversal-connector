@@ -226,9 +226,18 @@ func main() {
 
 	var gates []router.ReadinessGate
 	if cfg.RawPipes.Enabled {
-		if raw := startRawPipes(ctx, &cfg, redactor); raw != nil {
+		if raw := startRawPipes(ctx, &cfg, cm.SetRawPipesStatus, redactor); raw != nil {
 			gates = append(gates, raw.readiness())
-			defer raw.drain()
+			// Drain as soon as shutdown starts, alongside the legacy
+			// transport's shutdown rather than after it, so the whole stop
+			// fits the pod's grace period.
+			drained := make(chan struct{})
+			go func() {
+				<-ctx.Done()
+				raw.drain()
+				close(drained)
+			}()
+			defer func() { <-drained }()
 		}
 	}
 
