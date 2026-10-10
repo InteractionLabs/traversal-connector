@@ -153,3 +153,29 @@ Key-ID: {{ $key.kid }}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+
+{{- /* The capability root certificates this chart packages, validated and
+       rendered as the PEM bundle TRAVERSAL_CAPABILITY_ROOTS takes. Empty when
+       none are packaged. A rotation ships the next root beside the current
+       one; the template refuses a next root without a current one, a root
+       repeated in both slots, or anything but one PEM CERTIFICATE block. */}}
+{{- define "traversal-connector.capabilityRoots" -}}
+{{- $roots := .Values.rawPipes.trustedRoots | default dict -}}
+{{- $current := $roots.current | default "" | trim -}}
+{{- $next := $roots.next | default "" | trim -}}
+{{- if and $next (not $current) -}}
+{{- fail "rawPipes.trustedRoots.next needs rawPipes.trustedRoots.current" -}}
+{{- end -}}
+{{- if and $next (eq $next $current) -}}
+{{- fail "rawPipes.trustedRoots.next must differ from current" -}}
+{{- end -}}
+{{- range $slot, $pem := dict "current" $current "next" $next -}}
+{{- if $pem -}}
+{{- if not (regexMatch "^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END CERTIFICATE-----$" $pem) -}}
+{{- fail (printf "rawPipes.trustedRoots.%s must be one PEM CERTIFICATE block" $slot) -}}
+{{- end }}
+{{ $pem }}
+{{- end -}}
+{{- end -}}
+{{- end -}}

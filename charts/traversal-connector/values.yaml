@@ -69,6 +69,19 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # known limit until per-connector handshake tokens.
 rawPipes:
   enabled: false           # TRAVERSAL_RAW_PIPES
+  # Traversal's capability root certificates, the current root and, during a
+  # root rotation, the next one. Rendered as TRAVERSAL_CAPABILITY_ROOTS. A
+  # capability carries its environment's certificate, so with roots the
+  # connector needs no environment, issuer or keys below: it trusts a
+  # capability whose certificate chains to a root and names the controller
+  # host it dials. Traversal ships them with each chart release: do not
+  # override them. See "Raw pipe signing keys" in the README.
+  trustedRoots:
+    current: ""
+    next: ""
+  # Pinned keys, the earlier trust model, still read beside or instead of
+  # trustedRoots. With trustedRoots set, leave environment empty unless a
+  # migration needs both.
   # The Traversal environment whose capability signer this connector trusts.
   # It selects that environment's keys in trustedKeys and the issuer,
   # traversal-raw-tunnel/<environment>.

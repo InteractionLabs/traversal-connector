@@ -203,10 +203,17 @@ spec:
             {{- if .Values.rawPipes.enabled }}
             - name: TRAVERSAL_RAW_PIPES
               value: "enabled"
+            {{- $roots := include "traversal-connector.capabilityRoots" . | trim }}
+            {{- if $roots }}
+            - name: TRAVERSAL_CAPABILITY_ROOTS
+              value: {{ $roots | b64enc | quote }}
+            {{- end }}
+            {{- if or (not $roots) .Values.rawPipes.environment }}
             - name: TRAVERSAL_CAPABILITY_ISSUER
               value: {{ .Values.rawPipes.capabilityIssuer | default (printf "traversal-raw-tunnel/%s" .Values.rawPipes.environment) | quote }}
             - name: TRAVERSAL_CAPABILITY_KEYS
               value: {{ include "traversal-connector.capabilityKeys" . | trim | b64enc | quote }}
+            {{- end }}
             {{- with .Values.rawPipes.maxPipes }}
             - name: TRAVERSAL_RAW_PIPES_MAX
               value: {{ . | quote }}

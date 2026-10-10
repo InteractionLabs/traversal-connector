@@ -3,7 +3,8 @@
 // exact destination.
 //
 // The token format is deliberately narrower than general JWT. The header has
-// exactly alg "ES256", typ TokenType, and kid. A strict verifier also requires
+// exactly alg "ES256", typ TokenType, and kid, and optionally x5c: the
+// certificate of the environment key that signed it (see chain.go). A strict verifier also requires
 // the payload to contain exactly the Claims fields, each present once with the
 // exact key spelling and type. A verifier with AllowUnknownClaims still
 // requires those fields and still rejects duplicates, case variants of them,
@@ -84,11 +85,17 @@ type Header struct {
 	Algorithm string `json:"alg"`
 	KeyID     string `json:"kid"`
 	Type      string `json:"typ"`
+	// X5C is the signing key's certificate chain, leaf first, as standard
+	// base64 DER (RFC 7515 section 4.1.6). It is optional: without it the kid
+	// must name a key in VerifierConfig.Keys.
+	X5C []string `json:"x5c,omitempty"`
 }
 
 var (
 	claimKeys  = jsonKeys(Claims{})
 	headerKeys = jsonKeys(Header{})
+	// optionalHeaderKeys may appear in the header, at most once each.
+	optionalHeaderKeys = map[string]bool{"x5c": true}
 )
 
 // Code classifies a verification failure.
@@ -113,6 +120,10 @@ const (
 	CodeWrongDestination Code = "wrong_destination"
 	CodeUnsupportedMode  Code = "unsupported_mode"
 	CodeExhausted        Code = "capability_exhausted"
+	// CodeUntrustedChain is an x5c certificate that does not chain to a
+	// trusted root, is outside its validity, or does not name this
+	// connector's controller host.
+	CodeUntrustedChain Code = "untrusted_chain"
 )
 
 // Error reports why a capability was rejected. It never contains the token.
@@ -128,7 +139,7 @@ func (e *Error) Error() string {
 // OpenFailureReason maps the failure to the reason a refused open reports.
 func (e *Error) OpenFailureReason() pb.RawOpenFailureReason {
 	switch e.Code {
-	case CodeUnknownKey:
+	case CodeUnknownKey, CodeUntrustedChain:
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_UNKNOWN_KEY
 	case CodeWrongAudience:
 		return pb.RawOpenFailureReason_RAW_OPEN_FAILURE_REASON_WRONG_AUDIENCE
@@ -162,13 +173,27 @@ func ModeClaim(mode pb.RawPipeMode) (string, bool) {
 	return "", false
 }
 
-// VerifierConfig configures a Verifier.
+// VerifierConfig configures a Verifier. It trusts signing keys one of two
+// ways, or both during a migration: Keys, each environment's public key
+// pinned by kid, or Roots, which certify environment keys a capability then
+// carries in its x5c header.
 type VerifierConfig struct {
 	// Issuer is the exact iss claim to accept, traversal-raw-tunnel/<env>.
+	// Required with Keys. With Roots alone it may be empty: a chained
+	// capability's issuer is the one its certificate names.
 	Issuer string
 	// Keys are the trusted public keys by kid: the current key and, during a
 	// rotation, the next one. Every key must be P-256.
 	Keys map[string]*ecdsa.PublicKey
+	// Roots are the trusted capability root certificates: the current root
+	// and, during a rotation, the next one. A capability with x5c is accepted
+	// only if its certificate chains to one of them.
+	Roots []*x509.Certificate
+	// ControllerHost is the host this verifier's connector dials for its
+	// controller. Required with Roots: a chained capability's certificate
+	// must name it, which binds the capability to this connector's
+	// environment without configuring the environment.
+	ControllerHost string
 	// AllowedSubjects are the sub claims permitted to open pipes.
 	AllowedSubjects []string
 	// Now defaults to time.Now.
@@ -185,6 +210,7 @@ type VerifierConfig struct {
 type Verifier struct {
 	issuer       string
 	keys         map[string]*ecdsa.PublicKey
+	chains       *chainVerifier
 	subjects     map[string]bool
 	now          func() time.Time
 	opens        *openCounter
@@ -193,11 +219,11 @@ type Verifier struct {
 
 // NewVerifier validates cfg and returns a Verifier.
 func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
-	if cfg.Issuer == "" {
-		return nil, errors.New("capability: issuer is required")
+	if len(cfg.Keys) == 0 && len(cfg.Roots) == 0 {
+		return nil, errors.New("capability: at least one key or root is required")
 	}
-	if len(cfg.Keys) == 0 {
-		return nil, errors.New("capability: at least one key is required")
+	if len(cfg.Keys) > 0 && cfg.Issuer == "" {
+		return nil, errors.New("capability: issuer is required with keys")
 	}
 	keys := make(map[string]*ecdsa.PublicKey, len(cfg.Keys))
 	for kid, key := range cfg.Keys {
@@ -217,9 +243,17 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	if now == nil {
 		now = time.Now
 	}
+	var chains *chainVerifier
+	if len(cfg.Roots) > 0 {
+		var err error
+		if chains, err = newChainVerifier(cfg.Roots, cfg.ControllerHost); err != nil {
+			return nil, err
+		}
+	}
 	return &Verifier{
 		issuer:       cfg.Issuer,
 		keys:         keys,
+		chains:       chains,
 		subjects:     subjects,
 		now:          now,
 		opens:        newOpenCounter(),
@@ -283,12 +317,12 @@ type Verified struct {
 // replay protection. Attempts are counted only for tokens that pass every
 // other check, so rejected attempts cannot exhaust a capability.
 func (v *Verifier) Verify(token string, want Expected) (*Verified, error) {
-	claims, err := v.parse(token)
+	now := v.now()
+	claims, issuer, err := v.parse(token, now)
 	if err != nil {
 		return nil, err
 	}
-	now := v.now()
-	if err := v.checkClaims(claims, want, now); err != nil {
+	if err := v.checkClaims(claims, issuer, want, now); err != nil {
 		return nil, err
 	}
 	if !v.opens.take(claims.JTI, time.Unix(claims.ExpiresAt, 0).Add(MaxClockSkew), now) {
@@ -300,32 +334,33 @@ func (v *Verifier) Verify(token string, want Expected) (*Verified, error) {
 	}, nil
 }
 
-// parse checks the token's structure and signature and returns its claims.
-func (v *Verifier) parse(token string) (*Claims, error) {
+// parse checks the token's structure and signature and returns its claims
+// and the issuer they must name.
+func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 	if len(token) > MaxTokenBytes {
-		return nil, fail(CodeMalformed, "token too long")
+		return nil, "", fail(CodeMalformed, "token too long")
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return nil, fail(CodeMalformed, "token is not a compact JWS")
+		return nil, "", fail(CodeMalformed, "token is not a compact JWS")
 	}
 	var header Header
-	if err := decodeSegment(parts[0], headerKeys, false, &header); err != nil {
-		return nil, fail(CodeMalformed, "header: "+err.Error())
+	if err := decodeSegment(parts[0], headerKeys, optionalHeaderKeys, false, &header); err != nil {
+		return nil, "", fail(CodeMalformed, "header: "+err.Error())
 	}
 	if header.Algorithm != Algorithm || header.Type != TokenType {
-		return nil, fail(CodeMalformed, "unsupported alg or typ")
+		return nil, "", fail(CodeMalformed, "unsupported alg or typ")
 	}
 	if replacement(header.Algorithm) || replacement(header.KeyID) || replacement(header.Type) {
-		return nil, fail(CodeMalformed, "header: invalid text")
+		return nil, "", fail(CodeMalformed, "header: invalid text")
 	}
-	key, ok := v.keys[header.KeyID]
-	if !ok {
-		return nil, fail(CodeUnknownKey, "untrusted kid")
+	key, issuer, err := v.signingKey(header, now)
+	if err != nil {
+		return nil, "", err
 	}
 	sig, err := decodeBase64(parts[2])
 	if err != nil || len(sig) != 64 {
-		return nil, fail(CodeInvalidSignature, "signature is not 64-byte r||s")
+		return nil, "", fail(CodeInvalidSignature, "signature is not 64-byte r||s")
 	}
 	// ecdsa.Verify accepts both s and n-s, so a holder can mint a second valid
 	// encoding of any token (high-S malleability). That is harmless here:
@@ -334,20 +369,38 @@ func (v *Verifier) parse(token string) (*Claims, error) {
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	r, s := new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])
 	if !ecdsa.Verify(key, digest[:], r, s) {
-		return nil, fail(CodeInvalidSignature, "signature does not verify")
+		return nil, "", fail(CodeInvalidSignature, "signature does not verify")
 	}
 	var claims Claims
-	if err := decodeSegment(parts[1], claimKeys, v.allowUnknown, &claims); err != nil {
-		return nil, fail(CodeMalformed, "claims: "+err.Error())
+	if err := decodeSegment(parts[1], claimKeys, nil, v.allowUnknown, &claims); err != nil {
+		return nil, "", fail(CodeMalformed, "claims: "+err.Error())
 	}
-	return &claims, nil
+	return &claims, issuer, nil
 }
 
-func (v *Verifier) checkClaims(c *Claims, want Expected, now time.Time) error {
+// signingKey returns the key that must have signed a capability with header,
+// and the issuer its claims must name: the certified key from x5c, or the
+// pinned key the kid names.
+func (v *Verifier) signingKey(header Header, now time.Time) (*ecdsa.PublicKey, string, error) {
+	if header.X5C != nil {
+		if v.chains == nil {
+			return nil, "", fail(CodeUntrustedChain, "this verifier trusts no roots")
+		}
+		return v.chains.verify(header.X5C, now)
+	}
+	key, ok := v.keys[header.KeyID]
+	if !ok {
+		return nil, "", fail(CodeUnknownKey, "untrusted kid")
+	}
+	return key, v.issuer, nil
+}
+
+func (v *Verifier) checkClaims(c *Claims, issuer string, want Expected, now time.Time) error {
 	if err := checkShape(c); err != nil {
 		return err
 	}
-	if c.Issuer != v.issuer {
+	// A configured Issuer constrains chained capabilities too.
+	if c.Issuer != issuer || (v.issuer != "" && c.Issuer != v.issuer) {
 		return fail(CodeWrongIssuer, "unexpected iss")
 	}
 	if err := checkTerms(c); err != nil {
@@ -443,13 +496,16 @@ func caseVariant(key string, want map[string]bool) bool {
 }
 
 // decodeSegment decodes one base64url JSON segment into v. The object must
-// contain every key in want, each once and spelled exactly. Unknown keys are
+// contain every key in want, each once and spelled exactly, and may contain
+// each key in optional at most once. Unknown keys are
 // rejected unless allowUnknown is set, in which case they are ignored and are
 // not passed to encoding/json. Duplicates and case variants of a wanted key
 // stay rejected either way, because encoding/json would otherwise keep the
 // last value and match keys case-insensitively, letting two parsers read
 // different claims.
-func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v any) error {
+func decodeSegment(
+	segment string, want, optional map[string]bool, allowUnknown bool, v any,
+) error {
 	raw, err := decodeBase64(segment)
 	if err != nil {
 		return errors.New("invalid base64url")
@@ -469,8 +525,8 @@ func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v an
 			return errors.New("invalid JSON")
 		}
 		key, _ := tok.(string)
-		if !want[key] {
-			if !allowUnknown || caseVariant(key, want) {
+		if !want[key] && !optional[key] {
+			if !allowUnknown || caseVariant(key, want) || caseVariant(key, optional) {
 				return errors.New("unexpected field")
 			}
 			var skipped json.RawMessage
@@ -496,8 +552,10 @@ func decodeSegment(segment string, want map[string]bool, allowUnknown bool, v an
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data")
 	}
-	if len(fields) != len(want) {
-		return errors.New("missing field")
+	for key := range want {
+		if _, ok := fields[key]; !ok {
+			return errors.New("missing field")
+		}
 	}
 	// Unmarshal only the known keys. The original object can contain keys
 	// encoding/json would fold onto a known field by case.

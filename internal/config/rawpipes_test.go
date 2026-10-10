@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 )
 
 func publicKeyBlock(t *testing.T, kid string) (string, *ecdsa.PublicKey) {
@@ -72,14 +74,48 @@ func TestLoadRawPipes(t *testing.T) {
 			t.Fatal("accepted TRAVERSAL_RAW_PIPES=on")
 		}
 	})
-	t.Run("enabled requires an issuer and keys", func(t *testing.T) {
+	t.Run("enabled requires roots or keys", func(t *testing.T) {
 		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), "ROOTS") {
+			t.Fatalf("missing roots and keys: %v", err)
+		}
+	})
+	t.Run("pinned keys require an issuer", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
 		if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), "ISSUER") {
 			t.Fatalf("missing issuer: %v", err)
 		}
-		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
-		if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), "KEYS") {
-			t.Fatalf("missing keys: %v", err)
+	})
+	t.Run("roots alone need no issuer or keys", func(t *testing.T) {
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(t))
+		cfg, err := loadRawPipes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.CapabilityRoots) != 1 || cfg.CapabilityKeys != nil ||
+			cfg.CapabilityIssuer != "" {
+			t.Fatalf("got roots=%d keys=%v issuer=%q",
+				len(cfg.CapabilityRoots), cfg.CapabilityKeys, cfg.CapabilityIssuer)
+		}
+	})
+	t.Run("rejects roots that are not CA certificates", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", block)
+		if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), "ROOTS") {
+			t.Fatalf("bad roots: %v", err)
+		}
+	})
+	t.Run("rejects both a root setting and its file", func(t *testing.T) {
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(t))
+		t.Setenv("TRAVERSAL_CAPABILITY_ROOTS_FILE", "/nonexistent")
+		if _, err := loadRawPipes(); err == nil || !strings.Contains(err.Error(), "exclusive") {
+			t.Fatalf("both set: %v", err)
 		}
 	})
 	t.Run("enabled", func(t *testing.T) {
@@ -235,4 +271,20 @@ func TestLoadRawPipes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// rootPEM is a capability root certificate as PEM.
+func rootPEM(t *testing.T) string {
+	t.Helper()
+	root, err := capabilitytest.NewRoot(
+		capabilitytest.Key(
+			"config test root",
+		),
+		time.Now().Add(-time.Hour),
+		time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.DER}))
 }

@@ -230,6 +230,37 @@ done
 assert_render_fails raw-per-replica 'rawPipes.tunnelsPerReplica is now rawPipes.tunnelCount' "${common[@]}" "${raw_enabled[@]}" \
   --set-string rawPipes.tunnelsPerReplica=2
 
+# Raw pipes with capability roots: the chart renders them as one PEM bundle
+# and needs no environment, issuer or keys.
+current_root=$'-----BEGIN CERTIFICATE-----\nMIIBhjCCAS2gAwIBAgIBATAKBggqhkjOPQQDAjArMSkwJwYDVQQDEyBjaGFydCBD\nSSBjYXBhYmlsaXR5IHJvb3QgY3VycmVudDAeFw0yMzExMTQyMjEzMjBaFw0zMzEx\nMTEyMjEzMjBaMCsxKTAnBgNVBAMTIGNoYXJ0IENJIGNhcGFiaWxpdHkgcm9vdCBj\ndXJyZW50MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWThPbl4gkA21jx1BdgKl\np31RGeAQDurUqTgw+Kv8vA0hzHoFEswCmPK5P/3e7vzTLWBTM8y506ySFV40a6Ix\n3qNCMEAwDgYDVR0PAQH/BAQDAgIEMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYE\nFGyyLYAn5UbFjRKoJEKyOdna6LMvMAoGCCqGSM49BAMCA0cAMEQCIBhQ9K+mxgPQ\nTZFlzOPt1Re7LGHncn/4S2689wOoLkzsAiAgZ3mnrKmegxkfZyhXMpRFQ+5u9Zw/\nILeckQJkP0J83A==\n-----END CERTIFICATE-----\n'
+next_root=$'-----BEGIN CERTIFICATE-----\nMIIBgTCCASegAwIBAgIBAjAKBggqhkjOPQQDAjAoMSYwJAYDVQQDEx1jaGFydCBD\nSSBjYXBhYmlsaXR5IHJvb3QgbmV4dDAeFw0yMzExMTQyMjEzMjBaFw0zMzExMTEy\nMjEzMjBaMCgxJjAkBgNVBAMTHWNoYXJ0IENJIGNhcGFiaWxpdHkgcm9vdCBuZXh0\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYVhUh3Y0z0OjRjOu67u2KLj8YqbE\nRvl+gdGxwV5jVovcXFXbyncA9yrE1LE0ACeCXwMNqKgvdBP3Nutec/Ks86NCMEAw\nDgYDVR0PAQH/BAQDAgIEMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFPLTVQhQ\nxU2D/Qvkjv8zktKPxG38MAoGCCqGSM49BAMCA0gAMEUCIFx9yb1HSH52IsG9opm1\nNpYuUk+S1ZKs3aTqdQrT4iLFAiEAk7Xy3K1eOwpOmbPtWyeRfxKe35THJ8+Zfmxt\nA3coO+g=\n-----END CERTIFICATE-----\n'
+capability_roots() {
+  awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
+}
+render raw-roots "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.trustedRoots.current="$current_root"
+assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_ISSUER'
+assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
+capability_roots "$tmp_dir/raw-roots.yaml" > "$tmp_dir/raw-roots.pem"
+[[ $(grep -c 'BEGIN CERTIFICATE' "$tmp_dir/raw-roots.pem") == 1 ]] || fail "expected only the current root"
+render raw-roots-rotation "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.trustedRoots.current="$current_root" \
+  --set-string rawPipes.trustedRoots.next="$next_root"
+capability_roots "$tmp_dir/raw-roots-rotation.yaml" > "$tmp_dir/raw-roots-rotation.pem"
+[[ $(grep -c 'BEGIN CERTIFICATE' "$tmp_dir/raw-roots-rotation.pem") == 2 ]] || fail "expected both roots"
+# Roots and pinned keys together, while moving between them.
+render raw-roots-and-keys "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.trustedRoots.current="$current_root"
+assert_contains "$tmp_dir/raw-roots-and-keys.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
+assert_contains "$tmp_dir/raw-roots-and-keys.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
+assert_render_fails raw-roots-next-only 'trustedRoots.next needs rawPipes.trustedRoots.current' "${common[@]}" \
+  --set rawPipes.enabled=true --set-string rawPipes.trustedRoots.next="$next_root"
+assert_render_fails raw-roots-repeated 'trustedRoots.next must differ from current' "${common[@]}" \
+  --set rawPipes.enabled=true --set-string rawPipes.trustedRoots.current="$current_root" \
+  --set-string rawPipes.trustedRoots.next="$current_root"
+assert_render_fails raw-roots-not-pem 'trustedRoots.current must be one PEM CERTIFICATE block' "${common[@]}" \
+  --set rawPipes.enabled=true --set-string rawPipes.trustedRoots.current="$current_pem"
+
 # The install command's key: any environment, no packaged keys needed.
 render raw-given-key "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
   --set-string rawPipes.environment=byoc-acme \
