@@ -214,6 +214,14 @@ assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_TUNN
 assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_MAX_LIFETIME\n              value: "1h"'
 assert_contains "$tmp_dir/raw-tunnels.yaml" $'            - name: TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT\n              value: "0s"'
 assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_MAX_LIFETIME'
+render raw-egress "$fixtures/direct-export-values.yaml" "${raw_enabled[@]}" \
+  --set-string rawPipes.egressProxy=http://pipes-proxy.acme.svc:3128 \
+  --set rawPipes.egressProxyResolves=true
+assert_contains "$tmp_dir/raw-egress.yaml" $'            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY\n              value: "http://pipes-proxy.acme.svc:3128"'
+assert_contains "$tmp_dir/raw-egress.yaml" $'            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"'
+assert_not_contains "$tmp_dir/raw-current.yaml" 'TRAVERSAL_RAW_PIPES_EGRESS_PROXY'
+assert_render_fails raw-resolves-no-proxy 'rawPipes.egressProxyResolves needs rawPipes.egressProxy' "${common[@]}" "${raw_enabled[@]}" \
+  --set rawPipes.egressProxyResolves=true
 # Settings for the removed inner TLS fail rather than being ignored.
 for old in tunnelInnerTLS tunnelRoots tunnelStreamWindow tunnelConnectionWindow; do
   assert_render_fails "raw-removed-$(printf %s "$old" | tr "[:upper:]" "[:lower:]")" "rawPipes.$old is no longer supported" "${common[@]}" "${raw_enabled[@]}" \

@@ -227,6 +227,20 @@ spec:
             - name: TRAVERSAL_TUNNELS_CONNECT_TO
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.rawPipes.egressProxy }}
+            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (kindIs "bool" .Values.rawPipes.egressProxyResolves) }}
+            {{- fail "rawPipes.egressProxyResolves must be true or false" }}
+            {{- end }}
+            {{- if .Values.rawPipes.egressProxyResolves }}
+            {{- if not .Values.rawPipes.egressProxy }}
+            {{- fail "rawPipes.egressProxyResolves needs rawPipes.egressProxy" }}
+            {{- end }}
+            - name: TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY

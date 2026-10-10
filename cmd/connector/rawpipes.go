@@ -193,9 +193,11 @@ func newPipeServer(cfg *config.Config, redactor *redact.Redactor) (*pipes.Server
 		},
 	}
 	// Raw pipes dial directly unless TRAVERSAL_RAW_PIPES_EGRESS_PROXY names a
-	// proxy. Hostnames through it are still refused as delegated.
+	// proxy. Hostnames through it are refused as delegated unless the
+	// operator accepts the proxy's own destination policy.
 	if proxy := cfg.RawPipes.EgressProxy; proxy != nil {
 		policyCfg.Proxy = func(string, uint16) (*url.URL, error) { return proxy, nil }
+		policyCfg.AllowDelegatedProxyChecks = cfg.RawPipes.EgressProxyResolves
 	}
 	policy, err := dialpolicy.New(policyCfg)
 	if err != nil {

@@ -611,6 +611,8 @@ on which Traversal's tunnel gateway opens pipes as HTTP/2 streams.
 | `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT` | `15m` | Longest a pipe may move no bytes. `0s` turns the limit off. |
 | `TRAVERSAL_TUNNEL_COUNT` | `2` | W, tunnels per connector pod, from 1 to 8. `TRAVERSAL_TUNNELS_PER_REPLICA`, its earlier name, is read when it is unset. |
 | `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` the tunnels dial instead of `<controller host>:443`, such as a PrivateLink endpoint. SNI and the certificate check still use the controller's host. |
+| `TRAVERSAL_RAW_PIPES_EGRESS_PROXY` | (none) | `http://` or `https://` forward proxy raw pipes reach their destinations through, with HTTP CONNECT (credentials in the URL's user info). `EGRESS_PROXY_URL` and the proxy variables never route pipes. |
+| `TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES` | `false` | `true` sends hostnames to that proxy, which resolves them and decides which addresses they reach. Off, hostnames are refused (`proxy_checks_delegated`) and only IP literals go through it. Set it only where the proxy refuses loopback, link-local and metadata addresses itself. |
 
 Raw pipe metrics, all with closed label sets: `connector.raw_tunnels_active`,
 `connector.raw_pipes_active`, `connector.raw_opens_total` (`result`, `reason`),

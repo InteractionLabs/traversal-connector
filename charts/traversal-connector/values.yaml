@@ -113,6 +113,14 @@ rawPipes:
   # certificate check still use the controller's host, and whatever answers
   # must pass TLS through with its ALPN intact.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
+  # An http:// or https:// forward proxy raw pipes reach their destinations
+  # through, with HTTP CONNECT. Empty dials directly. The connector's own
+  # proxyURL never applies to pipes.
+  egressProxy: ""          # TRAVERSAL_RAW_PIPES_EGRESS_PROXY
+  # Send hostnames to egressProxy, which then resolves them and decides which
+  # addresses they reach. Off, only IP literals go through it. Turn it on
+  # only if the proxy refuses loopback, link-local and metadata addresses.
+  egressProxyResolves: false   # TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES
 
 # Pod termination grace period, in seconds. Empty uses Kubernetes' default
 # (30), or 45 when rawPipes.enabled, which a raw pipe drain needs.
