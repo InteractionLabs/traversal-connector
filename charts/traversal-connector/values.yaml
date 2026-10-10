@@ -51,6 +51,73 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
+# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
+# Raw pipes let Traversal reach databases, kubectl exec, git, and other non-HTTP
+# destinations through this connector. The connector holds outbound tunnels to
+# the controller's host on port 443, the same host and port it already
+# reaches, so no new firewall rule is needed. Tunnels offer the TLS ALPN
+# protocol x-traversal-tunnel, which Traversal's front door routes to its
+# tunnel endpoint; a TLS-intercepting proxy in the path breaks them. Every
+# pipe carries a Traversal-signed capability the connector checks before it
+# dials. Off by default; leaving it off, or setting it back to false, keeps
+# the connector on HTTP requests only.
+# The controllerTLS certificate may be org-scoped
+# (spiffe://traversal.com/tenant/<org-uuid>/<org-name>), as Traversal issues
+# it, and connectorID must be a lower-case UUID. The tunnel endpoint binds
+# tunnels to the certificate's org; within an org it trusts connectorID, so
+# any holder of the org's certificate can claim any connector ID in it, a
+# known limit until per-connector handshake tokens.
+rawPipes:
+  enabled: false           # TRAVERSAL_RAW_PIPES
+  # The Traversal environment whose capability signer this connector trusts.
+  # It selects that environment's keys in trustedKeys and the issuer,
+  # traversal-raw-tunnel/<environment>.
+  environment: ""
+  # Overrides the issuer derived from environment. Leave blank.
+  capabilityIssuer: ""     # TRAVERSAL_CAPABILITY_ISSUER
+  # Each environment's capability-signer public keys, identified by kid: the
+  # bare KMS key ID, not its ARN or an alias. Rendered as
+  # TRAVERSAL_CAPABILITY_KEYS; the keys only verify capabilities and are never
+  # sent over the tunnel. Traversal ships them with each chart release: do not
+  # override them, or upgrades stop delivering key rotations. See "Raw pipe
+  # signing keys" in the README.
+  # This environment's capability public key, as Traversal's install
+  # command sets it: kid (the bare KMS key ID) and publicKeyPEM, with an
+  # optional next {kid, publicKeyPEM} during a rotation. Set, it replaces the
+  # environment's entry in trustedKeys; environment still names the issuer.
+  capabilityKey:
+    kid: ""
+    publicKeyPEM: ""       # PEM, or base64 of it (the install command's form)
+  trustedKeys:
+    dev:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    staging:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+    prod:
+      current: {kid: "", publicKeyPEM: ""}
+      next: {kid: "", publicKeyPEM: ""}
+  maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
+  # Pipe limits, as Go durations. A pipe open for maxLifetime, or that moves
+  # no bytes either way for idleTimeout, is ended with a reset, so the caller
+  # knows to reconnect. "0s" turns a limit off. Blank uses the defaults, which
+  # match Traversal's.
+  maxLifetime: ""          # TRAVERSAL_RAW_PIPES_MAX_LIFETIME (default 4h)
+  idleTimeout: ""          # TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT (default 15m)
+  # W, the tunnels each connector pod holds, so pipes spread across W
+  # connections. From 1 to 8.
+  tunnelCount: ""          # TRAVERSAL_TUNNEL_COUNT (default 2)
+  # host:port the tunnels dial instead of <controller host>:443, such as a
+  # PrivateLink endpoint or an in-cluster Service. SNI and the server
+  # certificate check still use the controller's host, and whatever answers
+  # must pass TLS through with its ALPN intact.
+  tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
+
+# Pod termination grace period, in seconds. Empty uses Kubernetes' default
+# (30), or 45 when rawPipes.enabled, which a raw pipe drain needs.
+terminationGracePeriodSeconds: ""
+
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference
 # an existing Secret with keys: tls.crt, tls.key, ca.crt.
@@ -184,6 +251,14 @@ probes:
     periodSeconds: 10
 
 # ─── Pod / scheduling ────────────────────────────────────────────────────────
+# Pod-level securityContext. Each raw pipe is its own TCP connection from the
+# connector, and a closed one holds its port for 60 s (TIME_WAIT), so very
+# high pipe churn to one destination can exhaust the default port range
+# (~470 new pipes/s per pod). Widening it is a safe sysctl; keep the defaults
+# below when adding it:
+#   podSecurityContext:
+#     sysctls:
+#       - { name: net.ipv4.ip_local_port_range, value: "1024 65535" }
 podSecurityContext:
   fsGroup: 65532
   seccompProfile:

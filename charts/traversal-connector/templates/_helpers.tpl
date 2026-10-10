@@ -95,3 +95,61 @@ https://telemetry.traversal.com:4317
 https://telemetry.traversal.com/v1/{{ .signal }}
 {{- end -}}
 {{- end -}}
+
+{{- /* The capability public keys this chart packages for rawPipes.environment,
+       validated and rendered as the PEM bundle TRAVERSAL_CAPABILITY_KEYS takes:
+       each PUBLIC KEY block names its kid in a Key-ID header. A rollout ships
+       the next key beside the current one, so the template refuses anything
+       that would break one: a next key with only one half set, a next kid that
+       reuses the current one, a kid that is a KMS ARN or alias rather than the
+       bare key ID, or a key that is not a PEM PUBLIC KEY block. */}}
+{{- define "traversal-connector.capabilityKeys" -}}
+{{- $env := .Values.rawPipes.environment | default "" -}}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" $env) -}}
+{{- fail "rawPipes.environment is required when rawPipes.enabled and must be a lowercase Traversal environment name, such as prod" -}}
+{{- end -}}
+{{- $given := deepCopy (.Values.rawPipes.capabilityKey | default dict) -}}
+{{- /* A one-line --set-string can't carry PEM newlines, so the install command
+       may send the PEM base64-encoded. */ -}}
+{{- if and $given.publicKeyPEM (not (hasPrefix "-----" (trim $given.publicKeyPEM))) -}}
+{{- $_ := set $given "publicKeyPEM" (b64dec (trim $given.publicKeyPEM)) -}}
+{{- end -}}
+{{- $keys := dict -}}
+{{- $where := printf "rawPipes.trustedKeys.%s" $env -}}
+{{- if or $given.kid $given.publicKeyPEM -}}
+{{- /* Traversal's install command names this environment's key directly. */ -}}
+{{- $keys = dict "current" $given "next" ($given.next | default dict) -}}
+{{- $where = "rawPipes.capabilityKey" -}}
+{{- else -}}
+{{- $keys = get (.Values.rawPipes.trustedKeys | default dict) $env | default dict -}}
+{{- end -}}
+{{- $current := $keys.current | default dict -}}
+{{- $next := $keys.next | default dict -}}
+{{- if not (and $current.kid $current.publicKeyPEM) -}}
+{{- fail (printf "%s.current needs a kid and publicKeyPEM; set rawPipes.capabilityKey from Traversal's install command" $where) -}}
+{{- end -}}
+{{- if ne (empty $next.kid) (empty $next.publicKeyPEM) -}}
+{{- fail (printf "%s.next needs both kid and publicKeyPEM, or neither" $where) -}}
+{{- end -}}
+{{- if and $next.kid (eq $next.kid $current.kid) -}}
+{{- fail (printf "%s.next.kid must differ from current.kid" $where) -}}
+{{- end -}}
+{{- range $slot, $key := dict "current" $current "next" $next -}}
+{{- if $key.kid -}}
+{{- if or (hasPrefix "arn:" $key.kid) (hasPrefix "alias/" $key.kid) -}}
+{{- fail (printf "%s.%s.kid must be the bare KMS key ID, not an ARN or alias" $where $slot) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" $key.kid) -}}
+{{- fail (printf "%s.%s.kid must be letters, digits, '.', '_' or '-'" $where $slot) -}}
+{{- end -}}
+{{- $pem := $key.publicKeyPEM | trim -}}
+{{- if not (regexMatch "^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END PUBLIC KEY-----$" $pem) -}}
+{{- fail (printf "%s.%s.publicKeyPEM must be one PEM PUBLIC KEY block" $where $slot) -}}
+{{- end }}
+-----BEGIN PUBLIC KEY-----
+Key-ID: {{ $key.kid }}
+
+{{ $pem | trimPrefix "-----BEGIN PUBLIC KEY-----" | trim }}
+{{- end -}}
+{{- end -}}
+{{- end -}}

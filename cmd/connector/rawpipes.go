@@ -15,6 +15,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/pipes"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -55,17 +56,20 @@ type rawPipes struct {
 }
 
 // startRawPipes starts serving pipes and holding tunnels. It returns nil
-// when raw pipes cannot run on this connector, after saying why: raw pipes
-// never stop the legacy transport, so no raw pipe failure reaches main.
+// when raw pipes cannot run on this connector, after saying why in the log
+// and through report, for metadata responses: raw pipes never stop the
+// legacy transport, so no raw pipe failure reaches main.
 func startRawPipes(
 	ctx context.Context,
 	cfg *config.Config,
+	report statusReporter,
 	redactor *redact.Redactor,
 ) *rawPipes {
 	tunnelCfg, err := tunnelConfig(cfg)
 	if err != nil {
 		slog.WarnContext(ctx, "raw pipes are enabled but this connector cannot hold tunnels; "+
 			"serving the legacy transport only", "reason", err.Error())
+		reportUnavailable(report, err)
 		return nil
 	}
 	raw, err := setUpRawPipes(ctx, cfg, tunnelCfg, redactor)
@@ -74,8 +78,10 @@ func startRawPipes(
 		// tunnels: an error, though the legacy transport carries on.
 		slog.ErrorContext(ctx, "raw pipes are enabled but failed to start; "+
 			"serving the legacy transport only", "err", err)
+		reportUnavailable(report, err)
 		return nil
 	}
+	report(raw.status)
 	return raw
 }
 
@@ -123,6 +129,22 @@ func runRawPipes(ctx context.Context, server *pipes.Server, manager *tunnels.Man
 		}
 	}()
 	return r
+}
+
+// statusReporter publishes what metadata responses say about raw pipes:
+// client.ConnectionManager.SetRawPipesStatus.
+type statusReporter func(func() *pb.RawPipesStatus)
+
+// reportUnavailable reports raw pipes as enabled but not running, and why.
+func reportUnavailable(report statusReporter, err error) {
+	unavailable := &pb.RawPipesStatus{Enabled: true, Detail: err.Error()}
+	report(func() *pb.RawPipesStatus { return unavailable })
+}
+
+// status is what metadata responses report about raw pipes.
+func (r *rawPipes) status() *pb.RawPipesStatus {
+	up, detail := r.tunnels.TunnelsUp(context.Background())
+	return &pb.RawPipesStatus{Enabled: true, TunnelsUp: up, Detail: detail}
 }
 
 // readiness is the raw pipe side's readiness gate.

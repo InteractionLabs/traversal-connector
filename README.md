@@ -563,6 +563,106 @@ Regardless of rules, `connector.response_content_encoding_total` reports the
 coding of every upstream response, so a deployment can see which of its
 upstreams would be affected before configuring anything.
 
+### Raw pipes (preview)
+
+Raw pipes let Traversal reach databases, `kubectl exec`, git, and other
+non-HTTP destinations through the connector. Each pipe carries a
+Traversal-signed capability that the connector verifies before it dials.
+Raw pipes are off by default; the Helm chart's `rawPipes` block turns them on.
+
+The connector holds W outbound tunnels to Traversal, each a TLS connection
+on which Traversal's tunnel gateway opens pipes as HTTP/2 streams.
+
+- **Network.** Tunnels dial the host of `TRAVERSAL_CONTROLLER_URL` on port
+  443, the same host and port the connector already reaches, with that host as
+  TLS SNI and as the name the server certificate must carry. They trust the
+  system roots plus `TLS_CA_BASE64`, as the connector's other connections do.
+  They offer the TLS ALPN protocol `x-traversal-tunnel`; Traversal's edge
+  router sends it to the tunnel gateway and everything else to the controller.
+  A TLS-intercepting proxy breaks tunnels, and tunnels through
+  `EGRESS_PROXY_URL` are not supported yet: such a connector keeps serving
+  HTTP requests only and reports why.
+- **Identity.** The connector's certificate must carry exactly one URI SAN, a
+  Traversal SPIFFE ID: the org-scoped
+  `spiffe://traversal.com/tenant/<org-uuid>/<org-name>` that Traversal issues,
+  or a connector-scoped one ending `/connector/<connector-uuid>`, which must
+  name `TRAVERSAL_CONNECTOR_ID`. `TRAVERSAL_CONNECTOR_ID` must be a lower-case
+  UUID. The tunnel gateway binds each tunnel to the certificate's org, so a
+  connector can never claim another org's tunnels. Within an org it trusts the
+  connector ID the connector presents: any holder of the org's certificate
+  can claim any connector ID in that org. This is a known limit until
+  per-connector handshake tokens. Any other certificate keeps raw pipes off,
+  with an error saying why.
+- **Limits.** A pipe is reset when it has been open for
+  `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` or has moved no bytes either way for
+  `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT`. The defaults, 4h and 15m, match
+  Traversal's.
+- **Readiness.** The pod is ready once a tunnel is up. Tunnels down for longer
+  than a minute no longer hold it unready, so a network that blocks tunnels
+  never blocks HTTP requests.
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRAVERSAL_RAW_PIPES` | `disabled` | `enabled` turns raw pipes on. |
+| `TRAVERSAL_CAPABILITY_ISSUER` | **required when enabled** | The `iss` claim capabilities must carry, `traversal-raw-tunnel/<environment>`. |
+| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_KEYS_FILE` | **one required when enabled** | PEM bundle (raw or base64) of P-256 `PUBLIC KEY` blocks, each naming its kid in a `Key-ID` header. The chart renders it; see below. |
+| `TRAVERSAL_RAW_PIPES_MAX` | `200` | Most pipes open at once, from 1 to 4096. Opens beyond it are refused with `capacity`. |
+| `TRAVERSAL_RAW_PIPES_MAX_LIFETIME` | `4h` | Longest a pipe stays open. `0s` turns the limit off. |
+| `TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT` | `15m` | Longest a pipe may move no bytes. `0s` turns the limit off. |
+| `TRAVERSAL_TUNNEL_COUNT` | `2` | W, tunnels per connector pod, from 1 to 8. `TRAVERSAL_TUNNELS_PER_REPLICA`, its earlier name, is read when it is unset. |
+| `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` the tunnels dial instead of `<controller host>:443`, such as a PrivateLink endpoint. SNI and the certificate check still use the controller's host. |
+
+Raw pipe metrics, all with closed label sets: `connector.raw_tunnels_active`,
+`connector.raw_pipes_active`, `connector.raw_opens_total` (`result`, `reason`),
+`connector.raw_pipe_closes_total` (`reason`), `connector.raw_pipe_bytes`
+(`direction`), `connector.raw_pipe_duration`, `connector.raw_resets_total`
+(`origin`), `connector.raw_drains_total`,
+`connector.raw_capability_verifications_total` (`result`),
+`connector.raw_capability_rejections_total` (`code`), and
+`connector.raw_key_loads_total`.
+
+#### Raw pipe signing keys
+
+**Traversal's install command (`rawPipes.capabilityKey`).** The connector setup
+page in Traversal writes the environment's issuer, key ID and public key into
+the `helm install` command, as it does the controller URL, so a connector for
+any Traversal environment installs with no chart release. Set, it replaces
+that environment's packaged entry in `rawPipes.trustedKeys`. A key rotation is
+then a `helm upgrade` with the next key in `rawPipes.capabilityKey.next`
+first; the chain of trust below removes that step.
+
+Each Traversal environment signs capabilities with its own AWS KMS key. The
+Helm chart packages every environment's public keys under
+`rawPipes.trustedKeys.<environment>`, and `rawPipes.environment` selects one
+set. Each key is a PEM `PUBLIC KEY` block, converted from the DER that KMS
+`GetPublicKey` returns, and its kid is the bare KMS key ID, not the key's ARN
+or an alias. The chart renders the selected keys into
+`TRAVERSAL_CAPABILITY_KEYS` and derives the issuer,
+`traversal-raw-tunnel/<environment>`. It refuses to render when the selected
+environment has no current key, when `next` has only one of `kid` and
+`publicKeyPEM`, when `next.kid` reuses `current.kid`, when a kid is an ARN or
+alias, or when a key is not a PEM `PUBLIC KEY` block. The connector refuses
+capabilities from any other issuer or key with `unknown_key` or
+`invalid_capability`.
+
+A rotation needs chart upgrades only, never a new connector binary:
+
+1. Create the next KMS key, ship its public key as `next` in a chart release,
+   and add it as the next key on the signer. Both sides now trust both keys.
+2. Once connectors run that release, switch the signer to the next key.
+3. After the longest capability lifetime, ship a chart release that promotes
+   the next key to `current` and drops the old one.
+
+Rotations reach a connector only through the chart's own `trustedKeys`, so do
+not override them in your values, and do not upgrade with
+`helm upgrade --reuse-values`, which keeps the previous release's keys; use
+`--reset-then-reuse-values` to keep your overrides and take the new keys. At
+startup the connector logs the key ids it trusts ("trusting capability keys")
+and counts them in `connector.raw_key_loads_total`, so you can confirm the
+fleet has the next key before the signer switches to it. Removing a key takes
+effect only as each connector rolls out the new chart, so revoke a compromised
+key on the signer first.
+
 ### Telemetry (OpenTelemetry)
 
 The connector emits OpenTelemetry traces, metrics, and logs. Telemetry is the

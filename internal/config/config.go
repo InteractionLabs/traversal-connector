@@ -163,7 +163,7 @@ type Config struct {
 	RedactionRulesFile *string
 	// RedactionReloadInterval controls local-file polling. Defaults to 10s.
 	RedactionReloadInterval time.Duration
-	// RawPipes configures raw pipes over Envoy reverse tunnels.
+	// RawPipes configures raw pipes over tunnels to Traversal's tunnel gateway.
 	RawPipes RawPipes
 }
 

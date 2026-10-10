@@ -23,6 +23,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
+	"github.com/InteractionLabs/traversal-connector/internal/buildinfo"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -486,6 +487,8 @@ func (cm *ConnectionManager) handleMessage(
 					MaxConcurrentRequests: int32(
 						min(cm.config.MaxConcurrentRequests, math.MaxInt32),
 					),
+					ConnectorVersion: buildinfo.Version(),
+					RawPipes:         cm.rawPipesStatus(),
 				},
 			},
 		})

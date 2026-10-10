@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/net/http2"
 
+	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
@@ -144,7 +145,7 @@ func TestRawPipeSetupFailureLeavesLegacyRunning(t *testing.T) {
 				t.Fatalf("the base config cannot hold tunnels: %v", err)
 			}
 			mutate(cfg)
-			if raw := startRawPipes(context.Background(), cfg, redact.NewRedactor()); raw != nil {
+			if raw := startRawPipes(context.Background(), cfg, discardStatus, redact.NewRedactor()); raw != nil {
 				t.Fatal("raw pipes started from a config that cannot run them")
 			}
 		})
@@ -233,7 +234,7 @@ func TestTunnelServesPipesAndReplacesOnDrain(t *testing.T) {
 	cfg := rawPipesConfig(t, ca, gw.ln.Addr().String())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	raw := startRawPipes(ctx, cfg, redact.NewRedactor())
+	raw := startRawPipes(ctx, cfg, discardStatus, redact.NewRedactor())
 	if raw == nil {
 		t.Fatal("raw pipes did not start")
 	}
@@ -331,3 +332,5 @@ func TestReadinessWithoutTunnels(t *testing.T) {
 type noServer struct{}
 
 func (noServer) ServeConn(net.Conn, func()) {}
+
+func discardStatus(func() *pb.RawPipesStatus) {}
