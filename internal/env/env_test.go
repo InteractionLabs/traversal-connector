@@ -195,6 +195,28 @@ func TestEnvLevelConstants(t *testing.T) {
 	}
 }
 
+func TestParseEnvInt(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		want    int
+		wantErr bool
+	}{
+		{"", 10, false},
+		{"42", 42, false},
+		{"-3", -3, false},
+		{"four", 0, true},
+		{"4.5", 0, true},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv("TEST_PARSE_INT", tt.value)
+			got, err := ParseEnvInt("TEST_PARSE_INT", 10)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("got %d, %v; want %d, error %v", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseEnvInt64(t *testing.T) {
 	for _, tt := range []struct {
 		value   string

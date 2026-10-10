@@ -92,9 +92,33 @@ func TestLoadRawPipes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !cfg.Enabled || cfg.MaxPipes != 50 || cfg.CapabilityKeys["prod-current"] == nil ||
-			cfg.Listen != rawPipesListen {
+		if !cfg.Enabled || cfg.MaxPipes != 50 || cfg.CapabilityKeys["prod-current"] == nil {
 			t.Fatalf("got %+v", cfg)
+		}
+	})
+	t.Run("tunnel count, with the older name as a fallback", func(t *testing.T) {
+		block, _ := publicKeyBlock(t, "prod-current")
+		t.Setenv("TRAVERSAL_RAW_PIPES", "enabled")
+		t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/prod")
+		t.Setenv("TRAVERSAL_CAPABILITY_KEYS", block)
+		for _, c := range []struct {
+			count, perReplica string
+			want              int
+		}{
+			{"", "", defaultTunnelCount},
+			{"", "3", 3},
+			{"4", "3", 4},
+		} {
+			t.Setenv("TRAVERSAL_TUNNEL_COUNT", c.count)
+			t.Setenv("TRAVERSAL_TUNNELS_PER_REPLICA", c.perReplica)
+			cfg, err := loadRawPipes()
+			if err != nil || cfg.TunnelCount != c.want {
+				t.Fatalf("%+v: got %d, %v", c, cfg.TunnelCount, err)
+			}
+		}
+		t.Setenv("TRAVERSAL_TUNNEL_COUNT", "9")
+		if _, err := loadRawPipes(); err == nil {
+			t.Fatal("accepted 9 tunnels")
 		}
 	})
 	t.Run("pipe limits default to 4h and 15m idle", func(t *testing.T) {
@@ -129,6 +153,8 @@ func TestLoadRawPipes(t *testing.T) {
 			"TRAVERSAL_RAW_PIPES_MAX":          "fifty",
 			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME": "4 hours",
 			"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "300", // no unit
+			"TRAVERSAL_TUNNEL_COUNT":           "four",
+			"TRAVERSAL_TUNNELS_PER_REPLICA":    "two",
 		} {
 			t.Run(key, func(t *testing.T) {
 				t.Setenv(key, value)

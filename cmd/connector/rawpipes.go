@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
-	"net"
 	"net/url"
 	"os"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
@@ -16,6 +18,8 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/pipes"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/router"
+	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
 )
 
 const (
@@ -24,27 +28,142 @@ const (
 	capabilitySubject = "integration-proxy"
 	// pipeDrainGrace is how long a stopping connector lets open pipes finish.
 	// It stays under the pod's termination grace period (30 s by default).
-	pipeDrainGrace = 25 * time.Second
+	pipeDrainGrace = 20 * time.Second
+	// drainSettle is how long pipes already launched toward a draining
+	// connector may still arrive after its tunnels get GOAWAY.
+	drainSettle = 2 * time.Second
 )
 
-// startRawPipes serves pipes on cfg.Listen until ctx is done. The returned
-// function drains: it refuses new pipes and waits up to pipeDrainGrace for
-// open ones to finish.
+// systemRoots are where container images keep their CA bundle. Tunnel
+// gateways use publicly trusted certificates unless TLS_CA_BASE64 adds a
+// private root.
+var systemRoots = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/cert.pem",
+}
+
+// rawPipes is the connector's raw pipe side: connector-core's pipe server and
+// the tunnels it serves pipes on.
+type rawPipes struct {
+	server  *pipes.Server
+	tunnels *tunnels.Manager
+	// stopTransport closes the tunnels, after the drain.
+	stopTransport context.CancelFunc
+	tunnelsDone   chan struct{}
+	drainOnce     sync.Once
+}
+
+// startRawPipes starts serving pipes and holding tunnels. It returns nil
+// when raw pipes cannot run on this connector, after saying why: raw pipes
+// never stop the legacy transport, so no raw pipe failure reaches main.
 func startRawPipes(
 	ctx context.Context,
-	cfg config.RawPipes,
-	connectorID string,
+	cfg *config.Config,
 	redactor *redact.Redactor,
-) (*pipes.Server, func(), error) {
+) *rawPipes {
+	tunnelCfg, err := tunnelConfig(cfg)
+	if err != nil {
+		slog.WarnContext(ctx, "raw pipes are enabled but this connector cannot hold tunnels; "+
+			"serving the legacy transport only", "reason", err.Error())
+		return nil
+	}
+	raw, err := setUpRawPipes(ctx, cfg, tunnelCfg, redactor)
+	if err != nil {
+		// Configuration the operator must fix, not a network that blocks
+		// tunnels: an error, though the legacy transport carries on.
+		slog.ErrorContext(ctx, "raw pipes are enabled but failed to start; "+
+			"serving the legacy transport only", "err", err)
+		return nil
+	}
+	return raw
+}
+
+// setUpRawPipes builds the pipe server and tunnels and starts them.
+func setUpRawPipes(
+	ctx context.Context,
+	cfg *config.Config,
+	tunnelCfg tunnels.Config,
+	redactor *redact.Redactor,
+) (*rawPipes, error) {
+	server, err := newPipeServer(cfg, redactor)
+	if err != nil {
+		return nil, fmt.Errorf("pipe server: %w", err)
+	}
+	tunnelCfg.Server = server
+	manager, err := tunnels.New(tunnelCfg)
+	if err != nil {
+		return nil, err
+	}
+	raw := runRawPipes(ctx, server, manager)
+	slog.InfoContext(ctx, "raw pipes enabled",
+		"max_pipes", cfg.RawPipes.MaxPipes,
+		"tunnels", cfg.RawPipes.TunnelCount,
+		"issuer", cfg.RawPipes.CapabilityIssuer,
+		"max_lifetime", cfg.RawPipes.MaxLifetime,
+		"idle_timeout", cfg.RawPipes.IdleTimeout)
+	return raw, nil
+}
+
+// runRawPipes holds the tunnels, serving pipes on each, until drained.
+func runRawPipes(ctx context.Context, server *pipes.Server, manager *tunnels.Manager) *rawPipes {
+	// The tunnels outlive ctx: pipes already on their way still arrive while
+	// the connector drains, and are refused with CONNECTOR_DRAINING.
+	transport, stopTransport := context.WithCancel(context.WithoutCancel(ctx))
+	r := &rawPipes{
+		server:        server,
+		tunnels:       manager,
+		stopTransport: stopTransport,
+		tunnelsDone:   make(chan struct{}),
+	}
+	go func() {
+		defer close(r.tunnelsDone)
+		if err := manager.Run(transport); err != nil {
+			slog.Error("tunnels stopped", "err", err)
+		}
+	}()
+	return r
+}
+
+// readiness is the raw pipe side's readiness gate.
+func (r *rawPipes) readiness() router.ReadinessGate {
+	return r.tunnels.Status
+}
+
+// drain stops this connector taking pipes without cutting the ones it
+// carries: stop redialing tunnels, a short settle for pipes already on their
+// way, then refusals with CONNECTOR_DRAINING, which send Traversal to another
+// connector replica, while open pipes finish; then the tunnels close. It
+// runs once; later calls wait for the first to finish.
+func (r *rawPipes) drain() { r.drainOnce.Do(r.drainNow) }
+
+func (r *rawPipes) drainNow() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := r.tunnels.Drain(ctx); err != nil {
+		slog.Warn("could not drain the tunnels", "err", err)
+	}
+	cancel()
+	time.Sleep(drainSettle)
+	r.server.Drain()
+	wait, cancelWait := context.WithTimeout(context.Background(), pipeDrainGrace)
+	defer cancelWait()
+	if err := r.server.Wait(wait); err != nil {
+		slog.Warn("drain grace over; ending open pipes", "open", r.server.Open())
+	}
+	r.stopTransport()
+	<-r.tunnelsDone
+}
+
+func newPipeServer(cfg *config.Config, redactor *redact.Redactor) (*pipes.Server, error) {
 	verifier, err := capability.NewVerifier(capability.VerifierConfig{
-		Issuer:          cfg.CapabilityIssuer,
-		Keys:            cfg.CapabilityKeys,
+		Issuer:          cfg.RawPipes.CapabilityIssuer,
+		Keys:            cfg.RawPipes.CapabilityKeys,
 		AllowedSubjects: []string{capabilitySubject},
 		// A capability claim added later must not force a customer upgrade.
 		AllowUnknownClaims: true,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	policyCfg := dialpolicy.Config{
 		RequiresInspection: func(host string, _ uint16) bool {
@@ -53,53 +172,75 @@ func startRawPipes(
 	}
 	// Raw pipes dial directly unless TRAVERSAL_RAW_PIPES_EGRESS_PROXY names a
 	// proxy. Hostnames through it are still refused as delegated.
-	if proxy := cfg.EgressProxy; proxy != nil {
+	if proxy := cfg.RawPipes.EgressProxy; proxy != nil {
 		policyCfg.Proxy = func(string, uint16) (*url.URL, error) { return proxy, nil }
 	}
 	policy, err := dialpolicy.New(policyCfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	server, err := pipes.New(pipes.Config{
-		ConnectorID: connectorID,
+	return pipes.New(pipes.Config{
+		ConnectorID: cfg.ConnectorID,
 		Verifier:    verifier,
 		Policy:      policy,
-		MaxPipes:    cfg.MaxPipes,
-		MaxLifetime: cfg.MaxLifetime,
-		IdleTimeout: cfg.IdleTimeout,
+		MaxPipes:    cfg.RawPipes.MaxPipes,
+		MaxLifetime: cfg.RawPipes.MaxLifetime,
+		IdleTimeout: cfg.RawPipes.IdleTimeout,
 		// Sorted, so the startup log reads the same on every pod.
-		TrustedKeyIDs: slices.Sorted(maps.Keys(cfg.CapabilityKeys)),
+		TrustedKeyIDs: slices.Sorted(maps.Keys(cfg.RawPipes.CapabilityKeys)),
 	})
+}
+
+// tunnelConfig derives the tunnel settings, or says why this connector
+// cannot hold tunnels.
+func tunnelConfig(cfg *config.Config) (tunnels.Config, error) {
+	if cfg.EgressProxyURL != nil {
+		// Tunnels through a customer's forward proxy are not supported yet.
+		return tunnels.Config{}, errors.New("EGRESS_PROXY_URL is set")
+	}
+	controller, err := url.Parse(cfg.TraversalControllerURL)
+	if err != nil || controller.Scheme != "https" || cfg.TLSCert == nil || cfg.TLSKey == nil {
+		return tunnels.Config{}, errors.New(
+			"tunnels need an https:// controller URL and a client certificate")
+	}
+	identity, err := tunnels.IdentityFromCertificate([]byte(*cfg.TLSCert), cfg.ConnectorID)
 	if err != nil {
-		return nil, nil, err
+		return tunnels.Config{}, err
 	}
-	ln, err := net.Listen("tcp", cfg.Listen)
+	roots, err := tunnelRoots(cfg.TLSCA)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen for pipes: %w", err)
+		return tunnels.Config{}, err
 	}
-	// The listener outlives ctx: pipes the tunnels already carry still arrive
-	// while Envoy drains, and are refused with CONNECTOR_DRAINING.
-	serveCtx, stopServing := context.WithCancel(context.WithoutCancel(ctx))
-	go func() {
-		if err := server.Serve(serveCtx, ln); err != nil {
-			// The pipe server cannot recover, and a pod that stays healthy
-			// without it answers every pipe with connection refused until
-			// someone restarts it. Exit, so the pod restarts instead.
-			slog.Error("pipe server stopped; exiting", "err", err)
-			os.Exit(1)
+	return tunnels.Config{
+		Identity: identity,
+		Tunnels:  cfg.RawPipes.TunnelCount,
+		// The tunnel gateway answers on the controller's host: Traversal's
+		// edge router sends tunnels to it by ALPN.
+		Endpoint:  strings.ToLower(controller.Hostname()),
+		ConnectTo: cfg.RawPipes.TunnelsConnectTo,
+		CertPEM:   []byte(*cfg.TLSCert),
+		KeyPEM:    []byte(*cfg.TLSKey),
+		CAPEM:     roots,
+	}, nil
+}
+
+// tunnelRoots is the system CA bundle plus any private root from
+// TLS_CA_BASE64, the same trust the legacy transport uses.
+func tunnelRoots(extra *string) ([]byte, error) {
+	var roots []byte
+	for _, path := range systemRoots {
+		if data, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed system paths
+			roots = append(roots, data...)
+			break
 		}
-	}()
-	slog.InfoContext(ctx, "raw pipes enabled",
-		"listen", cfg.Listen, "max_pipes", cfg.MaxPipes, "issuer", cfg.CapabilityIssuer,
-		"max_lifetime", cfg.MaxLifetime, "idle_timeout", cfg.IdleTimeout)
-	drain := func() {
-		server.Drain()
-		waitCtx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace)
-		defer cancel()
-		if err := server.Wait(waitCtx); err != nil {
-			slog.Warn("drain grace over; ending open pipes", "open", server.Open())
-		}
-		stopServing()
 	}
-	return server, drain, nil
+	if extra != nil {
+		roots = append(append(roots, '\n'), *extra...)
+	}
+	if len(roots) == 0 {
+		return nil, errors.New(
+			"no CA roots: the image has no system bundle and TLS_CA_BASE64 is unset",
+		)
+	}
+	return roots, nil
 }

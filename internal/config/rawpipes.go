@@ -13,6 +13,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/internal/tunnels"
 )
 
 const (
@@ -20,16 +21,13 @@ const (
 	// maxRawPipesMax keeps every pipe able to stall without stalling the
 	// rest: connector-core's 1 GiB connection window holds 4,096 stalled
 	// 256 KiB streams.
-	maxRawPipesMax = 4096
+	maxRawPipesMax     = 4096
+	defaultTunnelCount = 2
 	// Pipe limits (TRAVERSAL_RAW_PIPES_MAX_LIFETIME, TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT).
 	// They match the Traversal side's, so neither side ends a pipe the other
 	// would still keep.
 	defaultRawPipesMaxLifetime = 4 * time.Hour
 	defaultRawPipesIdleTimeout = 15 * time.Minute
-	// rawPipesListen is where connector-core accepts pipes from the
-	// connector's own Envoy. Loopback only: nothing outside the pod reaches
-	// it, and the dial policy refuses loopback, so no pipe reaches it either.
-	rawPipesListen = "127.0.0.1:9100"
 	// keyIDHeader names a public key's kid inside its PEM block.
 	keyIDHeader = "Key-ID"
 )
@@ -40,8 +38,6 @@ type RawPipes struct {
 	// Enabled is set by TRAVERSAL_RAW_PIPES=enabled. Disabled by default;
 	// TRAVERSAL_RAW_PIPES=disabled is the customer's opt-out once it is on.
 	Enabled bool
-	// Listen is the loopback address connector-core serves pipes on.
-	Listen string
 	// MaxPipes is the most pipes open at once (TRAVERSAL_RAW_PIPES_MAX).
 	MaxPipes int64
 	// MaxLifetime, if positive, aborts a pipe open this long
@@ -65,6 +61,15 @@ type RawPipes struct {
 	// Nil, the default, dials every destination directly. HTTPS_PROXY and
 	// EGRESS_PROXY_URL never apply: they route the connector's own traffic.
 	EgressProxy *url.URL
+	// TunnelCount is W, the tunnels this connector holds to Traversal's tunnel
+	// gateway (TRAVERSAL_TUNNEL_COUNT; the older TRAVERSAL_TUNNELS_PER_REPLICA
+	// is still read when it is unset).
+	TunnelCount int
+	// TunnelsConnectTo, if set, replaces the address the tunnels dial, the
+	// controller's host on port 443, with host:port, for PrivateLink or a
+	// fixed endpoint (TRAVERSAL_TUNNELS_CONNECT_TO). SNI and certificate
+	// checks still use the controller's host.
+	TunnelsConnectTo string
 }
 
 func loadRawPipes() (RawPipes, error) {
@@ -76,10 +81,25 @@ func loadRawPipes() (RawPipes, error) {
 		return RawPipes{}, fmt.Errorf(
 			"TRAVERSAL_RAW_PIPES must be enabled or disabled, got %q", mode)
 	}
-	cfg := RawPipes{Enabled: true, Listen: rawPipesListen}
+	cfg := RawPipes{
+		Enabled:          true,
+		TunnelsConnectTo: env.GetEnvString("TRAVERSAL_TUNNELS_CONNECT_TO", ""),
+	}
 	var err error
 	// A value that does not parse fails startup: a silent default would
-	// change pipe limits without anyone noticing.
+	// change pipe or tunnel limits without anyone noticing.
+	if cfg.TunnelCount, err = loadTunnelCount(); err != nil {
+		return RawPipes{}, err
+	}
+	if cfg.TunnelCount < 1 || cfg.TunnelCount > tunnels.MaxTunnels {
+		return RawPipes{}, fmt.Errorf(
+			"TRAVERSAL_TUNNEL_COUNT must be between 1 and %d", tunnels.MaxTunnels)
+	}
+	if cfg.TunnelsConnectTo != "" {
+		if err := validateConnectTo("TRAVERSAL_TUNNELS_CONNECT_TO", cfg.TunnelsConnectTo); err != nil {
+			return RawPipes{}, err
+		}
+	}
 	if cfg.MaxPipes, err = env.ParseEnvInt64(
 		"TRAVERSAL_RAW_PIPES_MAX", defaultRawPipesMax); err != nil {
 		return RawPipes{}, err
@@ -140,6 +160,16 @@ func parseEgressProxy(raw string) (*url.URL, error) {
 		}
 	}
 	return u, nil
+}
+
+// loadTunnelCount reads TRAVERSAL_TUNNEL_COUNT, falling back to the older
+// TRAVERSAL_TUNNELS_PER_REPLICA when it is unset.
+func loadTunnelCount() (int, error) {
+	perReplica, err := env.ParseEnvInt("TRAVERSAL_TUNNELS_PER_REPLICA", defaultTunnelCount)
+	if err != nil {
+		return 0, err
+	}
+	return env.ParseEnvInt("TRAVERSAL_TUNNEL_COUNT", perReplica)
 }
 
 func loadCapabilityKeys() (map[string]*ecdsa.PublicKey, error) {

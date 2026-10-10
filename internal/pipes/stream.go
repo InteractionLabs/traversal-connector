@@ -136,7 +136,17 @@ func (s *h2server) serve(ctx context.Context, ln net.Listener) error {
 }
 
 // serveConn serves pipes on one connection until it closes.
-func (s *h2server) serveConn(nc net.Conn) {
+func (s *h2server) serveConn(nc net.Conn) { s.serveConnNotify(nc, nil) }
+
+// DrainMethod is the request a draining tunnel gateway sends on a tunnel:
+// the connector dials a replacement at once, and keeps serving pipes on this
+// tunnel until the gateway closes it.
+const DrainMethod = "TRAVERSAL-DRAIN"
+
+// serveConnNotify is serveConn, calling drained once if the peer sends a
+// DrainMethod request.
+func (s *h2server) serveConnNotify(nc net.Conn, drained func()) {
+	var drainOnce sync.Once
 	defer func() { _ = nc.Close() }()
 	// gone is closed once the connection is: a stream whose body read fails
 	// after it was lost the tunnel, not reset by the caller.
@@ -146,6 +156,13 @@ func (s *h2server) serveConn(nc net.Conn) {
 	conn := &watchedConn{Conn: nc, closed: closed}
 	s.h2.ServeConn(conn, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == DrainMethod {
+				if drained != nil {
+					drainOnce.Do(drained)
+				}
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			st := newH2Stream(w, r, gone)
 			s.started()
 			defer s.done()
