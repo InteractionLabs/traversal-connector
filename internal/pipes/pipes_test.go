@@ -1,0 +1,876 @@
+package pipes
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"golang.org/x/net/http2"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
+)
+
+const (
+	testConnector = "11111111-2222-4333-8444-555555555555"
+	testIssuer    = "traversal-raw-tunnel/test"
+	testKID       = "test-current"
+	testSubject   = "integration-proxy"
+	// publicAddr is what test destinations resolve to. The policy checks it;
+	// the test dialer then connects to the local destination instead.
+	publicAddr = "198.51.100.7"
+)
+
+var testKey = capabilitytest.Key("traversal-connector pipes test key")
+
+// harness runs a Server on loopback with a destination listener the dial
+// policy reaches whatever address it checked.
+type harness struct {
+	t        *testing.T
+	server   *Server
+	addr     string
+	dest     net.Listener
+	client   *http.Client
+	resolved map[string]string // host → address the fake resolver returns
+
+	mu    sync.Mutex
+	conns []net.Conn // the caller's connections to the server
+}
+
+type harnessConfig struct {
+	maxPipes    int64
+	inspect     func(string, uint16) bool
+	maxLifetime time.Duration
+	idleTimeout time.Duration
+	meters      metric.MeterProvider
+	// dial, if set, runs before every destination dial; an error fails it.
+	dial func(ctx context.Context) error
+}
+
+func newHarness(t *testing.T, hc harnessConfig) *harness {
+	t.Helper()
+	if hc.maxPipes == 0 {
+		hc.maxPipes = 16
+	}
+	verifier, err := capability.NewVerifier(capability.VerifierConfig{
+		Issuer:             testIssuer,
+		Keys:               map[string]*ecdsa.PublicKey{testKID: &testKey.PublicKey},
+		AllowedSubjects:    []string{testSubject},
+		AllowUnknownClaims: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dest.Close() })
+	h := &harness{t: t, dest: dest, resolved: map[string]string{}}
+	policy, err := dialpolicy.New(dialpolicy.Config{
+		RequiresInspection: hc.inspect,
+		Proxy:              func(string, uint16) (*url.URL, error) { return nil, nil },
+		LookupNetIP: func(_ context.Context, _, host string) ([]netip.Addr, error) {
+			addr, ok := h.resolved[strings.TrimSuffix(host, ".")]
+			if !ok {
+				addr = publicAddr
+			}
+			return []netip.Addr{netip.MustParseAddr(addr)}, nil
+		},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			if hc.dial != nil {
+				if err := hc.dial(ctx); err != nil {
+					return nil, err
+				}
+				// The hook decided the dial succeeds, whatever ctx says now.
+				ctx = context.WithoutCancel(ctx)
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, dest.Addr().String())
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.server, err = New(Config{
+		ConnectorID: testConnector,
+		Verifier:    verifier,
+		Policy:      policy,
+		MaxPipes:    hc.maxPipes,
+		MaxLifetime: hc.maxLifetime,
+		IdleTimeout: hc.idleTimeout,
+		// One key, so key-load counts are known.
+		TrustedKeyIDs: []string{testKID},
+		MeterProvider: hc.meters,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = h.server.Serve(ctx, ln) }()
+	h.addr = ln.Addr().String()
+	h.client = &http.Client{Transport: &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			conn, err := d.DialContext(ctx, network, h.addr)
+			if err == nil {
+				h.mu.Lock()
+				h.conns = append(h.conns, conn)
+				h.mu.Unlock()
+			}
+			return conn, err
+		},
+	}}
+	return h
+}
+
+// capabilityFor signs a capability for host:port on this connector.
+func capabilityFor(
+	t *testing.T,
+	host string,
+	port uint16,
+	mutate ...func(*capability.Claims),
+) string {
+	t.Helper()
+	now := time.Now()
+	claims := capability.Claims{
+		Issuer:         testIssuer,
+		Audience:       capability.Audience,
+		Subject:        testSubject,
+		OrganizationID: "org-1",
+		IntegrationID:  "integration-1",
+		ConnectorID:    testConnector,
+		Host:           host,
+		Port:           port,
+		Mode:           capability.ModePassthrough,
+		ConsumerID:     "test",
+		TrafficClass:   "standard",
+		SessionID:      "session-1",
+		JTI:            now.Format(time.RFC3339Nano) + host,
+		IssuedAt:       now.Unix(),
+		ExpiresAt:      now.Add(2 * time.Minute).Unix(),
+	}
+	for _, m := range mutate {
+		m(&claims)
+	}
+	token, err := capabilitytest.Sign(testKey, testKID, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// pipe is an open CONNECT stream as a caller sees it.
+type pipe struct {
+	resp *http.Response
+	body *io.PipeWriter
+}
+
+// connect opens a CONNECT to authority. It returns the response even when
+// the open is refused.
+func (h *harness) connect(authority, token string) (*pipe, error) {
+	body, bodyWriter := io.Pipe()
+	req, err := http.NewRequest(http.MethodConnect, "http://"+authority, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = authority
+	if token != "" {
+		req.Header.Set(HeaderCapability, token)
+	}
+	resp, err := h.client.Transport.RoundTrip(req) //nolint:bodyclose // returned to the caller
+	if err != nil {
+		_ = bodyWriter.Close()
+		return nil, err
+	}
+	return &pipe{resp: resp, body: bodyWriter}, nil
+}
+
+func (h *harness) open(host string, port uint16) *pipe {
+	h.t.Helper()
+	authority := capability.CanonicalAuthority(host, port)
+	p, err := h.connect(authority, capabilityFor(h.t, host, port))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if p.resp.StatusCode != http.StatusOK {
+		h.t.Fatalf("open %s: %d %s", authority, p.resp.StatusCode, p.resp.Header.Get(HeaderReason))
+	}
+	return p
+}
+
+// accept returns the next connection the destination receives.
+func (h *harness) accept() *net.TCPConn {
+	h.t.Helper()
+	conn, err := h.dest.Accept()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return conn.(*net.TCPConn)
+}
+
+func TestHalfCloseBothWays(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+
+	if _, err := p.body.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.body.Close() // END_STREAM: the destination sees FIN.
+	got, err := io.ReadAll(dst)
+	if err != nil || string(got) != "hello" {
+		t.Fatalf("destination read %q, %v", got, err)
+	}
+	// The destination can still answer after the caller's FIN.
+	if _, err := dst.Write([]byte("bye")); err != nil {
+		t.Fatal(err)
+	}
+	_ = dst.CloseWrite()
+	reply, err := io.ReadAll(p.resp.Body)
+	if err != nil || string(reply) != "bye" {
+		t.Fatalf("caller read %q, %v", reply, err)
+	}
+}
+
+// The destination writes and closes while the caller is still open. Every
+// byte must arrive, then a clean end, not a reset that drops queued bytes.
+func TestDestinationClosesFirst(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 4<<16) // 4 MiB
+	go func() {
+		_, _ = dst.Write(payload)
+		_ = dst.CloseWrite()
+	}()
+	got, err := io.ReadAll(p.resp.Body)
+	if err != nil {
+		t.Fatalf("caller read %d bytes then %v", len(got), err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("caller read %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+// A known limit: once the destination has finished, the stock HTTP/2 server
+// can end the stream only by returning, so bytes the caller sends after the
+// destination's FIN never reach it. TCP would carry them; the protocols
+// raw pipes carry (HTTP, TLS, databases) don't send them. This pins the
+// behavior so a change to it is deliberate (raw-pipes-e2e:
+// known_limit:send_after_destination_closes).
+func TestSendAfterDestinationClosesIsDropped(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_, _ = dst.Write([]byte("done"))
+	_ = dst.CloseWrite()
+	got, err := io.ReadAll(p.resp.Body)
+	if err != nil || string(got) != "done" {
+		t.Fatalf("caller read %q, %v", got, err)
+	}
+	_, _ = p.body.Write([]byte("late"))
+	_ = p.body.Close()
+	_ = dst.SetReadDeadline(time.Now().Add(2 * time.Second))
+	late, _ := io.ReadAll(dst)
+	if len(late) != 0 {
+		t.Fatalf("destination read %q after its FIN; the known limit changed, update "+
+			"the README and the e2e known_limit check", late)
+	}
+}
+
+func TestDestinationResetReachesCaller(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	_, _ = dst.Write([]byte("partial"))
+	_ = dst.SetLinger(0)
+	_ = dst.Close()
+	got, err := io.ReadAll(p.resp.Body)
+	if err == nil {
+		t.Fatalf("caller saw a clean end after %q; a reset must not look like a close", got)
+	}
+}
+
+func TestCallerResetReachesDestination(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = p.body.CloseWithError(errors.New("caller gave up")) // RST_STREAM
+	_ = dst.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err := io.ReadAll(dst)
+	if err == nil {
+		t.Fatal("destination saw a clean FIN after the caller reset")
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("destination never saw the caller's reset")
+	}
+}
+
+// A destination that stops reading must stop the caller without stalling
+// other pipes on the same connection.
+func TestStalledPipeDoesNotBlockOthers(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	stalled := h.open("stalled.internal", 5432)
+	stalledDst := h.accept()
+	defer func() { _ = stalledDst.Close() }()
+	go func() {
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := stalled.body.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond) // let the stalled pipe fill its window
+
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	if _, err := p.body.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	_ = dst.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(dst, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("second pipe stalled behind the first: %q, %v", buf, err)
+	}
+	_ = stalled.body.CloseWithError(errors.New("done"))
+}
+
+func TestRefusals(t *testing.T) {
+	tests := []struct {
+		name      string
+		authority string
+		token     func(t *testing.T) string
+		setup     func(h *harness)
+		status    int
+		reason    string
+	}{
+		{
+			name:      "missing capability",
+			authority: "db.internal:5432",
+			token:     func(*testing.T) string { return "" },
+			status:    401,
+			reason:    "invalid_capability",
+		},
+		{
+			name:      "capability for another destination",
+			authority: "db.internal:5432",
+			token:     func(t *testing.T) string { return capabilityFor(t, "other.internal", 5432) },
+			status:    403,
+			reason:    "wrong_destination",
+		},
+		{
+			name:      "capability for another connector",
+			authority: "db.internal:5432",
+			token: func(t *testing.T) string {
+				return capabilityFor(t, "db.internal", 5432, func(c *capability.Claims) {
+					c.ConnectorID = "99999999-2222-4333-8444-555555555555"
+				})
+			},
+			status: 403,
+			reason: "wrong_connector",
+		},
+		{
+			name:      "expired capability",
+			authority: "db.internal:5432",
+			token: func(t *testing.T) string {
+				return capabilityFor(t, "db.internal", 5432, func(c *capability.Claims) {
+					c.IssuedAt -= 600
+					c.ExpiresAt -= 600
+				})
+			},
+			status: 401,
+			reason: "capability_expired",
+		},
+		{
+			name:      "non-canonical port",
+			authority: "db.internal:05432",
+			token:     func(t *testing.T) string { return capabilityFor(t, "db.internal", 5432) },
+			status:    400,
+			reason:    "protocol_error",
+		},
+		{
+			name:      "name resolving to loopback",
+			authority: "sneaky.internal:5432",
+			token:     func(t *testing.T) string { return capabilityFor(t, "sneaky.internal", 5432) },
+			setup:     func(h *harness) { h.resolved["sneaky.internal"] = "127.0.0.1" },
+			status:    403,
+			reason:    "forbidden_address",
+		},
+		{
+			name:      "metadata service",
+			authority: "169.254.169.254:80",
+			token:     func(t *testing.T) string { return capabilityFor(t, "169.254.169.254", 80) },
+			status:    403,
+			reason:    "forbidden_address",
+		},
+		{
+			name:      "redacted host",
+			authority: "redacted.internal:443",
+			token:     func(t *testing.T) string { return capabilityFor(t, "redacted.internal", 443) },
+			status:    403,
+			reason:    "inspection_required",
+		},
+		{
+			name:      "draining",
+			authority: "db.internal:5432",
+			token:     func(t *testing.T) string { return capabilityFor(t, "db.internal", 5432) },
+			setup:     func(h *harness) { h.server.Drain() },
+			status:    503,
+			reason:    "connector_draining",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, harnessConfig{
+				inspect: func(host string, _ uint16) bool { return host == "redacted.internal" },
+			})
+			if tt.setup != nil {
+				tt.setup(h)
+			}
+			p, err := h.connect(tt.authority, tt.token(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = p.resp.Body.Close() }()
+			if p.resp.StatusCode != tt.status || p.resp.Header.Get(HeaderReason) != tt.reason {
+				t.Fatalf("got %d %q, want %d %q", p.resp.StatusCode,
+					p.resp.Header.Get(HeaderReason), tt.status, tt.reason)
+			}
+		})
+	}
+}
+
+func TestCapacity(t *testing.T) {
+	h := newHarness(t, harnessConfig{maxPipes: 1})
+	first := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+
+	p, err := h.connect("db.internal:5432", capabilityFor(t, "db.internal", 5432))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.resp.StatusCode != 503 || p.resp.Header.Get(HeaderReason) != "capacity" {
+		t.Fatalf("over the cap: %d %q", p.resp.StatusCode, p.resp.Header.Get(HeaderReason))
+	}
+
+	// Closing the first pipe frees its slot.
+	_ = first.body.Close()
+	_ = dst.CloseWrite()
+	_, _ = io.ReadAll(first.resp.Body)
+	deadline := time.Now().Add(5 * time.Second)
+	for h.server.Open() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.open("db.internal", 5432)
+}
+
+// One capability opens at most MaxOpensPerToken pipes on this connector.
+func TestCapabilityOpenLimit(t *testing.T) {
+	h := newHarness(t, harnessConfig{maxPipes: capability.MaxOpensPerToken + 8})
+	token := capabilityFor(t, "db.internal", 5432)
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := h.dest.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	statuses := make(chan string, capability.MaxOpensPerToken+1)
+	for range capability.MaxOpensPerToken + 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p, err := h.connect("db.internal:5432", token)
+			if err != nil {
+				statuses <- err.Error()
+				return
+			}
+			statuses <- p.resp.Header.Get(HeaderReason)
+			_ = p.body.Close()
+			_ = p.resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+	close(statuses)
+	exhausted := 0
+	for s := range statuses {
+		if s == "capability_exhausted" {
+			exhausted++
+		}
+	}
+	if exhausted != 1 {
+		t.Fatalf("%d opens refused as exhausted, want exactly 1", exhausted)
+	}
+}
+
+func TestMaxLifetimeAbortsPipe(t *testing.T) {
+	h := newHarness(t, harnessConfig{maxLifetime: 200 * time.Millisecond})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_, err := io.ReadAll(p.resp.Body)
+	if err == nil {
+		t.Fatal("a pipe cut at its lifetime cap looked like a clean close")
+	}
+}
+
+func TestIdleTimeoutAbortsQuietPipe(t *testing.T) {
+	h := newHarness(t, harnessConfig{idleTimeout: 200 * time.Millisecond})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	start := time.Now()
+	_, err := io.ReadAll(p.resp.Body)
+	if err == nil {
+		t.Fatal("a pipe cut for idling looked like a clean close")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("an idle pipe lasted %s", waited)
+	}
+}
+
+// Bytes in either direction keep a pipe alive past its idle timeout.
+func TestIdleTimeoutSparesBusyPipe(t *testing.T) {
+	const idle = 300 * time.Millisecond
+	h := newHarness(t, harnessConfig{idleTimeout: idle})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	buf := make([]byte, 1)
+	for i := range 8 { // 8 × idle/3 spans well over the timeout
+		time.Sleep(idle / 3)
+		if i%2 == 0 {
+			if _, err := p.body.Write([]byte("c")); err != nil {
+				t.Fatalf("caller write %d: %v", i, err)
+			}
+			if _, err := io.ReadFull(dst, buf); err != nil {
+				t.Fatalf("destination read %d: %v", i, err)
+			}
+		} else {
+			if _, err := dst.Write([]byte("d")); err != nil {
+				t.Fatalf("destination write %d: %v", i, err)
+			}
+			if _, err := io.ReadFull(p.resp.Body, buf); err != nil {
+				t.Fatalf("caller read %d: %v", i, err)
+			}
+		}
+	}
+}
+
+// The destination ends its side and then fails while the caller is still
+// sending. The caller must be told, as a reset, rather than keep writing into
+// a pipe whose bytes go nowhere.
+func TestDestinationFailureAfterItsFINResetsCaller(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	_, _ = dst.Write([]byte("done"))
+	_ = dst.Close() // FIN; writes that follow get a TCP reset
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(p.resp.Body, got); err != nil || string(got) != "done" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	chunk := bytes.Repeat([]byte("x"), 32<<10)
+	for time.Now().Before(deadline) {
+		if _, err := p.body.Write(chunk); err != nil {
+			return // the stream was reset
+		}
+	}
+	t.Fatal("the caller kept writing for 10 s after the destination failed")
+}
+
+// waitOpen waits for the server's open pipe count to reach want.
+func (h *harness) waitOpen(want int64) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.server.Open() != want {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("%d pipes open, want %d", h.server.Open(), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A caller reset after its END_STREAM must still reach the destination: no
+// one is reading the stream then, so the reset alone has to end the pipe.
+func TestCallerResetAfterEndStreamReachesDestination(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = p.body.Close() // END_STREAM
+	_ = dst.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(dst); err != nil {
+		t.Fatalf("destination did not see the caller's FIN: %v", err)
+	}
+	_ = dst.SetReadDeadline(time.Time{})
+	_ = p.resp.Body.Close() // the response is not over: RST_STREAM(CANCEL)
+
+	h.waitOpen(0)
+	// After a TCP reset the very first write fails; after a FIN it would
+	// succeed and only a later one fail.
+	time.Sleep(50 * time.Millisecond) // let the RST cross loopback
+	if _, err := dst.Write([]byte("still here")); !errors.Is(err, syscall.ECONNRESET) &&
+		!errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("destination write after the caller's reset: %v, want a TCP reset", err)
+	}
+}
+
+// A caller reset while the destination is not reading must free the pipe
+// even though the copy toward the destination is blocked.
+func TestCallerResetWhileDestinationStalledFreesPipe(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = dst.SetReadBuffer(4 << 10)
+	go func() {
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := p.body.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond) // fill the destination's socket buffers
+	_ = p.resp.Body.Close()            // RST_STREAM(CANCEL)
+	_ = p.body.CloseWithError(errors.New("caller gave up"))
+	h.waitOpen(0)
+}
+
+// Losing the tunnel's connection is audited as a lost tunnel, not as the
+// caller giving up.
+func TestConnectionLossIsTunnelLost(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	h := newHarness(t, harnessConfig{meters: provider})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	_ = p // the caller never reads, so the server's writes block on its window
+	go func() {
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := dst.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	h.mu.Lock()
+	for _, c := range h.conns {
+		_ = c.Close()
+	}
+	h.mu.Unlock()
+	h.waitOpen(0)
+
+	var rm metricdata.ResourceMetrics
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		if sum(t, rm, telemetry.MetricRawPipeClosesTotal) == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	lost := attribute.String(attrReason, "tunnel_lost")
+	if got := sum(t, rm, telemetry.MetricRawPipeClosesTotal, lost); got != 1 {
+		t.Fatalf("%d pipes closed as tunnel_lost, want 1 (closes: %d)",
+			got, sum(t, rm, telemetry.MetricRawPipeClosesTotal))
+	}
+}
+
+// A caller that gives up while its destination is still being dialed stops
+// the dial, rather than leaving it to run out its timeout.
+func TestAbandonedOpenStopsDialing(t *testing.T) {
+	dialing, stopped := make(chan struct{}), make(chan struct{})
+	h := newHarness(t, harnessConfig{dial: func(ctx context.Context) error {
+		close(dialing)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "http://db.internal:5432",
+		http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "db.internal:5432"
+	req.Header.Set(HeaderCapability, capabilityFor(t, "db.internal", 5432))
+	go func() {
+		if resp, err := h.client.Transport.RoundTrip(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-dialing
+	cancel() // RST_STREAM(CANCEL)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the dial kept going after the caller reset the open")
+	}
+	h.waitOpen(0)
+}
+
+// logBuffer collects JSON log lines; slog may write from several goroutines.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// find waits for the first line whose msg is msg and that has every field
+// in want, and returns it.
+func (b *logBuffer) find(t *testing.T, msg string, want map[string]any) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b.mu.Lock()
+		lines := strings.Split(b.buf.String(), "\n")
+		b.mu.Unlock()
+	lines:
+		for _, line := range lines {
+			var rec map[string]any
+			if json.Unmarshal([]byte(line), &rec) != nil || rec["msg"] != msg {
+				continue
+			}
+			for k, v := range want {
+				if rec[k] != v {
+					continue lines
+				}
+			}
+			return rec
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q line with %v in:\n%s", msg, want, strings.Join(lines, "\n"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// captureLogs sends the default logger to a buffer for the test.
+func captureLogs(t *testing.T) *logBuffer {
+	t.Helper()
+	b := &logBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(b, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return b
+}
+
+// The audit line records who asked: the consumer and traffic class too.
+func TestAuditLineNamesConsumer(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{})
+	p := h.open("db.internal", 5432)
+	dst := h.accept()
+	_ = p.body.Close()
+	_, _ = io.ReadAll(dst)
+	_ = dst.Close()
+	_, _ = io.ReadAll(p.resp.Body)
+	logs.find(t, "pipe", map[string]any{
+		"outcome": "completed", "consumer_id": "test", "traffic_class": "standard",
+	})
+}
+
+// A capacity refusal is for a verified capability, so it is logged with it.
+func TestCapacityRefusalLogsCapability(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{maxPipes: 1})
+	h.open("db.internal", 5432)
+	dst := h.accept()
+	defer func() { _ = dst.Close() }()
+	token := capabilityFor(t, "db.internal", 5432, func(c *capability.Claims) {
+		c.JTI = "refused-jti"
+	})
+	p, err := h.connect("db.internal:5432", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p.resp.Body.Close()
+	logs.find(t, "pipe refused", map[string]any{
+		"reason": "capacity", "jti": "refused-jti", "consumer_id": "test",
+	})
+}
+
+// A destination dialed for a caller who reset meanwhile is still audited,
+// though the pipe never opened.
+func TestDialedButUnansweredPipeIsAudited(t *testing.T) {
+	logs := captureLogs(t)
+	h := newHarness(t, harnessConfig{dial: func(ctx context.Context) error {
+		// The dial completes just as the caller's reset arrives.
+		<-ctx.Done()
+		return nil
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, "http://db.internal:5432",
+		http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "db.internal:5432"
+	req.Header.Set(HeaderCapability, capabilityFor(t, "db.internal", 5432))
+	go func() {
+		if resp, err := h.client.Transport.RoundTrip(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	go func() {
+		if conn, err := h.dest.Accept(); err == nil {
+			_ = conn.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	logs.find(t, "pipe", map[string]any{"outcome": "caller_aborted", "bytes_sent": 0.0})
+	h.waitOpen(0)
+}

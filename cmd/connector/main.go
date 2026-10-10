@@ -224,6 +224,15 @@ func main() {
 		return
 	}
 
+	if cfg.RawPipes.Enabled {
+		_, drainPipes, pipesErr := startRawPipes(ctx, cfg.RawPipes, cfg.ConnectorID, redactor)
+		if pipesErr != nil {
+			slog.Error("failed to start raw pipes", "err", pipesErr)
+			return
+		}
+		defer drainPipes()
+	}
+
 	slog.InfoContext(ctx, "traversal connector service starting",
 		"controller_logical_url", cfg.TraversalControllerURL,
 		"controller_logical_authority", logicalAuthority(cfg.TraversalControllerURL),

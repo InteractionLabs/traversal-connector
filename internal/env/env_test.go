@@ -194,3 +194,47 @@ func TestEnvLevelConstants(t *testing.T) {
 			EnvLevelDevelopment, "development")
 	}
 }
+
+func TestParseEnvInt64(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		want    int64
+		wantErr bool
+	}{
+		{"", 10, false},
+		{"42", 42, false},
+		{"-3", -3, false},
+		{"forty", 0, true},
+		{"4.5", 0, true},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv("TEST_PARSE_INT64", tt.value)
+			got, err := ParseEnvInt64("TEST_PARSE_INT64", 10)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("got %d, %v; want %d, error %v", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseEnvDuration(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", time.Minute, false},
+		{"0", 0, false},
+		{"30m", 30 * time.Minute, false},
+		{"300", 0, true}, // no unit
+		{"soon", 0, true},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Setenv("TEST_PARSE_DURATION", tt.value)
+			got, err := ParseEnvDuration("TEST_PARSE_DURATION", time.Minute)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("got %s, %v; want %s, error %v", got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
