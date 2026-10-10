@@ -109,6 +109,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	return s.h2.serve(ctx, ln)
 }
 
+// ServeConn serves pipes on one connection, such as a tunnel the connector
+// dialed, until it closes; pipes on it end with it. drained, if set, is
+// called once if the peer asks for a replacement connection (DrainMethod).
+func (s *Server) ServeConn(nc net.Conn, drained func()) {
+	s.h2.serveConnNotify(nc, drained)
+}
+
 // Drain refuses every later open with CONNECTOR_DRAINING. Open pipes continue.
 func (s *Server) Drain() {
 	if s.draining.CompareAndSwap(false, true) {
