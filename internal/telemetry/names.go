@@ -25,4 +25,5 @@ const (
 	MetricResponseContentEncodingTotal     = "connector.response_content_encoding_total"
 	MetricResponseRefusalsTotal            = "connector.response_refusals_total"
 	MetricDecodedResponseBodySize          = "connector.decoded_response_body_size"
+	MetricOversizedResponsesTotal          = "connector.oversized_responses_total"
 )

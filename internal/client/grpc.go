@@ -17,8 +17,10 @@ import (
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -43,6 +45,15 @@ const (
 	// field tags, and length prefixes.
 	tunnelMessageOverheadBytes = 2 * 1024 * 1024
 	bytesPerMB                 = 1024 * 1024
+	// tunnelEnvelopeMarginBytes keeps the effective limit slightly below the
+	// gRPC envelope maximum rather than exactly on it.
+	tunnelEnvelopeMarginBytes = 1024 * 1024
+	// tunnelMessageProtocolMaxBytes is the hard ceiling for a single tunnel
+	// message. gRPC frames each message with a uint32 length prefix, and
+	// ConnectRPC fails a larger message with an opaque envelope error after it
+	// has been marshaled. Every configured limit is clamped to this value so
+	// an oversized message is rejected up front instead.
+	tunnelMessageProtocolMaxBytes int64 = math.MaxUint32 - tunnelEnvelopeMarginBytes
 )
 
 // NewClient creates a ConnectRPC client for the Traversal control plane.
@@ -62,10 +73,7 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 	opts := []connect.ClientOption{
 		connect.WithGRPC(),
 		connect.WithReadMaxBytes(tunnelMessageMaxBytes(cfg.MaxRequestBodySizeMB)),
-		connect.WithSendMaxBytes(tunnelMessageMaxBytes(max(
-			cfg.MaxResponseBodySizeMB,
-			cfg.MaxDecodedResponseBodySizeMB,
-		))),
+		connect.WithSendMaxBytes(tunnelSendMaxBytes(cfg)),
 		connect.WithInterceptors(
 			newHeaderInterceptor(connectorIDHeader, cfg.ConnectorID),
 		),
@@ -78,18 +86,38 @@ func NewClient(cfg *config.Config) (connectorconnect.ConnectorServiceClient, err
 	), nil
 }
 
-// tunnelMessageMaxBytes converts a configured HTTP body limit to a limit for
-// the complete protobuf tunnel message. Non-positive body limits retain their
-// existing unlimited behavior; ConnectRPC represents that with zero.
-func tunnelMessageMaxBytes(bodySizeMB int64) int {
-	if bodySizeMB <= 0 {
-		return 0
-	}
+// tunnelSendMaxBytes returns the effective limit for a message the connector
+// sends to the controller. A response body may be forwarded after decoding, so
+// the larger of the two response body limits applies.
+func tunnelSendMaxBytes(cfg *config.Config) int {
+	return tunnelMessageMaxBytes(max(
+		cfg.MaxResponseBodySizeMB,
+		cfg.MaxDecodedResponseBodySizeMB,
+	))
+}
 
-	if bodySizeMB > int64((math.MaxInt-tunnelMessageOverheadBytes)/bytesPerMB) {
-		return math.MaxInt
+// tunnelMessageMaxBytes converts a configured HTTP body limit to a limit for
+// the complete protobuf tunnel message. The result is always positive and
+// never exceeds tunnelMessageProtocolMaxBytes: a non-positive body limit means
+// unlimited up to the protocol maximum, and a limit larger than the protocol
+// allows is clamped to it.
+func tunnelMessageMaxBytes(bodySizeMB int64) int {
+	// math.MaxInt bounds the ceiling on platforms where int is 32 bits.
+	ceiling := min(tunnelMessageProtocolMaxBytes, int64(math.MaxInt))
+	if bodySizeMB <= 0 ||
+		bodySizeMB > (ceiling-tunnelMessageOverheadBytes)/bytesPerMB {
+		return int(ceiling)
 	}
-	return int(bodySizeMB)*bytesPerMB + tunnelMessageOverheadBytes
+	return int(bodySizeMB*bytesPerMB + tunnelMessageOverheadBytes)
+}
+
+// effectiveSendMaxBytes returns the tunnel send limit the ConnectRPC client
+// enforces. A manager built without one falls back to the protocol maximum.
+func (cm *ConnectionManager) effectiveSendMaxBytes() int {
+	if cm.sendMaxBytes > 0 {
+		return cm.sendMaxBytes
+	}
+	return tunnelMessageMaxBytes(0)
 }
 
 // headerInterceptor is a ConnectRPC interceptor that stamps a fixed header
@@ -392,6 +420,42 @@ func (cm *ConnectionManager) receiveLoop(
 	}
 }
 
+// sendOversizedResponseError reports an upstream response too large for a
+// tunnel message to the controller as an UPSTREAM_ERROR for the same request.
+func (cm *ConnectionManager) sendOversizedResponseError(
+	ctx context.Context,
+	stream streamSender,
+	span trace.Span,
+	requestID, targetHost string,
+	size, limit int,
+) error {
+	err := fmt.Errorf(
+		"upstream response (%d bytes) exceeds tunnel message limit %d bytes",
+		size, limit,
+	)
+	safeErr := telemetry.RecordError(span, err)
+	if cm.metrics != nil {
+		cm.metrics.oversizedResponses.Add(ctx, 1, metric.WithAttributes(
+			attribute.String(connector.AttrTargetHost, targetHost),
+		))
+	}
+	slog.ErrorContext(ctx, "upstream response exceeds tunnel message limit",
+		"request_id", requestID,
+		"target_host", targetHost,
+		"size_bytes", size,
+		"limit_bytes", limit,
+		"error", safeErr)
+	return stream.Send(&pb.ConnectorMessage{
+		RequestId: requestID,
+		Message: &pb.ConnectorMessage_ErrorResponse{
+			ErrorResponse: &pb.ErrorResponse{
+				Code:    string(connector.ErrorCodeUpstreamError),
+				Message: safeErr.Error(),
+			},
+		},
+	})
+}
+
 // streamSender is the send-only stream interface used by handleMessage.
 type streamSender interface {
 	Send(*pb.ConnectorMessage) error
@@ -467,12 +531,22 @@ func (cm *ConnectionManager) handleMessage(
 			})
 		}
 
-		return stream.Send(&pb.ConnectorMessage{
+		respMsg := &pb.ConnectorMessage{
 			RequestId: msg.RequestId,
 			Message: &pb.ConnectorMessage_HttpResponse{
 				HttpResponse: httpResp,
 			},
-		})
+		}
+		// The client rejects an oversized message only after the response
+		// sender has dequeued it, and nothing would then reach the controller
+		// for this request. Checking first lets the controller fail the
+		// request immediately instead of waiting out its timeout.
+		if size, limit := proto.Size(respMsg), cm.effectiveSendMaxBytes(); size > limit {
+			return cm.sendOversizedResponseError(
+				reqCtx, stream, span, msg.RequestId, targetHost, size, limit,
+			)
+		}
+		return stream.Send(respMsg)
 
 	case *pb.ControllerMessage_MetadataRequest:
 		slog.DebugContext(ctx, "received metadata request", "request_id", msg.RequestId)

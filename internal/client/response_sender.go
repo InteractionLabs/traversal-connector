@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
@@ -65,16 +67,48 @@ func (ss *responseSender) run(ctx context.Context) {
 				waitMs := float64(time.Since(item.enqueuedAt).Milliseconds())
 				ss.metrics.responseSendWaitLatency.Record(ctx, waitMs)
 			}
-			if err := ss.sender.Send(item.msg); err != nil {
-				slog.ErrorContext(ctx, "response sender: stream send failed",
-					"request_id", item.msg.RequestId,
-					"error", telemetry.SanitizeError(err))
-			}
+			ss.send(ctx, item.msg)
 		case <-ctx.Done():
 			return
 		case <-ss.done:
 			return
 		}
+	}
+}
+
+// send writes msg to the stream. If an HTTP response cannot be written, it
+// makes one attempt to send an UPSTREAM_ERROR for the same request instead:
+// the controller holds the request open until something arrives for its ID,
+// so a silently dropped response costs the caller a full timeout. A failed
+// fallback is only logged; it is never retried or itself replaced.
+func (ss *responseSender) send(ctx context.Context, msg *pb.ConnectorMessage) {
+	err := ss.sender.Send(msg)
+	if err == nil {
+		return
+	}
+	safeErr := telemetry.SanitizeError(err)
+	slog.ErrorContext(ctx, "response sender: stream send failed",
+		"request_id", msg.RequestId,
+		"error", safeErr)
+
+	if msg.GetHttpResponse() == nil {
+		return
+	}
+	fallback := &pb.ConnectorMessage{
+		RequestId: msg.RequestId,
+		Message: &pb.ConnectorMessage_ErrorResponse{
+			ErrorResponse: &pb.ErrorResponse{
+				Code: string(connector.ErrorCodeUpstreamError),
+				Message: fmt.Sprintf(
+					"connector failed to send upstream response: %s", safeErr,
+				),
+			},
+		},
+	}
+	if err := ss.sender.Send(fallback); err != nil {
+		slog.ErrorContext(ctx, "response sender: fallback error response send failed",
+			"request_id", msg.RequestId,
+			"error", telemetry.SanitizeError(err))
 	}
 }
 

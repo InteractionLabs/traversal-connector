@@ -8,10 +8,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/net/http2"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
@@ -616,5 +619,110 @@ func TestHandleMessage_UnknownMessage_ReturnsErrorResponse(t *testing.T) {
 	}
 	if errResp.Code == "" {
 		t.Error("expected non-empty error code")
+	}
+}
+
+func TestTunnelMessageMaxBytes(t *testing.T) {
+	const protocolMax = int(tunnelMessageProtocolMaxBytes)
+	tests := []struct {
+		name   string
+		bodyMB int64
+		want   int
+	}{
+		{name: "zero is the protocol maximum", bodyMB: 0, want: protocolMax},
+		{name: "negative is the protocol maximum", bodyMB: -1, want: protocolMax},
+		{
+			name:   "normal limit adds overhead",
+			bodyMB: 32,
+			want:   32*bytesPerMB + tunnelMessageOverheadBytes,
+		},
+		{name: "above the envelope is clamped", bodyMB: 8 * 1024, want: protocolMax},
+		{name: "max int64 is clamped", bodyMB: math.MaxInt64, want: protocolMax},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tunnelMessageMaxBytes(tt.bodyMB)
+			if got != tt.want {
+				t.Errorf("tunnelMessageMaxBytes(%d) = %d, want %d", tt.bodyMB, got, tt.want)
+			}
+			if got <= 0 || int64(got) > math.MaxUint32 {
+				t.Errorf("tunnelMessageMaxBytes(%d) = %d, outside (0, MaxUint32]",
+					tt.bodyMB, got)
+			}
+		})
+	}
+}
+
+func TestTunnelSendMaxBytes_UsesLargerResponseLimit(t *testing.T) {
+	got := tunnelSendMaxBytes(&config.Config{
+		MaxResponseBodySizeMB:        32,
+		MaxDecodedResponseBodySizeMB: 256,
+	})
+	if want := 256*bytesPerMB + tunnelMessageOverheadBytes; got != want {
+		t.Errorf("tunnelSendMaxBytes() = %d, want %d", got, want)
+	}
+}
+
+func TestHandleMessage_HTTPResponseSizeLimit(t *testing.T) {
+	const (
+		bodySize  = 64 * 1024
+		sendLimit = 16 * 1024
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, bodySize))
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name      string
+		sendLimit int
+		wantError bool
+	}{
+		{name: "oversized response becomes an error", sendLimit: sendLimit, wantError: true},
+		{name: "response under the limit is forwarded", sendLimit: 2 * bodySize},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const reqID = "req-size-limit"
+			cm, _ := newTelemetryTestManager(t, 5*time.Second)
+			cm.sendMaxBytes = tt.sendLimit
+			sender := &mockSender{}
+
+			msg := &pb.ControllerMessage{
+				RequestId: reqID,
+				Message: &pb.ControllerMessage_HttpRequest{
+					HttpRequest: &pb.HttpRequest{Method: http.MethodGet, Url: server.URL},
+				},
+			}
+			if err := cm.handleMessage(context.Background(), sender, uuid.Nil, msg); err != nil {
+				t.Fatalf("handleMessage() = %v", err)
+			}
+
+			if sender.sent == nil {
+				t.Fatal("expected a message to be sent, got none")
+			}
+			if sender.sent.RequestId != reqID {
+				t.Errorf("request_id = %q, want %q", sender.sent.RequestId, reqID)
+			}
+			if !tt.wantError {
+				if got := len(sender.sent.GetHttpResponse().GetBody()); got != bodySize {
+					t.Fatalf("sent %T with body size %d, want HttpResponse with %d",
+						sender.sent.Message, got, bodySize)
+				}
+				return
+			}
+			errResp := sender.sent.GetErrorResponse()
+			if errResp == nil {
+				t.Fatalf("sent %T, want ErrorResponse", sender.sent.Message)
+			}
+			if errResp.Code != string(connector.ErrorCodeUpstreamError) {
+				t.Errorf("code = %q, want %q", errResp.Code, connector.ErrorCodeUpstreamError)
+			}
+			if !strings.Contains(errResp.Message, "exceeds tunnel message limit 16384 bytes") {
+				t.Errorf("message = %q, want it to name the limit", errResp.Message)
+			}
+		})
 	}
 }
