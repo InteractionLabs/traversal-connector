@@ -174,6 +174,21 @@ assert_render_fails both-sources 'mutually exclusive' \
   "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
+# Raw pipes: off by default; on, each set value becomes its setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_RAW_PIPES'
+render raw "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.capabilityIssuer=traversal-raw-tunnel/ci \
+  --set-string rawPipes.capabilityKeys=a2V5cw== \
+  --set rawPipes.tunnelCount=4 --set rawPipes.egressProxyResolves=true
+for want in 'TRAVERSAL_RAW_PIPES\n              value: "enabled"' \
+  'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
+  'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
+  'TRAVERSAL_TUNNEL_COUNT\n              value: "4"' \
+  'TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"'; do
+  assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
+done
+assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_RAW_PIPES_MAX'
+
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'
