@@ -13,6 +13,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
+	"github.com/InteractionLabs/traversal-connector/internal/rawpipes"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
@@ -224,6 +225,23 @@ func main() {
 		return
 	}
 
+	var gates []router.ReadinessGate
+	if os.Getenv("TRAVERSAL_RAW_PIPES") == "enabled" {
+		if tunnels, err := rawpipes.New(&cfg, redactor.RequiresInspection); err != nil {
+			// Raw pipes never stop the legacy transport.
+			slog.ErrorContext(
+				ctx,
+				"raw pipes cannot start; serving the legacy transport only",
+				"err",
+				err,
+			)
+		} else {
+			gates = append(gates, tunnels.Ready)
+			done := tunnels.Start(ctx)
+			defer func() { <-done }()
+		}
+	}
+
 	slog.InfoContext(ctx, "traversal connector service starting",
 		"controller_logical_url", cfg.TraversalControllerURL,
 		"controller_logical_authority", logicalAuthority(cfg.TraversalControllerURL),
@@ -239,7 +257,7 @@ func main() {
 	}
 
 	// Start HTTP server for health and readiness endpoints.
-	ginRouter := router.NewRouter(cfg, cm)
+	ginRouter := router.NewRouter(cfg, cm, gates...)
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           ginRouter,
