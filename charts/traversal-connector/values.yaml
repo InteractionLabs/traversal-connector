@@ -51,6 +51,35 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
+# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
+# Lets Traversal reach databases, kubectl exec, git and other non-HTTP
+# destinations through this connector, over tunnels to the controller's host
+# on port 443 (TLS ALPN x-traversal-tunnel; a TLS-intercepting proxy breaks
+# them). Each pipe carries a Traversal-signed capability the connector checks
+# before it dials. Needs controllerTLS and a lower-case UUID connectorID.
+rawPipes:
+  enabled: false           # TRAVERSAL_RAW_PIPES
+  # Both from Traversal's install command. capabilityKeys is a PEM bundle of
+  # PUBLIC KEY blocks with Key-ID headers, raw or base64-encoded.
+  capabilityIssuer: ""     # TRAVERSAL_CAPABILITY_ISSUER
+  capabilityKeys: ""       # TRAVERSAL_CAPABILITY_KEYS
+  maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
+  maxLifetime: ""          # TRAVERSAL_RAW_PIPES_MAX_LIFETIME (default 4h)
+  idleTimeout: ""          # TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT (default 15m)
+  tunnelCount: ""          # TRAVERSAL_TUNNEL_COUNT (default 2, at most 8)
+  # host:port to dial instead of <controller host>:443, such as a PrivateLink
+  # endpoint; SNI and certificate checks still use the controller's host.
+  tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
+  # An http:// forward proxy pipes reach their destinations through.
+  egressProxy: ""          # TRAVERSAL_RAW_PIPES_EGRESS_PROXY
+  # Send hostnames to egressProxy, which resolves them. Off, only IP
+  # literals go through it. Turn on only if the proxy refuses loopback,
+  # link-local and metadata addresses.
+  egressProxyResolves: ""  # TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES
+  # Refuse every raw TCP pipe while keeping tunnels (redacted HTTP still
+  # flows). For a connector that must never carry raw TCP.
+  refuseTCP: ""            # TRAVERSAL_RAW_PIPES_REFUSE_TCP
+
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference
 # an existing Secret with keys: tls.crt, tls.key, ca.crt.
