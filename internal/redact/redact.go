@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -184,6 +185,23 @@ func (r *Redactor) HasRulesForHost(host string) bool {
 		}
 	}
 	return false
+}
+
+// RequiresInspection reports whether a raw pipe to host must be refused
+// because redaction rules could apply to its traffic, which a raw pipe never
+// shows the connector. Rules match hostnames, so while any rule is loaded an
+// IP literal is refused too: the connector cannot tell which name it serves.
+// A rule with no hosts filter matches every host and so refuses every raw
+// pipe. A CNAME for a matched server still bypasses a host-scoped rule, as it
+// does for the executor.
+func (r *Redactor) RequiresInspection(host string) bool {
+	if len(*r.rules.Load()) == 0 {
+		return false
+	}
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return true
+	}
+	return r.HasRulesForHost(host)
 }
 
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
