@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"net/netip"
 	"strings"
 	"time"
@@ -49,20 +48,6 @@ const (
 	// maxEnvironmentLen bounds <env> in an issuer URI SAN.
 	maxEnvironmentLen = 32
 )
-
-// Code names a refusal more precisely than its rawpipe.Reason. Match it with
-// errors.Is; the wire reason stays rawpipe.InvalidCapability.
-type Code string
-
-func (c Code) Error() string { return "capability: " + string(c) }
-
-// CodeUntrustedChain is an x5c certificate the verifier does not trust: it
-// does not chain to a pinned root, is not a P-256 code-signing leaf within
-// its validity, or does not name this connector's controller host and one
-// capability issuer.
-const CodeUntrustedChain Code = "untrusted_chain"
-
-func untrusted(msg string) error { return fmt.Errorf("%w: %w", CodeUntrustedChain, reject(msg)) }
 
 // chains checks x5c chains against pinned roots for one controller host.
 type chains struct {
@@ -124,25 +109,25 @@ func (c *chains) verify(
 		CurrentTime:   now,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 	}); err != nil {
-		return nil, "", untrusted("x5c does not chain to a trusted root")
+		return nil, "", reject("x5c does not chain to a trusted root")
 	}
 	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
-		return nil, "", untrusted("x5c leaf is not a signing certificate")
+		return nil, "", reject("x5c leaf is not a signing certificate")
 	}
 	// VerifyHostname matches DNS SANs only, never the common name.
 	if leaf.VerifyHostname(c.host) != nil || len(leaf.IPAddresses) != 0 {
-		return nil, "", untrusted("x5c certificate is for another controller host")
+		return nil, "", reject("x5c certificate is for another controller host")
 	}
 	key, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || key.Curve != elliptic.P256() {
-		return nil, "", untrusted("x5c certificate does not certify a P-256 key")
+		return nil, "", reject("x5c certificate does not certify a P-256 key")
 	}
 	if len(leaf.URIs) != 1 {
-		return nil, "", untrusted("x5c certificate must name exactly one issuer")
+		return nil, "", reject("x5c certificate must name exactly one issuer")
 	}
 	env, ok := strings.CutPrefix(leaf.URIs[0].String(), IssuerURIPrefix)
 	if !ok || !validEnvironment(env) {
-		return nil, "", untrusted("x5c certificate names no capability issuer")
+		return nil, "", reject("x5c certificate names no capability issuer")
 	}
 	return key, IssuerPrefix + env, nil
 }

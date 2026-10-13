@@ -61,9 +61,6 @@ var embedded = []struct {
 
 // Config configures a Policy.
 type Config struct {
-	// RequiresInspection reports hosts that redaction rules cover, which raw
-	// pipes may not reach.
-	RequiresInspection func(host string) bool
 	// Proxy, if set, is the forward proxy every pipe dials through.
 	Proxy *url.URL
 	// ProxyResolves sends hostnames to Proxy, delegating their address checks
@@ -112,19 +109,13 @@ func (p *Policy) Dial(
 ) (rawpipe.HalfCloser, string, error) {
 	literal, err := netip.ParseAddr(host)
 	isLiteral := err == nil
-	switch {
-	case isLiteral && p.forbidden(literal), forbiddenName(host):
-		return nil, "", refuse(rawpipe.ForbiddenAddress, errors.New("forbidden destination"))
-	case p.cfg.RequiresInspection != nil && p.cfg.RequiresInspection(host):
-		return nil, "", refuse(
-			rawpipe.InspectionRequired,
-			errors.New("redaction rules cover the host"),
-		)
+	if isLiteral && p.forbidden(literal) || forbiddenName(host) {
+		return nil, "", rawpipe.Errorf(rawpipe.ForbiddenAddress, "forbidden destination")
 	}
 	if p.cfg.Proxy != nil {
 		if !isLiteral && !p.cfg.ProxyResolves {
-			return nil, "", refuse(rawpipe.ForbiddenAddress,
-				errors.New("hostnames through the proxy are not allowed"))
+			return nil, "", rawpipe.Errorf(rawpipe.ForbiddenAddress,
+				"hostnames through the proxy are not allowed")
 		}
 		// No trailing dot: customer proxy ACLs match the name as written.
 		conn, err := p.dialProxy(ctx, net.JoinHostPort(host, fmt.Sprint(port)))
@@ -145,9 +136,9 @@ func (p *Policy) Dial(
 	}
 	for _, a := range addrs {
 		if p.forbidden(a) {
-			return nil, "", refuse(
+			return nil, "", rawpipe.Errorf(
 				rawpipe.ForbiddenAddress,
-				errors.New("resolves to a forbidden address"),
+				"resolves to a forbidden address",
 			)
 		}
 	}

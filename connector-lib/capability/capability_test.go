@@ -2,8 +2,6 @@ package capability_test
 
 import (
 	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +12,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/internal/es256"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -261,13 +260,9 @@ func resign(t *testing.T, header, payload string) string {
 // resignWith signs header.payload with k.
 func resignWith(t *testing.T, k *ecdsa.PrivateKey, header, payload string) string {
 	t.Helper()
-	digest := sha256.Sum256([]byte(header + "." + payload))
-	r, s, err := ecdsa.Sign(rand.Reader, k, digest[:])
+	token, err := es256.Sign(k, header+"."+payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
-	s.FillBytes(sig[32:])
-	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return token
 }

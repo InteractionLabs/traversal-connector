@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -147,79 +146,72 @@ func TestChainedCapabilityRejections(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		token string
-		// untrusted: the refusal is CodeUntrustedChain; otherwise it is any
-		// other invalid capability.
-		untrusted bool
 	}{
 		{"untrusted root", signChained(t, envKey, "env", chainedClaims(nil),
-			envCert(t, other, nil)), true},
+			envCert(t, other, nil))},
 		{"another controller host", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.Hosts = []string{"edge.prod.traversal.com"}
-			})), true},
+			}))},
 		{"no controller host", signChained(t, envKey, "env", chainedClaims(nil),
-			cert(func(c *capabilitytest.EnvironmentCert) { c.Hosts = nil })), true},
+			cert(func(c *capabilitytest.EnvironmentCert) { c.Hosts = nil }))},
 		{"expired", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.NotAfter = time.Now().Add(-time.Minute)
-			})), true},
+			}))},
 		{"not yet valid", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.NotBefore = time.Now().Add(time.Hour)
-			})), true},
+			}))},
 		{"server-auth EKU", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-			})), true},
+			}))},
 		{"no digitalSignature", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.KeyUsage = x509.KeyUsageKeyEncipherment
-			})), true},
+			}))},
 		{"CA leaf", signChained(t, envKey, "env", chainedClaims(nil),
-			cert(func(c *capabilitytest.EnvironmentCert) { c.IsCA = true })), true},
+			cert(func(c *capabilitytest.EnvironmentCert) { c.IsCA = true }))},
 		{"no issuer SAN", signChained(t, envKey, "env", chainedClaims(nil),
-			cert(func(c *capabilitytest.EnvironmentCert) { c.Issuer = "" })), true},
+			cert(func(c *capabilitytest.EnvironmentCert) { c.Issuer = "" }))},
 		{"foreign issuer SAN", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.Issuer = "spiffe://evil.example/capability-issuer/staging"
-			})), true},
+			}))},
 		{"invalid environment in issuer SAN", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.Issuer = capability.IssuerURIPrefix + "Staging"
-			})), true},
+			}))},
 		{"the root signs directly", signChained(t, rootKey, "env", chainedClaims(nil),
-			root.DER), true},
+			root.DER)},
 		{"claims name another environment's issuer", signChained(t, envKey, "env",
 			chainedClaims(func(c *capability.Claims) { c.Issuer = capability.IssuerPrefix + "prod" }),
-			good), false},
+			good)},
 		{"signed by a key the certificate does not certify", signChained(t, key, "env",
-			chainedClaims(nil), good), false},
-		{"empty x5c", rawChained(t, header(`[]`)), false},
-		{"three certificates", rawChained(t, header(`["`+stdB64+`","`+stdB64+`","`+stdB64+`"]`)),
-			false},
+			chainedClaims(nil), good)},
+		{"empty x5c", rawChained(t, header(`[]`))},
+		{"three certificates", rawChained(t, header(`["`+stdB64+`","`+stdB64+`","`+stdB64+`"]`))},
 		{"oversized x5c", rawChained(t,
-			header(`["`+base64.StdEncoding.EncodeToString(bigCert)+`"]`)), false},
+			header(`["`+base64.StdEncoding.EncodeToString(bigCert)+`"]`))},
 		{"URL-safe base64", rawChained(t, header(`["`+
-			base64.RawURLEncoding.EncodeToString(good)+`"]`)), false},
+			base64.RawURLEncoding.EncodeToString(good)+`"]`))},
 		{"garbage certificate", signChained(t, envKey, "env", chainedClaims(nil),
-			[]byte("not a certificate")), false},
-		{"x5c not an array", rawChained(t, header(`"`+stdB64+`"`)), false},
+			[]byte("not a certificate"))},
+		{"x5c not an array", rawChained(t, header(`"`+stdB64+`"`))},
 		{"duplicate x5c", rawChained(t, strings.Replace(header(`["`+stdB64+`"]`), "}",
-			`,"x5c":["`+stdB64+`"]}`, 1)), false},
+			`,"x5c":["`+stdB64+`"]}`, 1))},
 		{"case-variant x5c", rawChained(t, strings.Replace(header(`["`+stdB64+`"]`), "}",
-			`,"X5C":["`+stdB64+`"]}`, 1)), false},
+			`,"X5C":["`+stdB64+`"]}`, 1))},
 		{"no x5c and an unknown kid", func() string {
 			tok, _ := capability.Sign(envKey, "env", chainedClaims(nil))
 			return tok
-		}(), false},
+		}()},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := verifyChained(newVerifier(t, rootsConfig(root)), c.token)
 			if rawpipe.ReasonOf(err, "") != rawpipe.InvalidCapability {
 				t.Fatalf("got %v, want %s", err, rawpipe.InvalidCapability)
-			}
-			if got := errors.Is(err, capability.CodeUntrustedChain); got != c.untrusted {
-				t.Fatalf("untrusted chain = %v, want %v: %v", got, c.untrusted, err)
 			}
 		})
 	}
@@ -263,7 +255,7 @@ func TestPinnedKeysBesideRoots(t *testing.T) {
 	} {
 		token := signChained(t, envKey, kid, chainedClaims(nil), envCert(t, root, nil))
 		err := verifyChained(v, token)
-		if (err == nil) != want || !want && !errors.Is(err, capability.CodeUntrustedChain) {
+		if (err == nil) != want {
 			t.Errorf("kid %q: %v, want accepted %v", kid, err, want)
 		}
 	}
@@ -277,7 +269,7 @@ func TestPinnedKeysBesideRoots(t *testing.T) {
 }
 
 // Without roots, x5c is ignored: a pinned kid still verifies as a signer
-// starts sending its certificate, and anything else is untrusted.
+// starts sending its certificate, and anything else is refused.
 func TestPinnedOnlyVerifierAndX5C(t *testing.T) {
 	root := testRoot(t, rootKey)
 	v := newVerifier(t, pinnedConfig())
@@ -287,8 +279,8 @@ func TestPinnedOnlyVerifierAndX5C(t *testing.T) {
 		t.Fatalf("pinned kid with x5c: %v", err)
 	}
 	unknown := signChained(t, envKey, "env", chainedClaims(nil), envCert(t, root, nil))
-	if err := verifyChained(v, unknown); !errors.Is(err, capability.CodeUntrustedChain) {
-		t.Fatalf("unknown kid with x5c: %v, want untrusted chain", err)
+	if err := verifyChained(v, unknown); rawpipe.ReasonOf(err, "") != rawpipe.InvalidCapability {
+		t.Fatalf("unknown kid with x5c: %v, want %s", err, rawpipe.InvalidCapability)
 	}
 }
 

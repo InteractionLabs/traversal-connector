@@ -19,8 +19,6 @@ import (
 	"container/heap"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -28,12 +26,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/internal/es256"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -45,7 +43,7 @@ const (
 	MaxLifetime  = 5 * time.Minute
 	maxClockSkew = 30 * time.Second
 	maxTokenLen  = 4096
-	// maxOpens covers an open retried on a few gateway replicas without
+	// maxOpens covers an open retried on a few edge controller replicas without
 	// letting a leaked token open many pipes.
 	maxOpens = 4
 )
@@ -112,16 +110,7 @@ func sign(key *ecdsa.PrivateKey, h header, c Claims) (string, error) {
 	}
 	hdr, _ := json.Marshal(h)
 	p, _ := json.Marshal(c)
-	input := b64(hdr) + "." + b64(p)
-	digest := sha256.Sum256([]byte(input))
-	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
-	if err != nil {
-		return "", err
-	}
-	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
-	s.FillBytes(sig[32:])
-	return input + "." + b64(sig), nil
+	return es256.Sign(key, b64(hdr)+"."+b64(p))
 }
 
 // Verifier checks capabilities and limits how often each is accepted. It is
@@ -257,15 +246,7 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if err != nil || len(sig) != 64 ||
-		!ecdsa.Verify(
-			key,
-			digest[:],
-			new(big.Int).SetBytes(sig[:32]),
-			new(big.Int).SetBytes(sig[32:]),
-		) {
+	if !es256.Verify(key, parts[0]+"."+parts[1], parts[2]) {
 		return nil, "", reject("bad signature")
 	}
 	var c Claims
@@ -297,13 +278,13 @@ func (v *Verifier) signingKey(h header, now time.Time) (*ecdsa.PublicKey, string
 			return nil, "", err
 		}
 		if pinned != nil && !pinned.Equal(key) {
-			return nil, "", untrusted("kid names a pinned key the x5c certificate does not certify")
+			return nil, "", reject("kid names a pinned key the x5c certificate does not certify")
 		}
 		return key, issuer, nil
 	case pinned != nil:
 		return pinned, v.issuer, nil
 	case h.X5C != nil:
-		return nil, "", untrusted("x5c, and this verifier trusts no roots")
+		return nil, "", reject("x5c, and this verifier trusts no roots")
 	}
 	return nil, "", reject("unknown kid")
 }
@@ -344,20 +325,6 @@ func (v *Verifier) take(jti string, expires, now time.Time) bool {
 	return true
 }
 
-// ParsePublicKey parses a PEM PUBLIC KEY block holding a P-256 key.
-func ParsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
-	block, _ := pem.Decode(data)
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return nil, errors.New("capability: expected a PEM PUBLIC KEY block")
-	}
-	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
-	key, ok := parsed.(*ecdsa.PublicKey)
-	if err != nil || !ok || key.Curve != elliptic.P256() {
-		return nil, errors.New("capability: not a P-256 public key")
-	}
-	return key, nil
-}
-
 // ParseKeys reads a bundle of PUBLIC KEY blocks, each naming its kid in a
 // Key-ID header, so a rotation can ship the next key beside the current one.
 func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
@@ -368,10 +335,10 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 			break
 		}
 		kid := block.Headers["Key-ID"]
-		key, err := ParsePublicKey(
-			pem.EncodeToMemory(&pem.Block{Type: block.Type, Bytes: block.Bytes}),
-		)
-		if err != nil || kid == "" || keys[kid] != nil {
+		parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+		key, ok := parsed.(*ecdsa.PublicKey)
+		if block.Type != "PUBLIC KEY" || err != nil || !ok || key.Curve != elliptic.P256() ||
+			kid == "" || keys[kid] != nil {
 			return nil, fmt.Errorf("capability: key %q needs a unique Key-ID and a P-256 key", kid)
 		}
 		keys[kid] = key

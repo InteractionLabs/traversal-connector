@@ -42,14 +42,12 @@ func TestDial(t *testing.T) {
 		"up.test.":       {netip.MustParseAddr("127.0.0.1")},
 		"metadata.test.": {netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("169.254.169.254")},
 		"nat64.test.":    {netip.MustParseAddr("64:ff9b::7f00:1")},
-	}, RequiresInspection: func(h string) bool { return h == "redacted.test" }},
-		deny: forbiddenPrefixes}
+	}}, deny: forbiddenPrefixes}
 	for host, want := range map[string]rawpipe.Reason{
 		"127.0.0.1":     rawpipe.ForbiddenAddress,
 		"localhost":     rawpipe.ForbiddenAddress,
 		"metadata.test": rawpipe.ForbiddenAddress, // one bad answer refuses the name
 		"nat64.test":    rawpipe.ForbiddenAddress,
-		"redacted.test": rawpipe.InspectionRequired,
 		"missing.test":  rawpipe.DNSFailed,
 		"up.test":       rawpipe.ForbiddenAddress,
 	} {
