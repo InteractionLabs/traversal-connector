@@ -59,8 +59,18 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # before it dials. Needs controllerTLS and a lower-case UUID connectorID.
 rawPipes:
   enabled: false           # TRAVERSAL_RAW_PIPES
-  # Both from Traversal's install command. capabilityKeys is a PEM bundle of
-  # PUBLIC KEY blocks with Key-ID headers, raw or base64-encoded.
+  # Traversal's capability root certificates (PEM), the current root and,
+  # during a root rotation, the next. Rendered together as
+  # TRAVERSAL_CAPABILITY_ROOTS. With roots the connector trusts every
+  # Traversal environment's signing key that a root certifies for this
+  # connector's controller host, so it needs no capabilityIssuer or
+  # capabilityKeys.
+  trustedRoots:
+    current: ""
+    next: ""
+  # Pinned keys, beside or instead of trustedRoots. capabilityKeys is a PEM
+  # bundle of PUBLIC KEY blocks with Key-ID headers, raw or base64-encoded;
+  # it needs capabilityIssuer.
   capabilityIssuer: ""     # TRAVERSAL_CAPABILITY_ISSUER
   capabilityKeys: ""       # TRAVERSAL_CAPABILITY_KEYS
   maxPipes: ""             # TRAVERSAL_RAW_PIPES_MAX (default 200)
