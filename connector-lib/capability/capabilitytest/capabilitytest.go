@@ -5,13 +5,18 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"testing"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 )
 
-// Key derives a P-256 key from seed, so tests need no key material.
+// Key derives a P-256 key from seed, so tests need no key material. Its keys
+// are guessable, so it refuses to run outside a test binary.
 func Key(seed string) *ecdsa.PrivateKey {
+	if !testing.Testing() {
+		panic("capabilitytest: deterministic keys outside a test")
+	}
 	scalar := sha256.Sum256([]byte(seed))
 	key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), scalar[:])
 	if err != nil {

@@ -4,6 +4,8 @@
 package capability
 
 import (
+	"bytes"
+	"container/heap"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -90,8 +92,34 @@ type Verifier struct {
 
 	mu    sync.Mutex
 	opens map[string]int
-	// expiry orders jtis for pruning; capabilities live at most MaxLifetime.
-	expiry map[string]time.Time
+	// expiry orders jtis by expiry, so pruning touches only expired ones;
+	// capabilities live at most MaxLifetime.
+	expiry jtiHeap
+}
+
+// seen is one jti and when its capability expires.
+type seen struct {
+	jti     string
+	expires time.Time
+}
+
+// jtiHeap is a min-heap of seen, earliest expiry first (container/heap).
+type jtiHeap []seen
+
+func (h jtiHeap) Len() int           { return len(h) }
+func (h jtiHeap) Less(i, j int) bool { return h[i].expires.Before(h[j].expires) }
+func (h jtiHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *jtiHeap) Push(
+	x any,
+) {
+	*h = append(*h, x.(seen))
+} //nolint:forcetypeassert // heap API
+func (h *jtiHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
 
 // NewVerifier accepts capabilities from issuer, signed by one of keys (by
@@ -106,7 +134,7 @@ func NewVerifier(issuer, subject string, keys map[string]*ecdsa.PublicKey) (*Ver
 		}
 	}
 	return &Verifier{issuer: issuer, keys: keys, subject: subject, now: time.Now,
-		opens: map[string]int{}, expiry: map[string]time.Time{}}, nil
+		opens: map[string]int{}}, nil
 }
 
 // Verify checks token for a pipe to host:port through connector and counts
@@ -191,17 +219,16 @@ func (c *Claims) valid() error {
 func (v *Verifier) take(jti string, expires, now time.Time) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	for k, t := range v.expiry {
-		if now.After(t) {
-			delete(v.expiry, k)
-			delete(v.opens, k)
-		}
+	for v.expiry.Len() > 0 && now.After(v.expiry[0].expires) {
+		delete(v.opens, heap.Pop(&v.expiry).(seen).jti) //nolint:forcetypeassert // heap API
 	}
 	if v.opens[jti] >= maxOpens {
 		return false
 	}
+	if v.opens[jti] == 0 {
+		heap.Push(&v.expiry, seen{jti, expires})
+	}
 	v.opens[jti]++
-	v.expiry[jti] = expires
 	return true
 }
 
@@ -245,10 +272,54 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
+// decode parses a JWS segment strictly: unknown fields, duplicate keys and
+// keys differing only in case are refused, so one token cannot mean two
+// things to two parsers.
 func decode(segment string, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(segment)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(raw, v)
+	if err := uniqueKeys(raw); err != nil {
+		return err
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	if d.More() {
+		return errors.New("trailing data")
+	}
+	return nil
+}
+
+// uniqueKeys refuses a top-level JSON object with a key repeated, exactly or
+// case-insensitively (encoding/json matches keys case-insensitively).
+func uniqueKeys(raw []byte) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return err
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := d.Token(); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		t, err := d.Token()
+		if err != nil {
+			return err
+		}
+		k := strings.ToLower(t.(string)) //nolint:forcetypeassert // object keys are strings
+		if seen[k] {
+			return fmt.Errorf("duplicate key %q", k)
+		}
+		seen[k] = true
+		var skip json.RawMessage
+		if err := d.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
 }

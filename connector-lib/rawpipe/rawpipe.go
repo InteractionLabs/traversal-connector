@@ -38,6 +38,8 @@ const (
 	ProtocolError      Reason = "protocol_error"
 	NoTunnel           Reason = "no_raw_tunnel"
 	OpenTimeout        Reason = "open_timeout"
+	// TCPRefused is a connector whose operator turned raw TCP pipes off.
+	TCPRefused Reason = "raw_tcp_refused"
 )
 
 // Known reports whether r is one of the refusal reasons above. Metrics and
@@ -47,7 +49,7 @@ func (r Reason) Known() bool {
 	switch r {
 	case InvalidCapability, WrongConnector, WrongDestination, Exhausted, InspectionRequired,
 		ForbiddenAddress, DNSFailed, DialFailed, Capacity, Draining, ProtocolError, NoTunnel,
-		OpenTimeout:
+		OpenTimeout, TCPRefused:
 		return true
 	}
 	return false

@@ -74,7 +74,7 @@ func TestDialThroughProxy(t *testing.T) {
 		}
 		defer c.Close()
 		req, err := http.ReadRequest(bufio.NewReader(c))
-		if err != nil || req.Method != http.MethodConnect || req.Host != "db.internal.:5432" ||
+		if err != nil || req.Method != http.MethodConnect || req.Host != "db.internal:5432" ||
 			req.Header.Get("Proxy-Authorization") != "Basic dTpw" {
 			_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
 			return
@@ -101,3 +101,22 @@ func TestDialThroughProxy(t *testing.T) {
 }
 
 func itoa(p uint16) string { return strconv.Itoa(int(p)) }
+
+// TestEmbeddedIPv4: an IPv6 address carrying a forbidden IPv4 address is
+// forbidden, wherever its prefix puts it.
+func TestEmbeddedIPv4(t *testing.T) {
+	p := &Policy{deny: forbiddenPrefixes}
+	for addr, want := range map[string]bool{
+		"64:ff9b::a9fe:a9fe":       true,  // NAT64 /96: 169.254.169.254
+		"64:ff9b:1:a9fe:a9:fe00::": true,  // NAT64 /48, around the u octet
+		"64:ff9b:1:a00:1:100::":    false, // NAT64 /48: 10.0.1.1 (private, allowed)
+		"2002:7f00:1::1":           true,  // 6to4: 127.0.0.1
+		"2001:0:0:0:0:0:80ff:fffe": true,  // Teredo: inverted 127.0.0.1
+		"2001:db8::1":              false, // documentation, not Teredo-encoded loopback
+		"2606:4700::1111":          false,
+	} {
+		if got := p.forbidden(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("%s: forbidden = %v, want %v", addr, got, want)
+		}
+	}
+}

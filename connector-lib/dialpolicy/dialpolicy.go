@@ -40,10 +40,23 @@ var forbiddenPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fd20:ce::254/128"),
 }
 
-// nat64 prefixes embed an IPv4 address in their last 32 bits.
-var nat64 = []netip.Prefix{
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
+// embedded maps IPv6 prefixes that carry an IPv4 address to where it sits,
+// so the policy checks the IPv4 address too.
+var embedded = []struct {
+	prefix netip.Prefix
+	ipv4   func(b [16]byte) [4]byte
+}{
+	// NAT64 (RFC 6052): /96 keeps it in the last 32 bits; /48 puts it in bits
+	// 48-63 and 72-87, around the reserved u octet (bits 64-71).
+	{netip.MustParsePrefix("64:ff9b::/96"), func(b [16]byte) [4]byte { return [4]byte(b[12:]) }},
+	{netip.MustParsePrefix("64:ff9b:1::/48"),
+		func(b [16]byte) [4]byte { return [4]byte{b[6], b[7], b[9], b[10]} }},
+	// 6to4 (RFC 3056): bits 16-47.
+	{netip.MustParsePrefix("2002::/16"), func(b [16]byte) [4]byte { return [4]byte(b[2:6]) }},
+	// Teredo (RFC 4380): the client address, inverted, in the last 32 bits.
+	{netip.MustParsePrefix("2001::/32"), func(b [16]byte) [4]byte {
+		return [4]byte{^b[12], ^b[13], ^b[14], ^b[15]}
+	}},
 }
 
 // Config configures a Policy.
@@ -113,7 +126,8 @@ func (p *Policy) Dial(
 			return nil, "", refuse(rawpipe.ForbiddenAddress,
 				errors.New("hostnames through the proxy are not allowed"))
 		}
-		conn, err := p.dialProxy(ctx, net.JoinHostPort(capability.Absolute(host), fmt.Sprint(port)))
+		// No trailing dot: customer proxy ACLs match the name as written.
+		conn, err := p.dialProxy(ctx, net.JoinHostPort(host, fmt.Sprint(port)))
 		if err != nil {
 			return nil, "", refuse(rawpipe.DialFailed, err)
 		}
@@ -146,15 +160,17 @@ func (p *Policy) Dial(
 
 func (p *Policy) forbidden(a netip.Addr) bool {
 	a = a.Unmap().WithZone("")
-	for _, n := range nat64 {
-		if n.Contains(a) {
-			b := a.As16()
-			a = netip.AddrFrom4([4]byte(b[12:]))
+	check := []netip.Addr{a}
+	for _, e := range embedded {
+		if e.prefix.Contains(a) {
+			check = append(check, netip.AddrFrom4(e.ipv4(a.As16())))
 		}
 	}
-	for _, d := range p.deny {
-		if d.Contains(a) {
-			return true
+	for _, c := range check {
+		for _, d := range p.deny {
+			if d.Contains(c) {
+				return true
+			}
 		}
 	}
 	return false

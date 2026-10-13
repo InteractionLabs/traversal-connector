@@ -243,7 +243,13 @@ func Connect(ctx context.Context, rt http.RoundTripper, addr, authority string, 
 	case err != nil:
 	case resp.StatusCode != http.StatusOK:
 		_ = resp.Body.Close()
-		err = &Refusal{resp.StatusCode, Reason(resp.Header.Get(HeaderReason))}
+		// An unknown reason from the peer becomes "other", keeping label sets
+		// and switches closed.
+		reason := Reason(resp.Header.Get(HeaderReason))
+		if reason != "" && !reason.Known() {
+			reason = "other"
+		}
+		err = &Refusal{resp.StatusCode, reason}
 	default:
 		return &ClientStream{body: pw, resp: resp, cancel: cancel}, nil
 	}
