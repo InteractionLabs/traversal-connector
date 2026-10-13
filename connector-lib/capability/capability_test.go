@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"strconv"
 	"strings"
@@ -185,25 +186,69 @@ func BenchmarkVerifyManyLive(b *testing.B) {
 	}
 }
 
-// TestStrictClaims: duplicate or case-variant keys and unknown fields are
-// refused even when correctly signed.
-func TestStrictClaims(t *testing.T) {
+// TestClaimsDecoding: an unknown claim, of any JSON type, is ignored; a
+// duplicate or case-variant key (at any depth), trailing data, and a missing,
+// null or mistyped required claim are refused even when correctly signed.
+func TestClaimsDecoding(t *testing.T) {
 	good := sign(t, nil)
 	parts := strings.Split(good, ".")
-	claims, _ := base64.RawURLEncoding.DecodeString(parts[1])
-	for name, body := range map[string]string{
-		"duplicate":   strings.Replace(string(claims), "{", `{"host":"evil.test",`, 1),
-		"case":        strings.Replace(string(claims), "{", `{"HOST":"evil.test",`, 1),
-		"unknown key": strings.Replace(string(claims), "{", `{"extra":1,`, 1),
+	raw, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	claims := string(raw)
+	with := func(prefix string) string { return strings.Replace(claims, "{", "{"+prefix, 1) }
+	without := func(key string) string {
+		var m map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &m)
+		delete(m, key)
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	for name, c := range map[string]struct {
+		body string
+		ok   bool
+	}{
+		"unknown string":        {with(`"note":"informational",`), true},
+		"unknown object":        {with(`"extra":{"a":[1,{"b":2}]},`), true},
+		"unknown number":        {with(`"n":1.5,`), true},
+		"unknown, once a claim": {with(`"mode":"inspect",`), true},
+		"duplicate":             {with(`"host":"evil.test",`), false},
+		"case variant":          {with(`"HOST":"evil.test",`), false},
+		"nested duplicate":      {with(`"extra":{"a":1,"A":2},`), false},
+		"trailing data":         {claims + `{}`, false},
+		"missing claim":         {without("connector_id"), false},
+		"null claim":            {strings.Replace(without("jti"), "{", `{"jti":null,`, 1), false},
+		"mistyped port":         {strings.Replace(without("port"), "{", `{"port":"5432",`, 1), false},
+		"mistyped iat":          {strings.Replace(without("iat"), "{", `{"iat":"1",`, 1), false},
 	} {
-		payload := base64.RawURLEncoding.EncodeToString([]byte(body))
-		tok := resign(t, parts[0], payload)
-		if _, err := verifier(t).Verify(tok, connector, "db.internal", 5432); err == nil {
-			t.Errorf("%s: accepted", name)
+		tok := resign(t, parts[0], base64.RawURLEncoding.EncodeToString([]byte(c.body)))
+		_, err := verifier(t).Verify(tok, connector, "db.internal", 5432)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: %v, want accepted %v", name, err, c.ok)
 		}
 	}
 	if _, err := verifier(t).Verify(good, connector, "db.internal", 5432); err != nil {
 		t.Errorf("good token: %v", err)
+	}
+}
+
+// TestStrictHeader: the header holds exactly alg, typ, kid and optionally
+// x5c; an unknown field, a case variant or a missing field is refused.
+func TestStrictHeader(t *testing.T) {
+	parts := strings.Split(sign(t, nil), ".")
+	for name, h := range map[string]string{
+		"unknown field": `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1","cty":"x"}`,
+		"case variant":  `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1","KID":"k1"}`,
+		"missing kid":   `{"alg":"ES256","typ":"traversal-capability+jwt"}`,
+		"mistyped kid":  `{"alg":"ES256","typ":"traversal-capability+jwt","kid":1}`,
+	} {
+		tok := resign(t, base64.RawURLEncoding.EncodeToString([]byte(h)), parts[1])
+		if _, err := verifier(t).Verify(tok, connector, "db.internal", 5432); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	plain := `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1"}`
+	tok := resign(t, base64.RawURLEncoding.EncodeToString([]byte(plain)), parts[1])
+	if _, err := verifier(t).Verify(tok, connector, "db.internal", 5432); err != nil {
+		t.Errorf("exact header: %v", err)
 	}
 }
 

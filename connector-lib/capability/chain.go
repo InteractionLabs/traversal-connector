@@ -107,7 +107,10 @@ func parseChain(x5c []string) ([]*x509.Certificate, error) {
 
 // verify checks a parsed chain at now and returns the environment's signing
 // key and the issuer its capabilities must carry.
-func (c *chains) verify(certs []*x509.Certificate, now time.Time) (*ecdsa.PublicKey, string, error) {
+func (c *chains) verify(
+	certs []*x509.Certificate,
+	now time.Time,
+) (*ecdsa.PublicKey, string, error) {
 	leaf := certs[0]
 	intermediates := x509.NewCertPool()
 	for _, cert := range certs[1:] {

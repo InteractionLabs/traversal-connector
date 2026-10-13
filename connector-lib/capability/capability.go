@@ -1,6 +1,17 @@
 // Package capability signs and verifies capabilities: short-lived ES256 JWTs
 // that let one caller open raw pipes through one connector to one exact
 // destination.
+//
+// A capability says who may reach which host:port, nothing about how: how a
+// pipe behaves comes from the connector's own configuration. So claims decode
+// leniently (RFC 7519 section 4): a claim this package does not know is
+// ignored, which lets Traversal add informational claims without a connector
+// release. That is safe because nothing a capability adds can widen what a
+// connector allows: its dial policy and the customer's redaction config bound
+// every pipe, whatever the token says. Everything else stays strict: the JWS
+// header holds exactly alg, typ, kid and optionally x5c; every known claim
+// must be present with its JSON type; keys may not repeat, exactly or by
+// case, anywhere in either segment; and nothing may trail the JSON.
 package capability
 
 import (
@@ -16,7 +27,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +66,11 @@ type Claims struct {
 	IssuedAt       int64  `json:"iat"`
 	ExpiresAt      int64  `json:"exp"`
 }
+
+var (
+	headerKeys = jsonKeys(header{})
+	claimKeys  = jsonKeys(Claims{})
+)
 
 type header struct {
 	Alg string `json:"alg"`
@@ -231,7 +249,8 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 		return nil, "", reject("not a compact JWS")
 	}
 	var h header
-	if err := decode(parts[0], &h); err != nil || h.Alg != "ES256" || h.Typ != tokenType {
+	if err := decode(parts[0], headerKeys, false, &h); err != nil || h.Alg != "ES256" ||
+		h.Typ != tokenType {
 		return nil, "", reject("bad header")
 	}
 	key, issuer, err := v.signingKey(h, now)
@@ -250,7 +269,7 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 		return nil, "", reject("bad signature")
 	}
 	var c Claims
-	if err := decode(parts[1], &c); err != nil {
+	if err := decode(parts[1], claimKeys, true, &c); err != nil {
 		return nil, "", reject("bad claims")
 	}
 	if err := c.valid(); err != nil {
@@ -365,54 +384,92 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// decode parses a JWS segment strictly: unknown fields, duplicate keys and
-// keys differing only in case are refused, so one token cannot mean two
-// things to two parsers.
-func decode(segment string, v any) error {
+// decode parses a JWS segment, a JSON object, into v. Every key in known
+// marked required must be present and not null. A key not in known is
+// refused, or ignored if lenient. Keys may not repeat, exactly or by case, at
+// any depth, and nothing may trail the object. Only the exact known keys
+// reach encoding/json, which would otherwise match keys case-insensitively
+// (and fold "ſ" onto "s") and let an ignored key overwrite a known one.
+func decode(segment string, known map[string]bool, lenient bool, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(segment)
 	if err != nil {
 		return err
 	}
-	if err := uniqueKeys(raw); err != nil {
-		return err
-	}
 	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if err := d.Decode(v); err != nil {
+	if err := uniqueKeys(d); err != nil {
 		return err
 	}
-	if d.More() {
+	if _, err := d.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data")
 	}
-	return nil
-}
-
-// uniqueKeys refuses a top-level JSON object with a key repeated, exactly or
-// case-insensitively (encoding/json matches keys case-insensitively).
-func uniqueKeys(raw []byte) error {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return err
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	if _, err := d.Token(); err != nil {
+	exact := make(map[string]json.RawMessage, len(known))
+	for k, val := range obj {
+		if _, ok := known[k]; !ok {
+			if !lenient {
+				return fmt.Errorf("unknown field %q", k)
+			}
+			continue
+		}
+		exact[k] = val
+	}
+	for k, required := range known {
+		if val, ok := exact[k]; required && (!ok || string(val) == "null") {
+			return fmt.Errorf("missing field %q", k)
+		}
+	}
+	b, _ := json.Marshal(exact)
+	return json.Unmarshal(b, v)
+}
+
+// uniqueKeys reads one JSON value from d, refusing an object, at any depth,
+// with a key repeated exactly or case-insensitively.
+func uniqueKeys(d *json.Decoder) error {
+	t, err := d.Token()
+	if err != nil {
 		return err
 	}
-	seen := map[string]bool{}
-	for d.More() {
-		t, err := d.Token()
-		if err != nil {
-			return err
+	switch t {
+	case json.Delim('{'):
+		seen := map[string]bool{}
+		for d.More() {
+			k, err := d.Token()
+			if err != nil {
+				return err
+			}
+			key := strings.ToLower(k.(string)) //nolint:forcetypeassert // object keys are strings
+			if seen[key] {
+				return fmt.Errorf("duplicate key %q", key)
+			}
+			seen[key] = true
+			if err := uniqueKeys(d); err != nil {
+				return err
+			}
 		}
-		k := strings.ToLower(t.(string)) //nolint:forcetypeassert // object keys are strings
-		if seen[k] {
-			return fmt.Errorf("duplicate key %q", k)
+	case json.Delim('['):
+		for d.More() {
+			if err := uniqueKeys(d); err != nil {
+				return err
+			}
 		}
-		seen[k] = true
-		var skip json.RawMessage
-		if err := d.Decode(&skip); err != nil {
-			return err
-		}
+	default:
+		return nil
 	}
-	return nil
+	_, err = d.Token() // the closing delimiter
+	return err
+}
+
+// jsonKeys maps each JSON key of struct v to whether it is required: every
+// field but those tagged omitempty.
+func jsonKeys(v any) map[string]bool {
+	t := reflect.TypeOf(v)
+	keys := make(map[string]bool, t.NumField())
+	for i := range t.NumField() {
+		name, opts, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		keys[name] = opts != "omitempty"
+	}
+	return keys
 }
