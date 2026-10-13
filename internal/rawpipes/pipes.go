@@ -36,19 +36,21 @@ const (
 // limit per tunnel, so a pipe over it is refused as capacity rather than
 // queued into open_timeout.
 func (s *Server) h2(tunnels int) *http2.Server {
-	perTunnel := uint32(
-		max(1, (s.MaxPipes+int64(tunnels)-1)/int64(tunnels)),
-	) //nolint:gosec // bounded by MaxPipes
+	perTunnel := max(1, (s.MaxPipes+int64(tunnels)-1)/int64(tunnels))
 	return &http2.Server{
-		MaxConcurrentStreams:     perTunnel + 16, // headroom for drain and refusals
-		MaxUploadBufferPerStream: streamWindow,
-		MaxUploadBufferPerConnection: int32(
-			min(int64(perTunnel)*streamWindow, 1<<30),
-		), //nolint:gosec // capped
-		MaxReadFrameSize: 256 << 10,
-		ReadIdleTimeout:  pingAfter,
-		PingTimeout:      pingTimeout,
+		// Headroom for drain requests and refusals.
+		MaxConcurrentStreams:         clamp32[uint32](perTunnel+16, 1<<20),
+		MaxUploadBufferPerStream:     streamWindow,
+		MaxUploadBufferPerConnection: clamp32[int32](perTunnel*streamWindow, 1<<30),
+		MaxReadFrameSize:             256 << 10,
+		ReadIdleTimeout:              pingAfter,
+		PingTimeout:                  pingTimeout,
 	}
+}
+
+// clamp32 is n capped at limit, converted to a 32-bit type limit fits.
+func clamp32[T int32 | uint32](n, limit int64) T {
+	return T(min(max(n, 0), limit)) //nolint:gosec // limit fits T at every call
 }
 
 // Server serves pipes on tunnels.
