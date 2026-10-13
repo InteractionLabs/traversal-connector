@@ -84,6 +84,9 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.ConnectorID = strings.ToUpper(c.ConnectorID) }, wantErr: "lower-case UUID"},
 		{name: "http controller", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
+		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_REFUSE_TCP": "true"}},
+		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
+			wantErr: "TRAVERSAL_TUNNELS_CONNECT_TO must be host:port"},
 		{name: "legacy egress proxy", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL"},
 	} {
@@ -110,6 +113,8 @@ func TestNew(t *testing.T) {
 				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
 					tunnels.Server.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour):
 				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
+			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
+				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
 				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200):
 				t.Fatalf("defaults: %+v", tunnels)
