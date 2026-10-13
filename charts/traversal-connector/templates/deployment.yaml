@@ -195,6 +195,11 @@ spec:
               value: {{ . | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- $roots := .Values.rawPipes.trustedRoots | default dict }}
+            {{- with compact (list ($roots.current | default "" | trim) ($roots.next | default "" | trim)) }}
+            - name: TRAVERSAL_CAPABILITY_ROOTS
+              value: {{ printf "%s\n" (join "\n" .) | b64enc | quote }}
+            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY

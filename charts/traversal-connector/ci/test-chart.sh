@@ -192,6 +192,24 @@ done
 assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_RAW_PIPES_MAX'
 assert_render_fails raw-boolean 'rawPipes.enabled must be a boolean' "${common[@]}" --set-string rawPipes.enabled=false
 
+# Capability roots: current, then next, as one PEM bundle; none, no setting.
+assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
+current_root=$'-----BEGIN CERTIFICATE-----\nY3VycmVudA==\n-----END CERTIFICATE-----\n'
+next_root=$'-----BEGIN CERTIFICATE-----\nbmV4dA==\n-----END CERTIFICATE-----\n'
+capability_roots() {
+  awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
+}
+render raw-roots "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.trustedRoots.current="$current_root"
+[[ "$(capability_roots "$tmp_dir/raw-roots.yaml")" == "${current_root%$'\n'}" ]] ||
+  fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root"
+assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
+render raw-roots-rotation "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
+  --set-string rawPipes.trustedRoots.current="$current_root" \
+  --set-string rawPipes.trustedRoots.next="$next_root"
+[[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
+  fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
+
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'
