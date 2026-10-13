@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
@@ -66,8 +67,21 @@ func TestNew(t *testing.T) {
 			"TRAVERSAL_RAW_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES": "true",
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
-		{name: "no keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
-			wantErr: "TRAVERSAL_CAPABILITY_KEYS"},
+		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
+			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required"},
+		{name: "keys without issuer", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_ISSUER": ""},
+			wantErr: "TRAVERSAL_CAPABILITY_ISSUER is required"},
+		{name: "roots alone", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
+			"TRAVERSAL_CAPABILITY_ISSUER": "", "TRAVERSAL_CAPABILITY_ROOTS": "roots"}},
+		{name: "base64 roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
+			"TRAVERSAL_CAPABILITY_ROOTS": "b64 roots"}},
+		{name: "roots beside keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "roots"}},
+		{name: "roots that are not certificates", spiffeID: orgScoped,
+			env: map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "b64"}, wantErr: "TRAVERSAL_CAPABILITY_ROOTS: "},
+		{name: "roots with an IP controller", spiffeID: orgScoped,
+			env:     map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "roots"},
+			mutate:  func(c *config.Config) { c.TraversalControllerURL = "https://10.0.0.1" },
+			wantErr: "canonical controller host name"},
 		{name: "bad count", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNEL_COUNT": "9"},
 			wantErr: "TRAVERSAL_TUNNEL_COUNT must be 1 to 8"},
 		{name: "bad duration", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "soon"},
@@ -94,8 +108,13 @@ func TestNew(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
 			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
 			for k, v := range c.env {
-				if v == "b64" {
+				switch v {
+				case "b64":
 					v = base64Of(keysPEM(t))
+				case "roots":
+					v = rootsPEM(t)
+				case "b64 roots":
+					v = base64Of(rootsPEM(t))
 				}
 				t.Setenv(k, v)
 			}
@@ -120,6 +139,71 @@ func TestNew(t *testing.T) {
 				t.Fatalf("defaults: %+v", tunnels)
 			}
 		})
+	}
+}
+
+var (
+	rootKey = capabilitytest.Key("config root")
+	envKey  = capabilitytest.Key("config environment")
+)
+
+func testRoot(t *testing.T) *capabilitytest.Root {
+	t.Helper()
+	root, err := capabilitytest.NewRoot(
+		rootKey,
+		time.Now().Add(-time.Hour),
+		time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func rootsPEM(t *testing.T) string {
+	t.Helper()
+	return rootPEM(testRoot(t))
+}
+
+func rootPEM(root *capabilitytest.Root) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.DER}))
+}
+
+// TestRootsVerifyForTheControllerHost: with TRAVERSAL_CAPABILITY_ROOTS alone,
+// the connector trusts a capability whose environment certificate names the
+// host of TRAVERSAL_CONTROLLER_URL, and no other host.
+func TestRootsVerifyForTheControllerHost(t *testing.T) {
+	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "")
+	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", "")
+	root := testRoot(t)
+	t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(root))
+	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]bool{"edge.example.com": true, "edge.other.com": false} {
+		cert, err := root.Issue(capabilitytest.EnvironmentCert{
+			Key: &envKey.PublicKey, Issuer: capability.IssuerURIPrefix + "test",
+			Hosts: []string{host}, NotBefore: time.Now().Add(-time.Minute),
+			NotAfter: time.Now().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims := capabilitytest.Claims(
+			capability.IssuerPrefix+"test",
+			connector,
+			"db.internal",
+			5432,
+		)
+		token, err := capability.SignChained(envKey, "env", [][]byte{cert}, claims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tunnels.Server.Verifier.Verify(token, connector, "db.internal", 5432)
+		if (err == nil) != want {
+			t.Errorf("certificate for %s: %v, want accepted %v", host, err, want)
+		}
 	}
 }
 

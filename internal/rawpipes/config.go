@@ -27,15 +27,7 @@ var systemRoots = []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.
 // cover.
 func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, error) {
 	e := envReader{}
-	keys, err := capability.ParseKeys([]byte(decodePEM(os.Getenv("TRAVERSAL_CAPABILITY_KEYS"))))
-	if err != nil {
-		return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
-	}
-	verifier, err := capability.NewVerifier(capability.VerifierConfig{
-		Issuer:  os.Getenv("TRAVERSAL_CAPABILITY_ISSUER"),
-		Subject: "integration-proxy",
-		Keys:    keys,
-	})
+	verifier, err := newVerifier(cfg.TraversalControllerURL)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +81,51 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		return nil, errors.New("tunnels through EGRESS_PROXY_URL are not supported yet")
 	}
 	return t, errors.Join(e.errs...)
+}
+
+// newVerifier trusts capabilities signed by a pinned key
+// (TRAVERSAL_CAPABILITY_KEYS, with TRAVERSAL_CAPABILITY_ISSUER), or certified
+// under a pinned root (TRAVERSAL_CAPABILITY_ROOTS) for the controller host
+// the connector dials, or both while moving from keys to roots.
+func newVerifier(controllerURL string) (*capability.Verifier, error) {
+	vc := capability.VerifierConfig{
+		Issuer:  os.Getenv("TRAVERSAL_CAPABILITY_ISSUER"),
+		Subject: "integration-proxy",
+	}
+	keys, roots := os.Getenv("TRAVERSAL_CAPABILITY_KEYS"), os.Getenv("TRAVERSAL_CAPABILITY_ROOTS")
+	if keys == "" && roots == "" {
+		return nil, errors.New(
+			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required",
+		)
+	}
+	var err error
+	if keys != "" {
+		if vc.Keys, err = capability.ParseKeys([]byte(decodePEM(keys))); err != nil {
+			return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
+		}
+		if vc.Issuer == "" {
+			return nil, errors.New(
+				"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS",
+			)
+		}
+	}
+	if roots != "" {
+		if vc.Roots, err = capability.ParseRootsPEM([]byte(decodePEM(roots))); err != nil {
+			return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
+		}
+		u, err := url.Parse(controllerURL)
+		host, ok := "", false
+		if err == nil {
+			host, ok = capability.Canonical(u.Hostname())
+		}
+		if !ok {
+			return nil, errors.New(
+				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name",
+			)
+		}
+		vc.ControllerHost = host
+	}
+	return capability.NewVerifier(vc)
 }
 
 // tunnelTLS is mutual TLS 1.3 to the controller host, with the connector's
