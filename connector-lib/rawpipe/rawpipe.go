@@ -1,24 +1,122 @@
-// Package rawpipe is what the connector, the tunnel gateway and the
+// Package rawpipe is what the connector, the edge controller and the
 // Integration Proxy share about raw pipes: the tunnel protocol, headers, and
 // why an open was refused.
 package rawpipe
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
+	"strings"
 )
 
 // Tunnel protocol. A connector dials the controller host with ALPN, writes
-// Preface, a space, its connector ID and a newline, then serves HTTP/2: the
-// gateway opens one CONNECT stream per pipe. A DrainMethod request asks the
+// its preface line (WritePreface), then serves HTTP/2: the edge controller
+// opens one CONNECT stream per pipe. A DrainMethod request asks the
 // connector for a replacement tunnel.
 const (
 	ALPN        = "x-traversal-tunnel"
 	Preface     = "TRAVERSAL-TUNNEL/1"
 	DrainMethod = "TRAVERSAL-DRAIN"
+	// MaxPrefaceLen bounds a preface line, its newline included.
+	MaxPrefaceLen = 512
 )
+
+// A preface line is Preface, a space, the connector ID, then optional
+// space-separated key=value fields naming the capability trust the connector
+// has loaded, each a comma-separated list:
+//
+//	TRAVERSAL-TUNNEL/1 <connector-id> roots=<fingerprint>,... kids=<kid>,...
+//
+// A field whose list is empty is left out.
+const (
+	prefaceRoots = "roots"
+	prefaceKids  = "kids"
+)
+
+// RootFingerprint names a capability root in a preface: the first 16 hex
+// digits of the SHA-256 of its DER.
+func RootFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:8])
+}
+
+// WritePreface writes the preface line for connectorID, reporting roots
+// (RootFingerprint each) and kids, the pinned keys' IDs. It refuses a line
+// ParsePreface would not read back: a connector ID that is not a lower-case
+// UUID, a value that is empty or holds a space, comma or control byte, or a
+// line over MaxPrefaceLen.
+func WritePreface(w io.Writer, connectorID string, roots, kids []string) error {
+	if !IsConnectorID(connectorID) {
+		return fmt.Errorf("rawpipe: preface: %q is not a connector ID", connectorID)
+	}
+	line := Preface + " " + connectorID
+	for _, f := range []struct {
+		key    string
+		values []string
+	}{{prefaceRoots, roots}, {prefaceKids, kids}} {
+		if len(f.values) == 0 {
+			continue
+		}
+		for _, v := range f.values {
+			if !prefaceValue(v) {
+				return fmt.Errorf("rawpipe: preface: %s value %q", f.key, v)
+			}
+		}
+		line += " " + f.key + "=" + strings.Join(f.values, ",")
+	}
+	if line += "\n"; len(line) > MaxPrefaceLen {
+		return fmt.Errorf("rawpipe: preface: %d bytes, over %d", len(line), MaxPrefaceLen)
+	}
+	_, err := io.WriteString(w, line)
+	return err
+}
+
+// ParsePreface reads a preface line, with or without its newline. It is
+// strict about the tag and the connector ID, and lenient about fields:
+// unknown key=value fields are ignored, so a connector can report more
+// without a controller release. A field that is not key=value, or a known
+// key given twice, refuses the line.
+func ParsePreface(line string) (connectorID string, roots, kids []string, ok bool) {
+	fields := strings.Split(strings.TrimSuffix(line, "\n"), " ")
+	if len(fields) < 2 || fields[0] != Preface || !IsConnectorID(fields[1]) {
+		return "", nil, nil, false
+	}
+	seen := map[string]bool{}
+	for _, f := range fields[2:] {
+		key, value, isField := strings.Cut(f, "=")
+		if !isField || key == "" || seen[key] {
+			return "", nil, nil, false
+		}
+		seen[key] = true
+		var list []string
+		if value != "" {
+			list = strings.Split(value, ",")
+		}
+		switch key {
+		case prefaceRoots:
+			roots = list
+		case prefaceKids:
+			kids = list
+		}
+	}
+	return fields[1], roots, kids, true
+}
+
+// prefaceValue reports whether v can stand in a preface list: printable
+// ASCII, neither a space nor a comma.
+func prefaceValue(v string) bool {
+	for i := range len(v) {
+		if v[i] <= ' ' || v[i] > '~' || v[i] == ',' {
+			return false
+		}
+	}
+	return v != ""
+}
 
 // Reason says why an open was refused. It travels in HeaderReason.
 type Reason string
