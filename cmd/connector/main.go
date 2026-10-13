@@ -225,7 +225,7 @@ func main() {
 		return
 	}
 
-	var gates []router.ReadinessGate
+	var rawTunnels router.RawTunnels
 	if os.Getenv("TRAVERSAL_RAW_PIPES") == "enabled" {
 		if tunnels, err := rawpipes.New(&cfg, redactor.RequiresInspection); err != nil {
 			// Raw pipes never stop the legacy transport.
@@ -236,7 +236,7 @@ func main() {
 				err,
 			)
 		} else {
-			gates = append(gates, tunnels.Ready)
+			rawTunnels = tunnels
 			done := tunnels.Start(ctx)
 			defer func() { <-done }()
 		}
@@ -257,7 +257,7 @@ func main() {
 	}
 
 	// Start HTTP server for health and readiness endpoints.
-	ginRouter := router.NewRouter(cfg, cm, gates...)
+	ginRouter := router.NewRouter(cfg, cm, rawTunnels)
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           ginRouter,

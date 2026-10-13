@@ -9,12 +9,14 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
@@ -135,7 +137,8 @@ func TestNew(t *testing.T) {
 			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
 				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
-				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200):
+				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200 ||
+					!slices.Equal(tunnels.Kids, []string{"k1"}) || tunnels.Roots != nil):
 				t.Fatalf("defaults: %+v", tunnels)
 			}
 		})
@@ -180,6 +183,10 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"), nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(tunnels.Roots, []string{rawpipe.RootFingerprint(root.DER)}) ||
+		tunnels.Kids != nil {
+		t.Fatalf("reported trust: roots %v kids %v", tunnels.Roots, tunnels.Kids)
 	}
 	for host, want := range map[string]bool{"edge.example.com": true, "edge.other.com": false} {
 		cert, err := root.Issue(capabilitytest.EnvironmentCert{

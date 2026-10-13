@@ -17,7 +17,7 @@ import (
 const InstrumentationName = "traversal-connector/rawpipes"
 
 // metrics are the raw pipe side's measurements. Labels are closed sets: the
-// rawpipe refusal reasons, the splice outcomes, and a few dial results.
+// rawpipe refusal reasons, the pipe outcomes, and a few dial results.
 type metrics struct {
 	tunnelsUp metric.Int64UpDownCounter
 	dials     metric.Int64Counter
@@ -46,28 +46,38 @@ func newMetrics() (*metrics, error) {
 	return &m, errors.Join(errs[:]...)
 }
 
+// observeTrust reports the capability trust the connector has loaded, one
+// series per root fingerprint and per kid, so the fleet's trust can be read
+// before a signing change relies on it.
+func observeTrust(t trust) error {
+	_, err := otel.Meter(InstrumentationName).Int64ObservableGauge(
+		telemetry.MetricCapabilityTrust,
+		metric.WithDescription("Capability roots (by fingerprint) and pinned kids loaded; always 1"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for kind, ids := range map[string][]string{"root": t.roots, "kid": t.kids} {
+				for _, id := range ids {
+					o.Observe(1, metric.WithAttributes(attribute.String("kind", kind),
+						attribute.String("id", id)))
+				}
+			}
+			return nil
+		}))
+	return err
+}
+
 func outcome(o string) metric.MeasurementOption {
 	return metric.WithAttributes(attribute.String("outcome", o))
 }
 
-func (m *metrics) tunnel(delta int64) {
-	if m != nil {
-		m.tunnelsUp.Add(context.Background(), delta)
-	}
-}
+func (m *metrics) tunnel(delta int64) { m.tunnelsUp.Add(context.Background(), delta) }
 
-// dialed records a dial: connected, replaced (the gateway asked for a new
-// tunnel), or failed.
+// dialed records a dial: connected, replaced (the edge controller asked for
+// a new tunnel), or failed.
 func (m *metrics) dialed(result string) {
-	if m != nil {
-		m.dials.Add(context.Background(), 1, outcome(result))
-	}
+	m.dials.Add(context.Background(), 1, outcome(result))
 }
 
 func (m *metrics) opened(reason rawpipe.Reason) {
-	if m == nil {
-		return
-	}
 	o := "opened"
 	if reason != "" {
 		o = string(reason)
@@ -75,16 +85,9 @@ func (m *metrics) opened(reason rawpipe.Reason) {
 	m.opens.Add(context.Background(), 1, outcome(o))
 }
 
-func (m *metrics) pipe(delta int64) {
-	if m != nil {
-		m.pipes.Add(context.Background(), delta)
-	}
-}
+func (m *metrics) pipe(delta int64) { m.pipes.Add(context.Background(), delta) }
 
 func (m *metrics) ended(sent, received int64, o halfconn.Outcome) {
-	if m == nil {
-		return
-	}
 	ctx := context.Background()
 	m.ends.Add(ctx, 1, outcome(string(o)))
 	m.bytes.Add(ctx, sent, metric.WithAttributes(attribute.String("direction", "sent")))
