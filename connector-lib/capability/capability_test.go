@@ -25,12 +25,16 @@ var key = capabilitytest.Key("capability test")
 
 func verifier(t *testing.T) *capability.Verifier {
 	t.Helper()
-	v, err := capability.NewVerifier(issuer, "integration-proxy",
-		map[string]*ecdsa.PublicKey{"k1": &key.PublicKey})
+	v, err := capability.NewVerifier(pinnedConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return v
+}
+
+func pinnedConfig() capability.VerifierConfig {
+	return capability.VerifierConfig{Issuer: issuer, Subject: "integration-proxy",
+		Keys: map[string]*ecdsa.PublicKey{"k1": &key.PublicKey}}
 }
 
 func sign(t *testing.T, mutate func(*capability.Claims)) string {
@@ -159,8 +163,7 @@ func TestParseKeys(t *testing.T) {
 func BenchmarkVerifyManyLive(b *testing.B) {
 	for _, live := range []int{0, 60000} {
 		b.Run(strconv.Itoa(live), func(b *testing.B) {
-			v, _ := capability.NewVerifier(issuer, "integration-proxy",
-				map[string]*ecdsa.PublicKey{"k1": &key.PublicKey})
+			v, _ := capability.NewVerifier(pinnedConfig())
 			mint := func(i int) string {
 				c := capabilitytest.Claims(issuer, connector, "db.internal", 5432)
 				c.JTI = "jti-" + strconv.Itoa(i)
@@ -207,8 +210,14 @@ func TestStrictClaims(t *testing.T) {
 // resign signs header.payload with the test key, as the issuer would.
 func resign(t *testing.T, header, payload string) string {
 	t.Helper()
+	return resignWith(t, key, header, payload)
+}
+
+// resignWith signs header.payload with k.
+func resignWith(t *testing.T, k *ecdsa.PrivateKey, header, payload string) string {
+	t.Helper()
 	digest := sha256.Sum256([]byte(header + "." + payload))
-	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	r, s, err := ecdsa.Sign(rand.Reader, k, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}

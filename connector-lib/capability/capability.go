@@ -58,6 +58,8 @@ type header struct {
 	Alg string `json:"alg"`
 	Typ string `json:"typ"`
 	Kid string `json:"kid"`
+	// X5C is the signing key's certificate chain (chain.go), optional.
+	X5C []string `json:"x5c,omitempty"`
 }
 
 // reject is an invalid capability. It never quotes the token.
@@ -65,12 +67,34 @@ func reject(msg string) error { return rawpipe.Errorf(rawpipe.InvalidCapability,
 
 // Sign returns claims as a capability signed by key under kid.
 func Sign(key *ecdsa.PrivateKey, kid string, c Claims) (string, error) {
+	return sign(key, header{Alg: "ES256", Typ: tokenType, Kid: kid}, c)
+}
+
+// SignChained is Sign that also sends x5c, the DER certificate chain of key
+// (its environment certificate first, then any intermediate), so verifiers
+// that pin only Traversal's roots trust it. The leaf must certify key and
+// name the issuer of c; SignChained checks only x5c's bounds.
+func SignChained(key *ecdsa.PrivateKey, kid string, x5c [][]byte, c Claims) (string, error) {
+	total := 0
+	chain := make([]string, len(x5c))
+	for i, der := range x5c {
+		total += len(der)
+		chain[i] = base64.StdEncoding.EncodeToString(der)
+	}
+	if len(x5c) == 0 || len(x5c) > maxChainCerts || total > maxChainBytes {
+		return "", fmt.Errorf("capability: x5c must be 1 to %d certificates, at most %d bytes",
+			maxChainCerts, maxChainBytes)
+	}
+	return sign(key, header{Alg: "ES256", Typ: tokenType, Kid: kid, X5C: chain}, c)
+}
+
+func sign(key *ecdsa.PrivateKey, h header, c Claims) (string, error) {
 	if err := c.valid(); err != nil {
 		return "", err
 	}
-	h, _ := json.Marshal(header{Alg: "ES256", Typ: tokenType, Kid: kid})
+	hdr, _ := json.Marshal(h)
 	p, _ := json.Marshal(c)
-	input := b64(h) + "." + b64(p)
+	input := b64(hdr) + "." + b64(p)
 	digest := sha256.Sum256([]byte(input))
 	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
 	if err != nil {
@@ -87,6 +111,7 @@ func Sign(key *ecdsa.PrivateKey, kid string, c Claims) (string, error) {
 type Verifier struct {
 	issuer  string
 	keys    map[string]*ecdsa.PublicKey
+	chains  *chains
 	subject string
 	now     func() time.Time
 
@@ -122,31 +147,67 @@ func (h *jtiHeap) Pop() any {
 	return last
 }
 
-// NewVerifier accepts capabilities from issuer, signed by one of keys (by
-// kid), for subject.
-func NewVerifier(issuer, subject string, keys map[string]*ecdsa.PublicKey) (*Verifier, error) {
-	if issuer == "" || subject == "" || len(keys) == 0 {
-		return nil, errors.New("capability: issuer, subject and a key are required")
+// VerifierConfig says which capabilities a Verifier trusts: those signed by
+// a pinned key, or by a key an environment certificate certifies under a
+// pinned root (chain.go), or either while moving from keys to roots.
+type VerifierConfig struct {
+	// Issuer is the iss claim to accept, traversal-raw-tunnel/<env>.
+	// Required with Keys. With Roots alone it may be empty: a chained
+	// capability's issuer is the one its certificate names. Set, it
+	// constrains chained capabilities too.
+	Issuer string
+	// Subject is the sub claim to accept. Required.
+	Subject string
+	// Keys are the pinned P-256 keys by kid: the current one and, during a
+	// rotation, the next.
+	Keys map[string]*ecdsa.PublicKey
+	// Roots are the pinned capability roots: the current one and, during a
+	// root rotation, the next.
+	Roots []*x509.Certificate
+	// ControllerHost is the host this verifier's connector dials for its
+	// controller. Required with Roots: an environment certificate must name
+	// it, which binds a chained capability to this connector's environment.
+	ControllerHost string
+}
+
+// NewVerifier returns a Verifier for cfg. At least one key or root is
+// required.
+func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
+	switch {
+	case cfg.Subject == "":
+		return nil, errors.New("capability: a subject is required")
+	case len(cfg.Keys) == 0 && len(cfg.Roots) == 0:
+		return nil, errors.New("capability: a key or a root is required")
+	case len(cfg.Keys) > 0 && cfg.Issuer == "":
+		return nil, errors.New("capability: an issuer is required with keys")
 	}
-	for kid, k := range keys {
+	for kid, k := range cfg.Keys {
 		if kid == "" || k == nil || k.Curve != elliptic.P256() {
 			return nil, errors.New("capability: keys must be P-256 with a kid")
 		}
 	}
-	return &Verifier{issuer: issuer, keys: keys, subject: subject, now: time.Now,
-		opens: map[string]int{}}, nil
+	v := &Verifier{issuer: cfg.Issuer, keys: cfg.Keys, subject: cfg.Subject, now: time.Now,
+		opens: map[string]int{}}
+	if len(cfg.Roots) > 0 {
+		var err error
+		if v.chains, err = newChains(cfg.Roots, cfg.ControllerHost); err != nil {
+			return nil, err
+		}
+	}
+	return v, nil
 }
 
 // Verify checks token for a pipe to host:port through connector and counts
 // one open against it.
 func (v *Verifier) Verify(token, connector, host string, port uint16) (*Claims, error) {
-	c, err := v.parse(token)
+	now := v.now()
+	c, issuer, err := v.parse(token, now)
 	if err != nil {
 		return nil, err
 	}
-	now := v.now()
 	switch {
-	case c.Issuer != v.issuer || c.Audience != Audience || c.Subject != v.subject:
+	case c.Issuer != issuer || v.issuer != "" && c.Issuer != v.issuer ||
+		c.Audience != Audience || c.Subject != v.subject:
 		return nil, reject("wrong issuer, audience or subject")
 	case now.Add(maxClockSkew).Before(time.Unix(c.IssuedAt, 0)) ||
 		!now.Add(-maxClockSkew).Before(time.Unix(c.ExpiresAt, 0)):
@@ -162,18 +223,20 @@ func (v *Verifier) Verify(token, connector, host string, port uint16) (*Claims, 
 	return c, nil
 }
 
-func (v *Verifier) parse(token string) (*Claims, error) {
+// parse checks token's structure and signature, and returns its claims and
+// the issuer they must carry.
+func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 	parts := strings.Split(token, ".")
 	if len(token) > maxTokenLen || len(parts) != 3 {
-		return nil, reject("not a compact JWS")
+		return nil, "", reject("not a compact JWS")
 	}
 	var h header
 	if err := decode(parts[0], &h); err != nil || h.Alg != "ES256" || h.Typ != tokenType {
-		return nil, reject("bad header")
+		return nil, "", reject("bad header")
 	}
-	key, ok := v.keys[h.Kid]
-	if !ok {
-		return nil, reject("unknown kid")
+	key, issuer, err := v.signingKey(h, now)
+	if err != nil {
+		return nil, "", err
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
@@ -184,16 +247,46 @@ func (v *Verifier) parse(token string) (*Claims, error) {
 			new(big.Int).SetBytes(sig[:32]),
 			new(big.Int).SetBytes(sig[32:]),
 		) {
-		return nil, reject("bad signature")
+		return nil, "", reject("bad signature")
 	}
 	var c Claims
 	if err := decode(parts[1], &c); err != nil {
-		return nil, reject("bad claims")
+		return nil, "", reject("bad claims")
 	}
 	if err := c.valid(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &c, nil
+	return &c, issuer, nil
+}
+
+// signingKey is the key that must have signed a capability with h, and the
+// issuer its claims must carry. With roots, an x5c chain decides: its
+// certificate's key and issuer, and a kid naming a pinned key must name that
+// same key, so a verifier with keys and one with roots never accept a token
+// under two different keys. Without roots x5c is ignored, which keeps pinned
+// keys working as a signer starts sending its certificate.
+func (v *Verifier) signingKey(h header, now time.Time) (*ecdsa.PublicKey, string, error) {
+	pinned := v.keys[h.Kid]
+	switch {
+	case h.X5C != nil && v.chains != nil:
+		certs, err := parseChain(h.X5C)
+		if err != nil {
+			return nil, "", err
+		}
+		key, issuer, err := v.chains.verify(certs, now)
+		if err != nil {
+			return nil, "", err
+		}
+		if pinned != nil && !pinned.Equal(key) {
+			return nil, "", untrusted("kid names a pinned key the x5c certificate does not certify")
+		}
+		return key, issuer, nil
+	case pinned != nil:
+		return pinned, v.issuer, nil
+	case h.X5C != nil:
+		return nil, "", untrusted("x5c, and this verifier trusts no roots")
+	}
+	return nil, "", reject("unknown kid")
 }
 
 // valid rejects claims no verifier would accept for their shape alone.
