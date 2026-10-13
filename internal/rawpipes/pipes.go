@@ -1,6 +1,7 @@
 // Package rawpipes is the connector's raw pipe side. It holds tunnels to
-// Traversal's tunnel gateway (tunnels.go) and serves each pipe the gateway
-// opens on them: verify the capability, dial the destination, copy bytes.
+// Traversal's edge controller (tunnels.go) and serves each pipe the edge
+// controller opens on them: verify the capability, dial the destination,
+// copy bytes.
 package rawpipes
 
 import (
@@ -61,6 +62,9 @@ type Server struct {
 		Dial(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
 	}
 	MaxPipes int64
+	// RequiresInspection reports hosts redaction rules cover; a raw pipe to
+	// one is refused (inspection_required). Nil covers none.
+	RequiresInspection func(host string) bool
 	// RefuseTCP refuses every raw TCP pipe (raw_tcp_refused) while tunnels
 	// stay up: the customer's switch for a connector that must only carry
 	// redacted HTTP.
@@ -78,7 +82,7 @@ type Server struct {
 }
 
 // ServeConn serves pipes on one tunnel until it closes. drained runs once if
-// the gateway asks for a replacement tunnel.
+// the edge controller asks for a replacement tunnel.
 func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	var once sync.Once
 	s.h2(max(1, s.Tunnels)).ServeConn(nc, &http2.ServeConnOpts{Handler: http.HandlerFunc(
@@ -168,6 +172,10 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
 	s.pipes.Add(1)
+	if s.RequiresInspection != nil && s.RequiresInspection(host) {
+		s.closed()
+		return nil, "", rawpipe.Errorf(rawpipe.InspectionRequired, "redaction rules cover the host")
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), dialTimeout)
 	defer cancel()
 	conn, upstream, err := s.Policy.Dial(ctx, host, port)

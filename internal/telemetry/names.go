@@ -32,4 +32,5 @@ const (
 	MetricRawPipes           = "connector.raw_pipes"
 	MetricRawPipeEndTotal    = "connector.raw_pipe_end_total"
 	MetricRawPipeBytes       = "connector.raw_pipe_bytes_total"
+	MetricCapabilityTrust    = "connector.capability_trust"
 )

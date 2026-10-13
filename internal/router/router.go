@@ -14,18 +14,16 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
-// ReadinessGate reports whether one part of the connector can take traffic,
-// and if not, why.
-type ReadinessGate func(ctx context.Context) (ready bool, reason string)
+// RawTunnels is the raw pipe side as readiness sees it.
+type RawTunnels interface {
+	// Ready reports whether raw pipes can take traffic, and if not, why.
+	Ready(ctx context.Context) (ready bool, reason string)
+}
 
 // NewRouter creates a gin HTTP engine for the traversal connector with health and
-// readiness endpoints. The connector is ready when it holds a legacy tunnel and
-// every gate passes.
-func NewRouter(
-	cfg config.Config,
-	cm *client.ConnectionManager,
-	gates ...ReadinessGate,
-) *gin.Engine {
+// readiness endpoints. The connector is ready when it holds a legacy tunnel and,
+// if raw is set, raw pipes are ready.
+func NewRouter(cfg config.Config, cm *client.ConnectionManager, raw RawTunnels) *gin.Engine {
 	if cfg.EnvLevel.IsDev() {
 		gin.SetMode(gin.DebugMode)
 	} else {
@@ -52,7 +50,7 @@ func NewRouter(
 	}
 
 	r.GET("/healthz", healthCheckHandler)
-	r.GET("/readyz", readinessHandler(cm, gates))
+	r.GET("/readyz", readinessHandler(cm, raw))
 
 	return r
 }
@@ -63,7 +61,7 @@ func healthCheckHandler(c *gin.Context) {
 	})
 }
 
-func readinessHandler(cm *client.ConnectionManager, gates []ReadinessGate) gin.HandlerFunc {
+func readinessHandler(cm *client.ConnectionManager, raw RawTunnels) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		activeTunnels := cm.ActiveCount()
 		if activeTunnels == 0 {
@@ -74,8 +72,8 @@ func readinessHandler(cm *client.ConnectionManager, gates []ReadinessGate) gin.H
 			})
 			return
 		}
-		for _, gate := range gates {
-			if ready, reason := gate(c.Request.Context()); !ready {
+		if raw != nil {
+			if ready, reason := raw.Ready(c.Request.Context()); !ready {
 				c.JSON(http.StatusServiceUnavailable, gin.H{
 					"status":         "not ready",
 					"active_tunnels": activeTunnels,

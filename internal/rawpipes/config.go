@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ var systemRoots = []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.
 // cover.
 func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, error) {
 	e := envReader{}
-	verifier, err := newVerifier(cfg.TraversalControllerURL)
+	verifier, trust, err := newVerifier(cfg.TraversalControllerURL)
 	if err != nil {
 		return nil, err
 	}
@@ -38,9 +39,8 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		}
 	}
 	policy, err := dialpolicy.New(dialpolicy.Config{
-		RequiresInspection: requiresInspection,
-		Proxy:              proxy,
-		ProxyResolves:      e.bool("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"),
+		Proxy:         proxy,
+		ProxyResolves: e.bool("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"),
 	})
 	if err != nil {
 		return nil, err
@@ -49,20 +49,26 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 	if err != nil {
 		return nil, err
 	}
+	if err := observeTrust(trust); err != nil {
+		return nil, err
+	}
 	server := &Server{
-		metrics:     m,
-		ConnectorID: cfg.ConnectorID,
-		Verifier:    verifier,
-		Policy:      policy,
-		MaxPipes:    int64(e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096)),
-		RefuseTCP:   e.bool("TRAVERSAL_RAW_PIPES_REFUSE_TCP"),
-		MaxLifetime: e.duration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 4*time.Hour),
-		IdleTimeout: e.duration("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", 15*time.Minute),
+		metrics:            m,
+		ConnectorID:        cfg.ConnectorID,
+		Verifier:           verifier,
+		Policy:             policy,
+		MaxPipes:           int64(e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096)),
+		RequiresInspection: requiresInspection,
+		RefuseTCP:          e.bool("TRAVERSAL_RAW_PIPES_REFUSE_TCP"),
+		MaxLifetime:        e.duration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 4*time.Hour),
+		IdleTimeout:        e.duration("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", 15*time.Minute),
 	}
 	t := &Tunnels{
 		ConnectorID: cfg.ConnectorID,
 		Count:       e.int("TRAVERSAL_TUNNEL_COUNT", 2, 8),
 		Server:      server,
+		Roots:       trust.roots,
+		Kids:        trust.kids,
 	}
 	server.Tunnels = t.Count
 	if t.TLS, t.Addr, err = tunnelTLS(cfg); err != nil {
@@ -83,35 +89,39 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 	return t, errors.Join(e.errs...)
 }
 
+// trust is the capability trust a connector has loaded, as it reports it:
+// each root's rawpipe.RootFingerprint, and the pinned keys' IDs, sorted.
+type trust struct{ roots, kids []string }
+
 // newVerifier trusts capabilities signed by a pinned key
 // (TRAVERSAL_CAPABILITY_KEYS, with TRAVERSAL_CAPABILITY_ISSUER), or certified
 // under a pinned root (TRAVERSAL_CAPABILITY_ROOTS) for the controller host
 // the connector dials, or both while moving from keys to roots.
-func newVerifier(controllerURL string) (*capability.Verifier, error) {
+func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 	vc := capability.VerifierConfig{
 		Issuer:  os.Getenv("TRAVERSAL_CAPABILITY_ISSUER"),
 		Subject: "integration-proxy",
 	}
 	keys, roots := os.Getenv("TRAVERSAL_CAPABILITY_KEYS"), os.Getenv("TRAVERSAL_CAPABILITY_ROOTS")
 	if keys == "" && roots == "" {
-		return nil, errors.New(
+		return nil, trust{}, errors.New(
 			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required",
 		)
 	}
 	var err error
 	if keys != "" {
 		if vc.Keys, err = capability.ParseKeys([]byte(decodePEM(keys))); err != nil {
-			return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
+			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
 		}
 		if vc.Issuer == "" {
-			return nil, errors.New(
+			return nil, trust{}, errors.New(
 				"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS",
 			)
 		}
 	}
 	if roots != "" {
 		if vc.Roots, err = capability.ParseRootsPEM([]byte(decodePEM(roots))); err != nil {
-			return nil, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
+			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
 		}
 		u, err := url.Parse(controllerURL)
 		host, ok := "", false
@@ -119,13 +129,22 @@ func newVerifier(controllerURL string) (*capability.Verifier, error) {
 			host, ok = capability.Canonical(u.Hostname())
 		}
 		if !ok {
-			return nil, errors.New(
+			return nil, trust{}, errors.New(
 				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name",
 			)
 		}
 		vc.ControllerHost = host
 	}
-	return capability.NewVerifier(vc)
+	var t trust
+	for _, root := range vc.Roots {
+		t.roots = append(t.roots, rawpipe.RootFingerprint(root.Raw))
+	}
+	for kid := range vc.Keys {
+		t.kids = append(t.kids, kid)
+	}
+	slices.Sort(t.kids)
+	v, err := capability.NewVerifier(vc)
+	return v, t, err
 }
 
 // tunnelTLS is mutual TLS 1.3 to the controller host, with the connector's
@@ -217,7 +236,7 @@ func decodePEM(v string) string {
 	return v
 }
 
-// checkIdentity refuses a certificate the tunnel gateway would refuse, so
+// checkIdentity refuses a certificate the edge controller would refuse, so
 // such a connector keeps to the legacy transport and says why.
 func checkIdentity(cert *x509.Certificate, connectorID string) error {
 	if !rawpipe.IsConnectorID(connectorID) {

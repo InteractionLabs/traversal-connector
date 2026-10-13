@@ -23,6 +23,10 @@ type Tunnels struct {
 	TLS    *tls.Config
 	Count  int
 	Server *Server
+	// Roots and Kids are the capability trust the connector has loaded,
+	// reported in the preface: each root's rawpipe.RootFingerprint, and the
+	// pinned keys' IDs.
+	Roots, Kids []string
 
 	up       atomic.Int64
 	downAt   atomic.Int64 // when the last tunnel went down, Unix nanos
@@ -42,6 +46,8 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 	// rather than reset.
 	transport, closeTunnels := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
+	// Before any goroutine: Ready reads it from the moment Start returns.
+	t.downAt.Store(time.Now().UnixNano())
 	go t.run(transport)
 	go func() {
 		defer close(done)
@@ -56,7 +62,6 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 }
 
 func (t *Tunnels) run(ctx context.Context) {
-	t.downAt.Store(time.Now().UnixNano())
 	var wg sync.WaitGroup
 	for range t.Count {
 		wg.Go(func() { t.hold(ctx) })
@@ -89,7 +94,7 @@ func (t *Tunnels) hold(ctx context.Context) {
 		}
 		wait := backoff/2 + rand.N(backoff/2) //nolint:gosec // jitter
 		if err == nil {
-			wait = 0 // the gateway asked for a replacement
+			wait = 0 // the edge controller asked for a replacement
 		}
 		slog.InfoContext(ctx, "tunnel down; redialing", "err", err, "in", wait)
 		select {
@@ -102,8 +107,8 @@ func (t *Tunnels) hold(ctx context.Context) {
 }
 
 // serveOne dials one tunnel and serves it. It returns nil as soon as the
-// gateway asks for a replacement, leaving the old tunnel serving until the
-// gateway closes it, or the tunnel's error when it closes.
+// edge controller asks for a replacement, leaving the old tunnel serving
+// until the edge controller closes it, or the tunnel's error when it closes.
 func (t *Tunnels) serveOne(ctx context.Context) error {
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -119,7 +124,7 @@ func (t *Tunnels) serveOne(ctx context.Context) error {
 		_ = c.Close()
 		return fmt.Errorf("%s did not accept the tunnel protocol", t.Addr)
 	}
-	if _, err := fmt.Fprintf(c, "%s %s\n", rawpipe.Preface, t.ConnectorID); err != nil {
+	if err := rawpipe.WritePreface(c, t.ConnectorID, t.Roots, t.Kids); err != nil {
 		_ = c.Close()
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,10 +62,20 @@ func echo(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// gateway listens for a tunnel and points tunnels at itself. accept takes
-// the tunnel, checks its preface, and returns an HTTP/2 client on it, as the
-// tunnel gateway does.
-func gateway(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn) {
+// testMetrics are the raw pipe metrics on the global meter, a no-op in tests.
+func testMetrics(t *testing.T) *metrics {
+	t.Helper()
+	m, err := newMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// controller listens for a tunnel and points tunnels at itself. accept takes
+// the tunnel, checks its preface reports the tunnels' connector and trust,
+// and returns an HTTP/2 client on it, as the edge controller does.
+func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn) {
 	srv := httptest.NewTLSServer(nil)
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
@@ -86,9 +97,10 @@ func gateway(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		br := bufio.NewReader(c)
-		if line, err := br.ReadString('\n'); err != nil ||
-			line != rawpipe.Preface+" "+connector+"\n" {
+		line, err := bufio.NewReader(c).ReadString('\n')
+		id, roots, kids, ok := rawpipe.ParsePreface(line)
+		if err != nil || !ok || id != connector || !slices.Equal(roots, tunnels.Roots) ||
+			!slices.Equal(kids, tunnels.Kids) {
 			t.Fatalf("preface %q: %v", line, err)
 		}
 		cc, err := (&http2.Transport{}).NewClientConn(c)
@@ -138,10 +150,11 @@ func TestPipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Server: &Server{
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Kids: []string{"k"}, Server: &Server{
 		ConnectorID: connector, Verifier: verifier, Policy: loopback(echo(t)), MaxPipes: 4,
+		metrics: testMetrics(t),
 	}}
-	accept := gateway(t, tunnels)
+	accept := controller(t, tunnels)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := tunnels.Start(ctx)
 	cc := accept()
@@ -171,6 +184,13 @@ func TestPipes(t *testing.T) {
 		t.Fatalf("refused: %d %s", status, reason)
 	}
 	tunnels.Server.RefuseTCP = false
+	// A raw pipe to a host redaction rules cover is refused before any dial.
+	tunnels.Server.RequiresInspection = func(h string) bool { return h == "db.internal" }
+	if status, reason, _ := open(t, cc, token(), "", nil); status != 403 ||
+		reason != string(rawpipe.InspectionRequired) {
+		t.Fatalf("redacted host: %d %s", status, reason)
+	}
+	tunnels.Server.RequiresInspection = nil
 
 	// A draining connector refuses new pipes and lets open ones finish.
 	hold := make(chan struct{})
@@ -190,11 +210,12 @@ func TestPipes(t *testing.T) {
 	<-done
 }
 
-// TestRedial: a tunnel the gateway drops is redialed, and a drain request
-// gets a replacement at once while the old tunnel stays open.
+// TestRedial: a tunnel the edge controller drops is redialed, and a drain
+// request gets a replacement at once while the old tunnel stays open.
 func TestRedial(t *testing.T) {
-	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Server: &Server{ConnectorID: connector}}
-	accept := gateway(t, tunnels)
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1,
+		Server: &Server{ConnectorID: connector, metrics: testMetrics(t)}}
+	accept := controller(t, tunnels)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	tunnels.Start(ctx)
@@ -211,7 +232,7 @@ func TestRedial(t *testing.T) {
 		}
 	}
 	first := next(5 * time.Second)
-	_ = first.Close() // the gateway drops the tunnel
+	_ = first.Close() // the edge controller drops the tunnel
 	second := next(5 * time.Second)
 
 	req, _ := http.NewRequest(rawpipe.DrainMethod, "http://tunnel/", http.NoBody)
@@ -222,7 +243,7 @@ func TestRedial(t *testing.T) {
 	_ = resp.Body.Close()
 	next(500 * time.Millisecond) // the replacement comes without backoff
 	if !second.CanTakeNewRequest() {
-		t.Error("the replaced tunnel closed before the gateway closed it")
+		t.Error("the replaced tunnel closed before the edge controller closed it")
 	}
 }
 
@@ -251,9 +272,29 @@ func TestReadyAfterFirstTunnel(t *testing.T) {
 	if ok, _ := tunnels.Ready(t.Context()); ok {
 		t.Error("ready before any tunnel")
 	}
-	tunnels.Server = &Server{metrics: nil}
 	tunnels.everUp.Store(true)
 	if ok, _ := tunnels.Ready(t.Context()); !ok {
 		t.Error("unready after tunnels flapped")
+	}
+}
+
+// TestNotReadyAtStart: a connector is unready from the moment Start returns
+// until a tunnel is up, even before any dial has run.
+func TestNotReadyAtStart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachable := ln.Addr().String()
+	_ = ln.Close()
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Addr: unreachable, TLS: &tls.Config{},
+		Server: &Server{ConnectorID: connector, metrics: testMetrics(t)}}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := tunnels.Start(ctx)
+	ready, _ := tunnels.Ready(ctx)
+	cancel()
+	<-done
+	if ready {
+		t.Fatal("ready with no tunnel, right after Start")
 	}
 }
