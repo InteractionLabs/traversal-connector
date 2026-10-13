@@ -164,6 +164,13 @@ func TestPipes(t *testing.T) {
 	if ok, _ := tunnels.Ready(ctx); !ok {
 		t.Fatal("not ready with a tunnel up")
 	}
+	// The customer's switch: tunnels stay, raw TCP is refused before any dial.
+	tunnels.Server.RefuseTCP = true
+	if status, reason, _ := open(t, cc, token(), "", nil); status != 403 ||
+		reason != string(rawpipe.TCPRefused) {
+		t.Fatalf("refused: %d %s", status, reason)
+	}
+	tunnels.Server.RefuseTCP = false
 
 	// A draining connector refuses new pipes and lets open ones finish.
 	hold := make(chan struct{})
@@ -216,5 +223,37 @@ func TestRedial(t *testing.T) {
 	next(500 * time.Millisecond) // the replacement comes without backoff
 	if !second.CanTakeNewRequest() {
 		t.Error("the replaced tunnel closed before the gateway closed it")
+	}
+}
+
+// TestTunnelServerLimits: the tunnel advertises the connector's pipe limit
+// per tunnel (so opens past it are capacity refusals, not open timeouts),
+// and pings a quiet tunnel so a dead far end is found.
+func TestTunnelServerLimits(t *testing.T) {
+	s := &Server{MaxPipes: 4000}
+	h := s.h2(2)
+	if h.MaxConcurrentStreams < 2000 || h.MaxConcurrentStreams > 2100 {
+		t.Errorf("MaxConcurrentStreams = %d for 4000 pipes over 2 tunnels", h.MaxConcurrentStreams)
+	}
+	if h.ReadIdleTimeout == 0 || h.PingTimeout == 0 {
+		t.Error("no read-idle ping: a tunnel to a dead controller would be held forever")
+	}
+	if h.MaxUploadBufferPerStream > 1<<20 {
+		t.Errorf("per-stream window %d: a stalled pipe holds too much", h.MaxUploadBufferPerStream)
+	}
+}
+
+// TestReadyAfterFirstTunnel: once a tunnel has been up, losing tunnels (a
+// controller rollout) does not make the connector unready.
+func TestReadyAfterFirstTunnel(t *testing.T) {
+	tunnels := &Tunnels{}
+	tunnels.downAt.Store(time.Now().UnixNano())
+	if ok, _ := tunnels.Ready(t.Context()); ok {
+		t.Error("ready before any tunnel")
+	}
+	tunnels.Server = &Server{metrics: nil}
+	tunnels.everUp.Store(true)
+	if ok, _ := tunnels.Ready(t.Context()); !ok {
+		t.Error("unready after tunnels flapped")
 	}
 }

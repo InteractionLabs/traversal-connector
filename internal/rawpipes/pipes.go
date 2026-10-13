@@ -21,11 +21,34 @@ import (
 
 const dialTimeout = 10 * time.Second
 
-// h2 has windows big enough that one pipe is not flow-control bound.
-var h2 = &http2.Server{
-	MaxUploadBufferPerStream:     2 << 20,
-	MaxUploadBufferPerConnection: 1 << 30,
-	MaxReadFrameSize:             256 << 10,
+const (
+	// streamWindow carries one pipe at full speed at WAN latency and bounds
+	// what a pipe whose destination stops reading can hold.
+	streamWindow = 512 << 10
+	// pingAfter and pingTimeout find a tunnel whose far end is gone without
+	// a FIN (a lost controller node behind a gateway that keeps the socket):
+	// the connector then redials instead of holding a tunnel to nowhere.
+	pingAfter   = 45 * time.Second
+	pingTimeout = 15 * time.Second
+)
+
+// h2 is the tunnel's HTTP/2 server. Its stream limit is the connector's pipe
+// limit per tunnel, so a pipe over it is refused as capacity rather than
+// queued into open_timeout.
+func (s *Server) h2(tunnels int) *http2.Server {
+	perTunnel := uint32(
+		max(1, (s.MaxPipes+int64(tunnels)-1)/int64(tunnels)),
+	) //nolint:gosec // bounded by MaxPipes
+	return &http2.Server{
+		MaxConcurrentStreams:     perTunnel + 16, // headroom for drain and refusals
+		MaxUploadBufferPerStream: streamWindow,
+		MaxUploadBufferPerConnection: int32(
+			min(int64(perTunnel)*streamWindow, 1<<30),
+		), //nolint:gosec // capped
+		MaxReadFrameSize: 256 << 10,
+		ReadIdleTimeout:  pingAfter,
+		PingTimeout:      pingTimeout,
+	}
 }
 
 // Server serves pipes on tunnels.
@@ -36,6 +59,12 @@ type Server struct {
 		Dial(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
 	}
 	MaxPipes int64
+	// RefuseTCP refuses every raw TCP pipe (raw_tcp_refused) while tunnels
+	// stay up: the customer's switch for a connector that must only carry
+	// redacted HTTP.
+	RefuseTCP bool
+	// Tunnels is how many tunnels share MaxPipes; 0 means 1.
+	Tunnels int
 	// MaxLifetime and IdleTimeout, if set, abort a pipe that is that old or
 	// has moved no bytes for that long.
 	MaxLifetime, IdleTimeout time.Duration
@@ -50,7 +79,7 @@ type Server struct {
 // the gateway asks for a replacement tunnel.
 func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	var once sync.Once
-	h2.ServeConn(nc, &http2.ServeConnOpts{Handler: http.HandlerFunc(
+	s.h2(max(1, s.Tunnels)).ServeConn(nc, &http2.ServeConnOpts{Handler: http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == rawpipe.DrainMethod {
 				once.Do(drained)
@@ -113,6 +142,11 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 		return nil, "", rawpipe.Errorf(
 			rawpipe.ProtocolError,
 			"expected CONNECT to a canonical host:port",
+		)
+	case s.RefuseTCP:
+		return nil, "", rawpipe.Errorf(
+			rawpipe.TCPRefused,
+			"raw TCP pipes are off on this connector",
 		)
 	}
 	claims, err := s.Verifier.Verify(

@@ -63,6 +63,7 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		Verifier:    verifier,
 		Policy:      policy,
 		MaxPipes:    int64(e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096)),
+		RefuseTCP:   e.bool("TRAVERSAL_RAW_PIPES_REFUSE_TCP"),
 		MaxLifetime: e.duration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 4*time.Hour),
 		IdleTimeout: e.duration("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", 15*time.Minute),
 	}
@@ -71,10 +72,17 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		Count:       e.int("TRAVERSAL_TUNNEL_COUNT", 2, 8),
 		Server:      server,
 	}
+	server.Tunnels = t.Count
 	if t.TLS, t.Addr, err = tunnelTLS(cfg); err != nil {
 		return nil, err
 	}
 	if connectTo := os.Getenv("TRAVERSAL_TUNNELS_CONNECT_TO"); connectTo != "" {
+		if host, port, err := net.SplitHostPort(connectTo); err != nil || host == "" || port == "" {
+			return nil, fmt.Errorf(
+				"TRAVERSAL_TUNNELS_CONNECT_TO must be host:port, got %q",
+				connectTo,
+			)
+		}
 		t.Addr = connectTo
 	}
 	if cfg.EgressProxyURL != nil {
@@ -100,7 +108,13 @@ func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 		return nil, "", err
 	}
 	roots := x509.NewCertPool()
-	for _, path := range systemRoots {
+	// SSL_CERT_FILE first: customers set it for TLS-intercepting proxies, as
+	// for the connector's other connections.
+	paths := systemRoots
+	if f := os.Getenv("SSL_CERT_FILE"); f != "" {
+		paths = append([]string{f}, paths...)
+	}
+	for _, path := range paths {
 		if pem, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed paths
 			roots.AppendCertsFromPEM(pem)
 		}
