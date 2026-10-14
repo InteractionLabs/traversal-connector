@@ -1,4 +1,4 @@
-package rawpipes
+package pipeserver
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 )
 
 // InstrumentationName is the OTel meter name for raw pipes.
-const InstrumentationName = "traversal-connector/rawpipes"
+const InstrumentationName = "traversal-connector/pipeserver"
 
 // metrics are the raw pipe side's measurements. Labels are closed sets: the
 // rawpipe refusal reasons, the pipe outcomes, and a few dial results.
