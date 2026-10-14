@@ -189,7 +189,7 @@ spec:
             {{- if .Values.rawPipes.enabled }}
             - name: TRAVERSAL_RAW_PIPES
               value: "enabled"
-            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_RAW_PIPES_MAX" "maxLifetime" "TRAVERSAL_RAW_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNEL_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES" "refuseTCP" "TRAVERSAL_RAW_PIPES_REFUSE_TCP" }}
+            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_RAW_PIPES_MAX" "maxLifetime" "TRAVERSAL_RAW_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNEL_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS" "refuseTCP" "TRAVERSAL_RAW_PIPES_REFUSE_TCP" }}
             {{- with get $.Values.rawPipes $key }}
             - name: {{ $name }}
               value: {{ . | toString | quote }}

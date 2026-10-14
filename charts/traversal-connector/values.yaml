@@ -86,6 +86,10 @@ rawPipes:
   # literals go through it. Turn on only if the proxy refuses loopback,
   # link-local and metadata addresses.
   egressProxyResolves: ""  # TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES
+  # Comma-separated CIDRs pipes may never reach, beside the built-in list
+  # (loopback, link-local, metadata and the connector's own addresses), which
+  # cannot be removed. An entry that does not parse stops raw pipes starting.
+  forbiddenCIDRs: ""       # TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS
   # Refuse every raw TCP pipe while keeping tunnels (redacted HTTP still
   # flows). For a connector that must never carry raw TCP.
   refuseTCP: ""            # TRAVERSAL_RAW_PIPES_REFUSE_TCP
