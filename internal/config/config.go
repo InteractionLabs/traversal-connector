@@ -218,13 +218,13 @@ func Load() (Config, error) {
 		)
 	}
 
-	if err := validateConnectTo(
+	if err := ValidateConnectTo(
 		"TRAVERSAL_CONTROLLER_CONNECT_TO",
 		controllerConnectTo,
 	); err != nil {
 		return Config{}, err
 	}
-	if err := validateConnectTo(
+	if err := ValidateConnectTo(
 		"OTEL_EXPORTER_OTLP_CONNECT_TO",
 		otlpConnectTo,
 	); err != nil {
@@ -372,9 +372,9 @@ func applyTelemetryPolicy(cfg *Config) error {
 	return nil
 }
 
-// validateConnectTo validates a routing-only host:port without ever echoing
+// ValidateConnectTo validates a routing-only host:port without ever echoing
 // its value. This keeps malformed credential-bearing input out of startup logs.
-func validateConnectTo(envVar, address string) error {
+func ValidateConnectTo(envVar, address string) error {
 	if address == "" {
 		return nil
 	}
@@ -594,27 +594,26 @@ func loadUpstreamTLSCA() (*string, error) {
 	return &ca, nil
 }
 
-// decodeCertificate attempts to decode a base64-encoded certificate.
-// If the input is nil, it returns nil.
-// If the input looks like PEM content (starts with "-----BEGIN"), it returns the input as-is.
-// Otherwise, it attempts to decode the input as base64.
+// decodeCertificate is DecodePEM for an optional value: nil stays nil.
 func decodeCertificate(encoded *string) *string {
 	if encoded == nil {
 		return nil
 	}
+	decoded := DecodePEM(*encoded)
+	return &decoded
+}
 
-	// If it already looks like PEM content, return as-is
-	if strings.HasPrefix(*encoded, pemPrefix) {
-		return encoded
+// DecodePEM accepts PEM raw or base64-encoded, the install command's form.
+// A value that starts with "-----BEGIN" is returned as-is; otherwise it is
+// base64-decoded, or returned as-is, with a warning, if that fails.
+func DecodePEM(v string) string {
+	if strings.HasPrefix(v, pemPrefix) {
+		return v
 	}
-
-	// Attempt to decode as base64
-	decoded, err := base64.StdEncoding.DecodeString(*encoded)
+	decoded, err := base64.StdEncoding.DecodeString(v)
 	if err != nil {
 		slog.Warn("failed to decode base64 certificate, using as-is", "error", err)
-		return encoded
+		return v
 	}
-
-	decodedStr := string(decoded)
-	return &decodedStr
+	return string(decoded)
 }

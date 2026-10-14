@@ -247,6 +247,22 @@ func TestRedial(t *testing.T) {
 	}
 }
 
+// TestRedialBackoff: redial waits double from 0.5-1 s and stay within
+// 15-30 s once capped.
+func TestRedialBackoff(t *testing.T) {
+	for range 200 {
+		b := redialBackoff()
+		lo := 500 * time.Millisecond
+		for range 10 {
+			hi := 2 * lo
+			if wait := b.NextBackOff(); wait < lo || wait > hi {
+				t.Fatalf("wait %v, want %v to %v", wait, lo, hi)
+			}
+			lo = min(2*lo, 15*time.Second)
+		}
+	}
+}
+
 // TestTunnelServerLimits: the tunnel advertises the connector's pipe limit
 // per tunnel (so opens past it are capacity refusals, not open timeouts),
 // and pings a quiet tunnel so a dead far end is found.
