@@ -69,8 +69,8 @@ type Claims struct {
 }
 
 var (
-	headerKeys = jsonKeys(header{})
-	claimKeys  = jsonKeys(Claims{})
+	headerKeys = JSONKeys(header{})
+	claimKeys  = JSONKeys(Claims{})
 )
 
 type header struct {
@@ -246,7 +246,7 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 		return nil, "", reject("not a compact JWS")
 	}
 	var h header
-	if err := decode(parts[0], headerKeys, false, &h); err != nil || h.Alg != "ES256" ||
+	if err := DecodeSegment(parts[0], headerKeys, false, &h); err != nil || h.Alg != "ES256" ||
 		h.Typ != tokenType {
 		return nil, "", reject("bad header")
 	}
@@ -259,7 +259,7 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 		return nil, "", reject("bad signature")
 	}
 	var c Claims
-	if err := decode(parts[1], claimKeys, true, &c); err != nil {
+	if err := DecodeSegment(parts[1], claimKeys, true, &c); err != nil {
 		return nil, "", reject("bad claims")
 	}
 	if err := c.valid(); err != nil {
@@ -360,13 +360,16 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// decode parses a JWS segment, a JSON object, into v. Every key in known
+// DecodeSegment parses a JWS segment, a JSON object, into v. Every key in known
 // marked required must be present and not null. A key not in known is
 // refused, or ignored if lenient. encoding/json/v2 refuses a key repeated
 // exactly at any depth, trailing data and invalid UTF-8, and matches keys
 // exactly (v1 folds case, and "ſ" onto "s"); foldedUnique refuses what it
 // allows, a key repeated by case.
-func decode(segment string, known map[string]bool, lenient bool, v any) error {
+//
+// Exported so every JWS connector-lib verifies (capabilities, signed
+// configs) is parsed the same strict way; build known with JSONKeys.
+func DecodeSegment(segment string, known map[string]bool, lenient bool, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(segment)
 	if err != nil {
 		return err
@@ -417,9 +420,9 @@ func foldedUnique(raw []byte) error {
 	}
 }
 
-// jsonKeys maps each JSON key of struct v to whether it is required: every
+// JSONKeys maps each JSON key of struct v to whether it is required: every
 // field but those tagged omitempty.
-func jsonKeys(v any) map[string]bool {
+func JSONKeys(v any) map[string]bool {
 	t := reflect.TypeOf(v)
 	keys := make(map[string]bool, t.NumField())
 	for i := range t.NumField() {
