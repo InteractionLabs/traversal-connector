@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"slices"
@@ -38,9 +39,14 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 			return nil, errors.New("TRAVERSAL_RAW_PIPES_EGRESS_PROXY must be an http:// URL")
 		}
 	}
+	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
 	policy, err := dialpolicy.New(dialpolicy.Config{
-		Proxy:         proxy,
-		ProxyResolves: e.bool("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"),
+		Proxy:          proxy,
+		ProxyResolves:  e.bool("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"),
+		ExtraForbidden: forbidden,
 	})
 	if err != nil {
 		return nil, err
@@ -225,6 +231,23 @@ func (e *envReader) bool(key string) bool {
 		e.errs = append(e.errs, fmt.Errorf("%s must be true or false, got %q", key, v))
 		return false
 	}
+}
+
+// forbiddenCIDRs parses TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS, comma-separated
+// CIDRs the connector refuses beside its built-in list.
+func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for cidr := range strings.SplitSeq(v, ",") {
+		p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS: %q is not a CIDR", cidr)
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, nil
 }
 
 // decodePEM accepts PEM raw or base64-encoded, the install command's form.
