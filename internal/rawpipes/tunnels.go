@@ -5,11 +5,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
@@ -84,15 +85,22 @@ func (t *Tunnels) Ready(context.Context) (bool, string) {
 	return false, "no tunnel"
 }
 
+// redialBackoff spaces redials after a failed tunnel: 0.5-1 s, doubling to
+// 15-30 s, uniformly jittered.
+func redialBackoff() *backoff.ExponentialBackOff {
+	return &backoff.ExponentialBackOff{InitialInterval: 750 * time.Millisecond,
+		RandomizationFactor: 1.0 / 3, Multiplier: 2, MaxInterval: 22500 * time.Millisecond}
+}
+
 func (t *Tunnels) hold(ctx context.Context) {
-	backoff := time.Second
+	retry := redialBackoff()
 	for ctx.Err() == nil && !t.stopping.Load() {
 		start := time.Now()
 		err := t.serveOne(ctx)
 		if time.Since(start) > 30*time.Second {
-			backoff = time.Second
+			retry.Reset()
 		}
-		wait := backoff/2 + rand.N(backoff/2) //nolint:gosec // jitter
+		wait := retry.NextBackOff()
 		if err == nil {
 			wait = 0 // the edge controller asked for a replacement
 		}
@@ -101,7 +109,6 @@ func (t *Tunnels) hold(ctx context.Context) {
 		case <-time.After(wait):
 		case <-ctx.Done():
 		}
-		backoff = min(2*backoff, 30*time.Second)
 	}
 	<-ctx.Done()
 }

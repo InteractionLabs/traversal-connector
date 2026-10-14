@@ -82,7 +82,9 @@ type Server struct {
 }
 
 // ServeConn serves pipes on one tunnel until it closes. drained runs once if
-// the edge controller asks for a replacement tunnel.
+// the edge controller asks for a replacement tunnel. It is x/net/http2's
+// ServeConn because net/http serves only connections a Listener accepts, and
+// the connector dials its tunnels.
 func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	var once sync.Once
 	s.h2(max(1, s.Tunnels)).ServeConn(nc, &http2.ServeConnOpts{Handler: http.HandlerFunc(
@@ -96,7 +98,9 @@ func (s *Server) ServeConn(nc net.Conn, drained func()) {
 }
 
 // Drain refuses new pipes with connector_draining and waits, until ctx is
-// done, for open ones to finish.
+// done, for open ones to finish. It is not a GOAWAY (http.Server.Shutdown):
+// tunnels stay up so a pipe already on its way gets a connector_draining
+// refusal, a reason, rather than a reset.
 func (s *Server) Drain(ctx context.Context) {
 	s.draining.Store(true)
 	done := make(chan struct{})

@@ -3,7 +3,6 @@ package rawpipes
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -20,9 +19,6 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
-
-// systemRoots is where container images keep their CA bundle.
-var systemRoots = []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"}
 
 // New builds the raw pipe side from the environment, or says why the
 // connector cannot run it. requiresInspection reports hosts redaction rules
@@ -81,11 +77,8 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		return nil, err
 	}
 	if connectTo := os.Getenv("TRAVERSAL_TUNNELS_CONNECT_TO"); connectTo != "" {
-		if host, port, err := net.SplitHostPort(connectTo); err != nil || host == "" || port == "" {
-			return nil, fmt.Errorf(
-				"TRAVERSAL_TUNNELS_CONNECT_TO must be host:port, got %q",
-				connectTo,
-			)
+		if err := config.ValidateConnectTo("TRAVERSAL_TUNNELS_CONNECT_TO", connectTo); err != nil {
+			return nil, err
 		}
 		t.Addr = connectTo
 	}
@@ -116,7 +109,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 	}
 	var err error
 	if keys != "" {
-		if vc.Keys, err = capability.ParseKeys([]byte(decodePEM(keys))); err != nil {
+		if vc.Keys, err = capability.ParseKeys([]byte(config.DecodePEM(keys))); err != nil {
 			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
 		}
 		if vc.Issuer == "" {
@@ -126,7 +119,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 		}
 	}
 	if roots != "" {
-		if vc.Roots, err = capability.ParseRootsPEM([]byte(decodePEM(roots))); err != nil {
+		if vc.Roots, err = capability.ParseRootsPEM([]byte(config.DecodePEM(roots))); err != nil {
 			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
 		}
 		u, err := url.Parse(controllerURL)
@@ -154,7 +147,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 }
 
 // tunnelTLS is mutual TLS 1.3 to the controller host, with the connector's
-// own certificate and the roots its other connections trust.
+// own certificate and the roots its legacy tunnels trust.
 func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 	u, err := url.Parse(cfg.TraversalControllerURL)
 	if err != nil || u.Scheme != "https" || cfg.TLSCert == nil || cfg.TLSKey == nil {
@@ -162,39 +155,22 @@ func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 			"tunnels need an https:// controller URL and a client certificate",
 		)
 	}
-	cert, err := tls.X509KeyPair([]byte(*cfg.TLSCert), []byte(*cfg.TLSKey))
+	tlsCfg, err := config.BuildClientTLSConfig(cfg)
 	if err != nil {
 		return nil, "", err
 	}
-	if err := checkIdentity(cert.Leaf, cfg.ConnectorID); err != nil {
+	if err := checkIdentity(tlsCfg.Certificates[0].Leaf, cfg.ConnectorID); err != nil {
 		return nil, "", err
 	}
-	roots := x509.NewCertPool()
-	// SSL_CERT_FILE first: customers set it for TLS-intercepting proxies, as
-	// for the connector's other connections.
-	paths := systemRoots
-	if f := os.Getenv("SSL_CERT_FILE"); f != "" {
-		paths = append([]string{f}, paths...)
-	}
-	for _, path := range paths {
-		if pem, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed paths
-			roots.AppendCertsFromPEM(pem)
-		}
-	}
-	if cfg.TLSCA != nil {
-		roots.AppendCertsFromPEM([]byte(*cfg.TLSCA))
-	}
-	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		ServerName:   u.Hostname(),
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      roots,
-		NextProtos:   []string{rawpipe.ALPN},
-	}, net.JoinHostPort(u.Hostname(), "443"), nil
+	tlsCfg.MinVersion = tls.VersionTLS13
+	tlsCfg.ServerName = u.Hostname()
+	tlsCfg.NextProtos = []string{rawpipe.ALPN}
+	return tlsCfg, net.JoinHostPort(u.Hostname(), "443"), nil
 }
 
 // envReader reads settings, collecting an error for each one set but invalid
-// rather than falling back to its default.
+// rather than falling back to its default. internal/env falls back silently,
+// so a typo would quietly run the default, and its bools take "1" and "T".
 type envReader struct{ errs []error }
 
 func (e *envReader) int(key string, def, maxVal int) int {
@@ -248,15 +224,6 @@ func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
 		prefixes = append(prefixes, p)
 	}
 	return prefixes, nil
-}
-
-// decodePEM accepts PEM raw or base64-encoded, the install command's form.
-func decodePEM(v string) string {
-	if b, err := base64.StdEncoding.DecodeString(v); err == nil &&
-		strings.HasPrefix(string(b), "-----") {
-		return string(b)
-	}
-	return v
 }
 
 // checkIdentity refuses a certificate the edge controller would refuse, so

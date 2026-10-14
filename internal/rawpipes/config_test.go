@@ -5,10 +5,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -110,7 +113,10 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
 		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_REFUSE_TCP": "true"}},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
-			wantErr: "TRAVERSAL_TUNNELS_CONNECT_TO must be host:port"},
+			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
+		{name: "connect-to port not a number", spiffeID: orgScoped,
+			env:     map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:https"},
+			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: port must be a number"},
 		{name: "legacy egress proxy", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL"},
 	} {
@@ -152,6 +158,31 @@ func TestNew(t *testing.T) {
 				t.Fatalf("defaults: %+v", tunnels)
 			}
 		})
+	}
+}
+
+// TestTunnelTLS: tunnels speak TLS 1.3 with the tunnel ALPN to the
+// controller host, and trust the controller CA the legacy tunnels trust.
+func TestTunnelTLS(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	ca := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE",
+		Bytes: srv.Certificate().Raw}))
+	cfg := connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme")
+	cfg.TLSCA = &ca
+	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
+	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
+	tunnels, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := tunnels.TLS
+	if c.MinVersion != tls.VersionTLS13 || c.ServerName != "edge.example.com" ||
+		!slices.Equal(c.NextProtos, []string{rawpipe.ALPN}) || len(c.Certificates) != 1 {
+		t.Fatalf("tunnel TLS: %+v", c)
+	}
+	if _, err := srv.Certificate().Verify(x509.VerifyOptions{Roots: c.RootCAs}); err != nil {
+		t.Errorf("TLS_CA_BASE64 is not trusted: %v", err)
 	}
 }
 
