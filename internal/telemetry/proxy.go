@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/url"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpconnect"
 )
 
 // httpConnectDialer returns a context dialer that opens a TCP connection
@@ -19,10 +19,11 @@ func httpConnectDialer(
 	egressProxyURL *url.URL,
 ) func(context.Context, string) (net.Conn, error) {
 	return func(ctx context.Context, addr string) (net.Conn, error) {
-		conn, err := dialpolicy.DialConnect(ctx, egressProxyURL, addr)
+		conn, _, err := httpconnect.Dial( //nolint:bodyclose // Dial closes it
+			ctx, egressProxyURL, addr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("otlp proxy CONNECT %s via %s: %w",
-				addr, dialpolicy.ProxyAddr(egressProxyURL), err)
+				addr, httpconnect.ProxyAddr(egressProxyURL), err)
 		}
 		return conn, nil
 	}

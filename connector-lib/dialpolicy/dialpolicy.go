@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpconnect"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -132,15 +133,14 @@ func (p *Policy) Dial(
 			return nil, "", rawpipe.Errorf(rawpipe.ForbiddenAddress,
 				"hostnames through the proxy are not allowed")
 		}
-		if p.cfg.Proxy.Scheme != "http" {
-			return nil, "", rawpipe.Errorf(rawpipe.DialFailed, "the forward proxy must be http://")
-		}
 		// No trailing dot: customer proxy ACLs match the name as written.
-		conn, err := DialConnect(ctx, p.cfg.Proxy, net.JoinHostPort(host, fmt.Sprint(port)))
+		conn, _, err := httpconnect.Dial(ctx, p.cfg.Proxy, //nolint:bodyclose // Dial closes it
+			net.JoinHostPort(host, fmt.Sprint(port)), nil)
 		if err != nil {
 			return nil, "", refuse(rawpipe.DialFailed, err)
 		}
-		return conn, "proxy " + p.cfg.Proxy.Host, nil
+		//nolint:errcheck,forcetypeassert // httpconnect.Dial's tunnels half-close
+		return conn.(rawpipe.HalfCloser), "proxy " + p.cfg.Proxy.Host, nil
 	}
 	addrs := []netip.Addr{literal}
 	if !isLiteral {

@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpconnect"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
@@ -232,7 +232,7 @@ func logTLSState(label, addr string, state tls.ConnectionState) {
 // ---------------------------------------------------------------------------
 
 func testProxyTCPReachability(egressProxyURL *url.URL) {
-	proxyAddr := dialpolicy.ProxyAddr(egressProxyURL)
+	proxyAddr := httpconnect.ProxyAddr(egressProxyURL)
 	slog.Info(
 		"connectivity test [proxy-tcp]: dialing proxy",
 		"proxy_address", proxyAddr,
@@ -276,7 +276,7 @@ func testManualCONNECT(
 	caPool *x509.CertPool,
 ) {
 	label := "proxy-manual-connect"
-	proxyAddr := dialpolicy.ProxyAddr(egressProxyURL)
+	proxyAddr := httpconnect.ProxyAddr(egressProxyURL)
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"proxy_address", proxyAddr,
@@ -292,7 +292,8 @@ func testManualCONNECT(
 
 	// Steps 1-3 — TCP to the proxy, CONNECT, and its answer; any bytes the
 	// proxy sent after its answer stay readable on the tunnel.
-	tunnelConn, err := dialpolicy.DialConnect(ctx, egressProxyURL, targetAddr)
+	tunnelConn, _, err := httpconnect.Dial( //nolint:bodyclose // Dial closes it
+		ctx, egressProxyURL, targetAddr, nil)
 	if err != nil {
 		slog.Warn(
 			fmt.Sprintf(

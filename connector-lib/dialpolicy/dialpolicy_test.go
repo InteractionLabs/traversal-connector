@@ -146,18 +146,3 @@ func TestExtraForbidden(t *testing.T) {
 		}
 	}
 }
-
-func TestProxyAddr(t *testing.T) {
-	for raw, want := range map[string]string{
-		"http://proxy.example.com:3128": "proxy.example.com:3128",
-		"http://proxy.example.com":      "proxy.example.com:80",
-	} {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := ProxyAddr(u); got != want {
-			t.Errorf("ProxyAddr(%q) = %q, want %q", raw, got, want)
-		}
-	}
-}
