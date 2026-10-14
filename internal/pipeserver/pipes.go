@@ -1,8 +1,8 @@
-// Package rawpipes is the connector's raw pipe side. It holds tunnels to
+// Package pipeserver is the connector's raw pipe side. It holds tunnels to
 // Traversal's edge controller (tunnels.go) and serves each pipe the edge
 // controller opens on them: verify the capability, dial the destination,
 // copy bytes.
-package rawpipes
+package pipeserver
 
 import (
 	"context"

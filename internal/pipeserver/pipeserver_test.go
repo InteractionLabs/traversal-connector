@@ -1,4 +1,4 @@
-package rawpipes
+package pipeserver
 
 import (
 	"bufio"
@@ -142,7 +142,7 @@ func open(
 func read(r io.Reader) string { b, _ := io.ReadAll(r); return string(b) }
 
 func TestPipes(t *testing.T) {
-	key := capabilitytest.Key("rawpipes")
+	key := capabilitytest.Key("pipeserver")
 	verifier, err := capability.NewVerifier(capability.VerifierConfig{
 		Issuer: "traversal-raw-tunnel/test", Subject: "integration-proxy",
 		Keys: map[string]*ecdsa.PublicKey{"k": &key.PublicKey},

@@ -1,4 +1,4 @@
-package rawpipes
+package pipeserver
 
 import (
 	"crypto/tls"

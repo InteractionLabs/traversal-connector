@@ -13,7 +13,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
-	"github.com/InteractionLabs/traversal-connector/internal/rawpipes"
+	"github.com/InteractionLabs/traversal-connector/internal/pipeserver"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
@@ -227,7 +227,7 @@ func main() {
 
 	var rawTunnels router.RawTunnels
 	if os.Getenv("TRAVERSAL_RAW_PIPES") == "enabled" {
-		if tunnels, err := rawpipes.New(&cfg, redactor.RequiresInspection); err != nil {
+		if tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection); err != nil {
 			// Raw pipes never stop the legacy transport.
 			slog.ErrorContext(
 				ctx,
