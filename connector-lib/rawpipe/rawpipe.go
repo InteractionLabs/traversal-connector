@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Tunnel protocol. A connector dials the controller host with ALPN, writes
@@ -199,26 +200,32 @@ func (r Reason) Status() int {
 	}
 }
 
-const uuid = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
-
-var (
-	canonicalUUID = regexp.MustCompile(`^` + uuid + `$`)
-	tenantID      = regexp.MustCompile(
-		`^spiffe://traversal\.com/tenant/(` + uuid + `)/[^/]+(?:/connector/(` + uuid + `))?$`,
-	)
-)
-
-// IsConnectorID reports whether id is a lower-case UUID, the only form a
-// tunnel may name.
-func IsConnectorID(id string) bool { return canonicalUUID.MatchString(id) }
+// IsConnectorID reports whether id is a UUID in canonical form (lower case,
+// hyphenated), the only form a tunnel may name: two spellings of one ID would
+// be two tunnel keys.
+func IsConnectorID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
 
 // TenantID parses a connector certificate's SPIFFE ID: org-scoped,
 // spiffe://traversal.com/tenant/<org>/<name>, or connector-scoped, the same
 // ending /connector/<connector>. connector is empty for an org-scoped ID.
 func TenantID(uri string) (org, connector string, ok bool) {
-	m := tenantID.FindStringSubmatch(uri)
-	if m == nil {
+	rest, ok := strings.CutPrefix(uri, "spiffe://traversal.com/tenant/")
+	if !ok {
 		return "", "", false
 	}
-	return m[1], m[2], true
+	parts := strings.Split(rest, "/")
+	switch {
+	case len(parts) == 2 && parts[1] != "":
+	case len(parts) == 4 && parts[1] != "" && parts[2] == "connector" && IsConnectorID(parts[3]):
+		connector = parts[3]
+	default:
+		return "", "", false
+	}
+	if !IsConnectorID(parts[0]) {
+		return "", "", false
+	}
+	return parts[0], connector, true
 }
