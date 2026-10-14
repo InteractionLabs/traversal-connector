@@ -19,6 +19,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
@@ -31,7 +32,7 @@ import (
 // cannot run it. Responses from hosts r's rules cover are redacted; ready
 // answers probes (rawpipe.ProbeAuthority).
 func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, error) {
-	e := envReader{}
+	var e env.Reader
 	verifier, trust, err := newVerifier(cfg.TraversalControllerURL)
 	if err != nil {
 		return nil, err
@@ -57,18 +58,18 @@ func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, 
 		Verifier:    verifier,
 		Upstream:    up,
 		Ready:       ready,
-		MaxPipes:    e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
-		MaxLifetime: e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
+		MaxPipes:    e.Int("TRAVERSAL_PIPES_MAX", 200, 4096),
+		MaxLifetime: e.Duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
 		PipeLimits: PipeLimits{
-			MaxStreams:       e.int("TRAVERSAL_PIPES_MAX_STREAMS", 100, 1000),
-			StreamWindow:     e.int("TRAVERSAL_PIPES_STREAM_WINDOW_KB", 256, 16<<10) << 10,
-			ConnectionWindow: e.int("TRAVERSAL_PIPES_CONNECTION_WINDOW_KB", 1<<10, 64<<10) << 10,
-			IdleTimeout:      e.duration("TRAVERSAL_PIPES_IDLE_TIMEOUT", 15*time.Minute),
+			MaxStreams:       e.Int("TRAVERSAL_PIPES_MAX_STREAMS", 100, 1000),
+			StreamWindow:     e.Int("TRAVERSAL_PIPES_STREAM_WINDOW_KB", 256, 16<<10) << 10,
+			ConnectionWindow: e.Int("TRAVERSAL_PIPES_CONNECTION_WINDOW_KB", 1<<10, 64<<10) << 10,
+			IdleTimeout:      e.Duration("TRAVERSAL_PIPES_IDLE_TIMEOUT", 15*time.Minute),
 		},
 	}
 	t := &Tunnels{
 		ConnectorID: cfg.ConnectorID,
-		Count:       e.int("TRAVERSAL_TUNNELS_COUNT", 2, 8),
+		Count:       e.Int("TRAVERSAL_TUNNELS_COUNT", 2, 8),
 		Server:      server,
 		Roots:       trust.Roots,
 		Kids:        trust.Kids,
@@ -87,13 +88,13 @@ func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, 
 	if cfg.EgressProxyURL != nil {
 		return nil, errors.New("EGRESS_PROXY_URL: tunnels through it are not supported yet")
 	}
-	return t, errors.Join(e.errs...)
+	return t, e.Err()
 }
 
 // newPolicy is how every request a pipe carries reaches its destination:
 // through the dial policy, and the egress proxy unless NO_PROXY exempts the
 // destination.
-func newPolicy(e *envReader) (upstream.Dialer, error) {
+func newPolicy(e *env.Reader) (upstream.Dialer, error) {
 	proxy, direct, err := egressProxy()
 	if err != nil {
 		return nil, err
@@ -105,7 +106,7 @@ func newPolicy(e *envReader) (upstream.Dialer, error) {
 	fromEnv := direct != nil // a proxy from HTTPS_PROXY or HTTP_PROXY, as in #67
 	cfg := dialpolicy.Config{
 		Proxy:          proxy,
-		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", fromEnv),
+		ProxyResolves:  e.Bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", fromEnv),
 		ExtraForbidden: forbidden,
 	}
 	proxied, err := dialpolicy.New(cfg)
@@ -232,49 +233,6 @@ func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 	tlsCfg.ServerName = u.Hostname()
 	tlsCfg.NextProtos = []string{rawpipe.ALPN}
 	return tlsCfg, net.JoinHostPort(u.Hostname(), "443"), nil
-}
-
-// envReader reads settings, collecting an error for each one set but invalid
-// rather than falling back to its default. internal/env falls back silently,
-// so a typo would quietly run the default, and its bools take "1" and "T".
-type envReader struct{ errs []error }
-
-func (e *envReader) int(key string, def, maxVal int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > maxVal {
-		e.errs = append(e.errs, fmt.Errorf("%s: must be 1 to %d, got %q", key, maxVal, v))
-	}
-	return n
-}
-
-func (e *envReader) duration(key string, def time.Duration) time.Duration {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d < 0 {
-		e.errs = append(e.errs, fmt.Errorf("%s: must be a duration such as 15m, got %q", key, v))
-	}
-	return d
-}
-
-func (e *envReader) bool(key string, def bool) bool {
-	switch v := os.Getenv(key); v {
-	case "":
-		return def
-	case "false":
-		return false
-	case "true":
-		return true
-	default:
-		e.errs = append(e.errs, fmt.Errorf("%s: must be true or false, got %q", key, v))
-		return def
-	}
 }
 
 // forbiddenCIDRs parses TRAVERSAL_PIPES_FORBIDDEN_CIDRS, comma-separated
