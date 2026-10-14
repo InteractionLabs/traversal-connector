@@ -14,6 +14,13 @@ import (
 
 // Chained capabilities.
 //
+// The certificate work is the standard library's: x509.Certificate.Verify
+// builds the chain and checks signatures, validity, CA constraints and the
+// extended key usage, and VerifyHostname matches the controller host. What is
+// ours is policy x509 cannot express: x5c's size bounds (the token is
+// attacker input), a non-CA leaf with digitalSignature and a P-256 key, and
+// exactly one issuer URI SAN, which binds the environment.
+//
 // A connector pins Traversal's capability roots, not each environment's
 // signing key. A root certifies each environment's key in an environment
 // certificate, and the Integration Proxy sends that certificate in every
@@ -102,21 +109,20 @@ func (c *chains) verify(
 		intermediates.AddCert(cert)
 	}
 	// Verify checks signatures, every certificate's validity at now, CA
-	// constraints, path length and the extended key usage.
+	// constraints, path length, the extended key usage, and that a DNS SAN
+	// (never the common name) is the controller host.
 	if _, err := leaf.Verify(x509.VerifyOptions{
 		Roots:         c.roots,
 		Intermediates: intermediates,
 		CurrentTime:   now,
+		DNSName:       c.host,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 	}); err != nil {
-		return nil, "", reject("x5c does not chain to a trusted root")
+		return nil, "", reject("x5c does not chain to a trusted root for this controller host")
 	}
-	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
-		return nil, "", reject("x5c leaf is not a signing certificate")
-	}
-	// VerifyHostname matches DNS SANs only, never the common name.
-	if leaf.VerifyHostname(c.host) != nil || len(leaf.IPAddresses) != 0 {
-		return nil, "", reject("x5c certificate is for another controller host")
+	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 ||
+		len(leaf.IPAddresses) != 0 {
+		return nil, "", reject("x5c leaf is not a signing certificate for a host name")
 	}
 	key, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || key.Curve != elliptic.P256() {
