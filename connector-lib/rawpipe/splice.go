@@ -1,3 +1,11 @@
+// Splice is the pipe copy the connector, the edge controller and the
+// Integration Proxy share. It is not io.Copy or httputil.ReverseProxy because
+// those cannot tell a clean end from a failure: here a clean end on one side
+// becomes a half-close (CloseWrite) on the other, and a failure a reset
+// (Abort). Go's HTTP/2 server ends a stream only when its handler returns,
+// hence ServerStream. Splice also enforces idle and lifetime limits and
+// counts bytes for the audit log.
+
 package rawpipe
 
 import (
@@ -48,31 +56,34 @@ func Splice(caller, dest End, l Limits) (sent, received int64, outcome Outcome) 
 	fail := func(o Outcome) {
 		once.Do(func() { outcome = o; caller.Abort(); dest.Abort() })
 	}
-	var touched atomic.Int64
-	touched.Store(time.Now().UnixNano())
-	stop := watch(&touched, l, func() { fail(Limit) })
+	limit := func() { fail(Limit) }
+	touch := func() {}
+	if l.Idle > 0 {
+		idle := time.AfterFunc(l.Idle, limit)
+		defer idle.Stop()
+		touch = func() { idle.Reset(l.Idle) }
+	}
+	if l.Lifetime > 0 {
+		defer time.AfterFunc(l.Lifetime, limit).Stop()
+	}
 	up := make(chan int64, 1)
-	go func() { up <- copyEnd(dest, caller, &touched, fail, CallerAborted, DestAborted) }()
-	received = copyEnd(caller, dest, &touched, fail, DestAborted, CallerAborted)
+	go func() { up <- copyEnd(dest, caller, touch, fail, CallerAborted, DestAborted) }()
+	received = copyEnd(caller, dest, touch, fail, DestAborted, CallerAborted)
 	sent = <-up
-	stop() // every fail has run: outcome is settled
+	// A limit firing now waits for this, or finds it done: outcome is settled.
+	once.Do(func() {})
 	return sent, received, outcome
 }
 
 const copyBuffer = 64 << 10
 
-func copyEnd(
-	dst, src End,
-	touched *atomic.Int64,
-	fail func(Outcome),
-	srcFailed, dstFailed Outcome,
-) int64 {
+func copyEnd(dst, src End, touch func(), fail func(Outcome), srcFailed, dstFailed Outcome) int64 {
 	buf := make([]byte, copyBuffer)
 	var n int64
 	for {
 		r, err := src.Read(buf)
 		if r > 0 {
-			touched.Store(time.Now().UnixNano())
+			touch()
 			if _, werr := dst.Write(buf[:r]); werr != nil {
 				fail(dstFailed)
 				return n
@@ -90,33 +101,6 @@ func copyEnd(
 			return n
 		}
 	}
-}
-
-// watch runs end once a limit is reached. stop waits for it to exit.
-func watch(touched *atomic.Int64, l Limits, end func()) (stop func()) {
-	if l.Lifetime <= 0 && l.Idle <= 0 {
-		return func() {}
-	}
-	done, exited := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(exited)
-		start := time.Now()
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case now := <-tick.C:
-				if l.Lifetime > 0 && now.Sub(start) > l.Lifetime ||
-					l.Idle > 0 && now.Sub(time.Unix(0, touched.Load())) > l.Idle {
-					end()
-					return
-				}
-			}
-		}
-	}()
-	return func() { close(done); <-exited }
 }
 
 // HalfCloser is a connection that can half-close, such as *net.TCPConn.
@@ -243,11 +227,11 @@ func Connect(ctx context.Context, rt http.RoundTripper, addr, authority string, 
 	case err != nil:
 	case resp.StatusCode != http.StatusOK:
 		_ = resp.Body.Close()
-		// An unknown reason from the peer becomes "other", keeping label sets
+		// An unknown reason from the peer becomes Other, keeping label sets
 		// and switches closed.
 		reason := Reason(resp.Header.Get(HeaderReason))
 		if reason != "" && !reason.Known() {
-			reason = "other"
+			reason = Other
 		}
 		err = &Refusal{resp.StatusCode, reason}
 	default:

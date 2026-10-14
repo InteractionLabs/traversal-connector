@@ -139,11 +139,13 @@ const (
 	OpenTimeout        Reason = "open_timeout"
 	// TCPRefused is a connector whose operator turned raw TCP pipes off.
 	TCPRefused Reason = "raw_tcp_refused"
+	// Other stands for any reason that is not Known.
+	Other Reason = "other"
 )
 
-// Known reports whether r is one of the refusal reasons above. Metrics and
-// the proxy name a known reason and report anything else as "other", which
-// keeps label sets closed whatever a peer sends.
+// Known reports whether r is one of the refusal reasons above, Other aside.
+// Metrics and the proxy name a known reason and report anything else as
+// Other, which keeps label sets closed whatever a peer sends.
 func (r Reason) Known() bool {
 	switch r {
 	case InvalidCapability, WrongConnector, WrongDestination, Exhausted, InspectionRequired,
