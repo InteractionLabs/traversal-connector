@@ -118,7 +118,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(reason.Status())
 		return
 	}
-	defer s.closed()
+	defer s.pipes.Done()
 	start := time.Now()
 	stream, err := rawpipe.Accept(w, r)
 	if err != nil {
@@ -144,22 +144,14 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	case s.pipes.Draining():
 		return nil, "", rawpipe.Errorf(rawpipe.Draining, "draining")
 	case r.Method != http.MethodConnect || !ok:
-		return nil, "", rawpipe.Errorf(
-			rawpipe.ProtocolError,
-			"expected CONNECT to a canonical host:port",
-		)
+		return nil, "", rawpipe.Errorf(rawpipe.ProtocolError,
+			"expected CONNECT to a canonical host:port")
 	case s.RefuseTCP:
-		return nil, "", rawpipe.Errorf(
-			rawpipe.TCPRefused,
-			"raw TCP pipes are off on this connector",
-		)
+		return nil, "", rawpipe.Errorf(rawpipe.TCPRefused,
+			"raw TCP pipes are off on this connector")
 	}
-	claims, err := s.Verifier.Verify(
-		r.Header.Get(rawpipe.HeaderCapability),
-		s.ConnectorID,
-		host,
-		port,
-	)
+	claims, err := s.Verifier.Verify(r.Header.Get(rawpipe.HeaderCapability), s.ConnectorID,
+		host, port)
 	if err != nil {
 		return nil, "", err
 	}
@@ -170,16 +162,14 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
 	if s.RequiresInspection != nil && s.RequiresInspection(host) {
-		s.closed()
+		s.pipes.Done()
 		return nil, "", rawpipe.Errorf(rawpipe.InspectionRequired, "redaction rules cover the host")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), dialTimeout)
 	defer cancel()
 	conn, upstream, err := s.Policy.Dial(ctx, host, port)
 	if err != nil {
-		s.closed()
+		s.pipes.Done()
 	}
 	return conn, upstream, err
 }
-
-func (s *Server) closed() { s.pipes.Done() }

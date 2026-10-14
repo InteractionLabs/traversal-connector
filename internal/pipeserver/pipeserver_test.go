@@ -29,11 +29,7 @@ const connector = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
 // which refuses loopback.
 type loopback string
 
-func (a loopback) Dial(
-	ctx context.Context,
-	_ string,
-	_ uint16,
-) (halfconn.Conn, string, error) {
+func (a loopback) Dial(ctx context.Context, _ string, _ uint16) (halfconn.Conn, string, error) {
 	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", string(a))
 	if err != nil {
 		return nil, "", rawpipe.Errorf(rawpipe.DialFailed, "%v", err)

@@ -104,8 +104,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 	keys, roots := os.Getenv("TRAVERSAL_CAPABILITY_KEYS"), os.Getenv("TRAVERSAL_CAPABILITY_ROOTS")
 	if keys == "" && roots == "" {
 		return nil, trust{}, errors.New(
-			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required",
-		)
+			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required")
 	}
 	var err error
 	if keys != "" {
@@ -114,8 +113,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 		}
 		if vc.Issuer == "" {
 			return nil, trust{}, errors.New(
-				"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS",
-			)
+				"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS")
 		}
 	}
 	if roots != "" {
@@ -129,8 +127,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
 		}
 		if !ok {
 			return nil, trust{}, errors.New(
-				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name",
-			)
+				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name")
 		}
 		vc.ControllerHost = host
 	}
@@ -152,8 +149,7 @@ func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 	u, err := url.Parse(cfg.TraversalControllerURL)
 	if err != nil || u.Scheme != "https" || cfg.TLSCert == nil || cfg.TLSKey == nil {
 		return nil, "", errors.New(
-			"tunnels need an https:// controller URL and a client certificate",
-		)
+			"tunnels need an https:// controller URL and a client certificate")
 	}
 	tlsCfg, err := config.BuildClientTLSConfig(cfg)
 	if err != nil {

@@ -229,12 +229,8 @@ func main() {
 	if os.Getenv("TRAVERSAL_RAW_PIPES") == "enabled" {
 		if tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection); err != nil {
 			// Raw pipes never stop the legacy transport.
-			slog.ErrorContext(
-				ctx,
-				"raw pipes cannot start; serving the legacy transport only",
-				"err",
-				err,
-			)
+			slog.ErrorContext(ctx, "raw pipes cannot start; serving the legacy transport only",
+				"err", err)
 		} else {
 			rawTunnels = tunnels
 			done := tunnels.Start(ctx)
