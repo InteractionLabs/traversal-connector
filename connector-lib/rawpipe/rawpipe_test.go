@@ -57,7 +57,8 @@ func TestPreface(t *testing.T) {
 			" roots=" + root + ",0123456789abcdef kids=k1,k2\n"},
 	} {
 		var b strings.Builder
-		if err := rawpipe.WritePreface(&b, conn, c.roots, c.kids); err != nil || b.String() != c.want {
+		if err := rawpipe.WritePreface(&b, conn, c.roots, c.kids); err != nil ||
+			b.String() != c.want {
 			t.Fatalf("WritePreface = %q, %v; want %q", b.String(), err, c.want)
 		}
 		id, roots, kids, ok := rawpipe.ParsePreface(b.String())
