@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 )
 
 func ptrTo[T any](v T) *T { return &v }

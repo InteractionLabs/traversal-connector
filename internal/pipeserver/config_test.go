@@ -24,6 +24,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -192,7 +193,7 @@ func TestTunnelTLS(t *testing.T) {
 // forbidden is whether the dial policy built from the environment refuses
 // host.
 func forbidden(t *testing.T, host string) rawpipe.Reason {
-	dial, err := newPolicy(&envReader{})
+	dial, err := newPolicy(&env.Reader{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +283,7 @@ func TestEgressProxyFromEnvironment(t *testing.T) {
 				"https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
 				t.Setenv(k, strings.ReplaceAll(c.env[k], "{proxy}", proxyURL))
 			}
-			dial, err := newPolicy(&envReader{})
+			dial, err := newPolicy(&env.Reader{})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -16,7 +16,7 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 )
 
 const (
