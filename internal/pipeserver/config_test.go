@@ -128,9 +128,9 @@ func TestNew(t *testing.T) {
 				case "b64":
 					v = base64Of(keysPEM(t))
 				case "roots":
-					v = rootsPEM(t)
+					v = rootPEM(testRoot(t))
 				case "b64 roots":
-					v = base64Of(rootsPEM(t))
+					v = base64Of(rootPEM(testRoot(t)))
 				}
 				t.Setenv(k, v)
 			}
@@ -208,20 +208,12 @@ var (
 
 func testRoot(t *testing.T) *capabilitytest.Root {
 	t.Helper()
-	root, err := capabilitytest.NewRoot(
-		rootKey,
-		time.Now().Add(-time.Hour),
-		time.Now().Add(time.Hour),
-	)
+	now := time.Now()
+	root, err := capabilitytest.NewRoot(rootKey, now.Add(-time.Hour), now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return root
-}
-
-func rootsPEM(t *testing.T) string {
-	t.Helper()
-	return rootPEM(testRoot(t))
 }
 
 func rootPEM(root *capabilitytest.Root) string {
@@ -253,12 +245,8 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		claims := capabilitytest.Claims(
-			capability.IssuerPrefix+"test",
-			connector,
-			"db.internal",
-			5432,
-		)
+		claims := capabilitytest.Claims(capability.IssuerPrefix+"test", connector,
+			"db.internal", 5432)
 		token, err := capability.SignChained(envKey, "env", [][]byte{cert}, claims)
 		if err != nil {
 			t.Fatal(err)
