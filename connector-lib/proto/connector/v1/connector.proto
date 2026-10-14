@@ -2,6 +2,12 @@ syntax = "proto3";
 
 package connector.v1;
 
+// The legacy gRPC tunnel protocol: the connector's tunnel client
+// (internal/client), its request executor (internal/executor) and request
+// validation (connector-lib/connector) speak it, as does go-traversal's edge
+// controller (internal/grpc, handlers/conversion.go). Raw pipes do not use
+// it. It retires with the legacy gRPC transport.
+
 import "buf/validate/validate.proto";
 
 option go_package = "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1;connector";
