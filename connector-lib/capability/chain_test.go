@@ -350,40 +350,21 @@ func TestParseRootsPEM(t *testing.T) {
 	}
 }
 
-// TestCheckEnvironmentCertificate: an issuer's check of a certificate it is
-// about to hand out agrees with a verifier's check of x5c.
+// TestCheckEnvironmentCertificate: the exported check returns the certified
+// key and issuer. The verifier calls it for x5c, so
+// TestChainedCapabilityRejections covers what it refuses.
 func TestCheckEnvironmentCertificate(t *testing.T) {
-	root, other := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	root := testRoot(t, rootKey)
 	pool := x509.NewCertPool()
 	pool.AddCert(root.Certificate)
-	check := func(der []byte, host string) (*ecdsa.PublicKey, string, error) {
-		cert, err := x509.ParseCertificate(der)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return capability.CheckEnvironmentCertificate(
-			[]*x509.Certificate{cert}, pool, host, time.Now())
+	cert, err := x509.ParseCertificate(envCert(t, root, nil))
+	if err != nil {
+		t.Fatal(err)
 	}
-	key, iss, err := check(envCert(t, root, nil), chainHost)
+	key, iss, err := capability.CheckEnvironmentCertificate(
+		[]*x509.Certificate{cert}, pool, chainHost, time.Now())
 	if err != nil || !key.Equal(&envKey.PublicKey) || iss != chainIssuer {
 		t.Fatalf("valid certificate: %v %q %v", key, iss, err)
-	}
-	for name, c := range map[string]struct {
-		der  []byte
-		host string
-	}{
-		"another root": {envCert(t, other, nil), chainHost},
-		"another host": {envCert(t, root, nil), "edge.prod.traversal.com"},
-		"invalid env":  {envCert(t, root, func(s *capabilitytest.EnvironmentCert) { s.Issuer += "_x" }), chainHost},
-		"no issuer":    {envCert(t, root, func(s *capabilitytest.EnvironmentCert) { s.Issuer = "" }), chainHost},
-		"not code signing": {envCert(t, root, func(s *capabilitytest.EnvironmentCert) {
-			s.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-		}), chainHost},
-	} {
-		_, _, err := check(c.der, c.host)
-		if rawpipe.ReasonOf(err, "") != rawpipe.InvalidCapability {
-			t.Errorf("%s: %v, want invalid_capability", name, err)
-		}
 	}
 	if _, _, err := capability.CheckEnvironmentCertificate(nil, pool, chainHost, time.Now()); err == nil {
 		t.Error("empty chain: accepted")

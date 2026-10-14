@@ -98,15 +98,6 @@ func parseChain(x5c []string) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-// verify checks a parsed chain at now and returns the environment's signing
-// key and the issuer its capabilities must carry.
-func (c *chains) verify(
-	certs []*x509.Certificate,
-	now time.Time,
-) (*ecdsa.PublicKey, string, error) {
-	return CheckEnvironmentCertificate(certs, c.roots, c.host, now)
-}
-
 // CheckEnvironmentCertificate applies the environment certificate profile
 // above to chain (the certificate, then any intermediate) against roots for
 // controllerHost at now, as a verifier does for x5c, and returns the key it

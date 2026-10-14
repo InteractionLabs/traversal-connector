@@ -38,9 +38,8 @@ func Claims(issuer, connector, host string, port uint16) capability.Claims {
 		Issuer: issuer, Audience: capability.Audience, Subject: "integration-proxy",
 		OrganizationID: "org", IntegrationID: "integration", ConnectorID: connector,
 		ConsumerID: "consumer", SessionID: "session", Host: host, Port: port,
-		JTI: now.Format(
-			time.RFC3339Nano,
-		), IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+		JTI: now.Format(time.RFC3339Nano), IssuedAt: now.Unix(),
+		ExpiresAt: now.Add(time.Minute).Unix(),
 	}
 }
 

@@ -124,11 +124,8 @@ func (h jtiHeap) Len() int           { return len(h) }
 func (h jtiHeap) Less(i, j int) bool { return h[i].expires.Before(h[j].expires) }
 func (h jtiHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 
-func (h *jtiHeap) Push(
-	x any,
-) {
-	*h = append(*h, x.(seen))
-} //nolint:forcetypeassert // heap API
+func (h *jtiHeap) Push(x any) { *h = append(*h, x.(seen)) } //nolint:forcetypeassert // heap API
+
 func (h *jtiHeap) Pop() any {
 	old := *h
 	last := old[len(old)-1]
@@ -247,7 +244,7 @@ func (v *Verifier) signingKey(h jws.Header, now time.Time) (*ecdsa.PublicKey, st
 		if err != nil {
 			return nil, "", err
 		}
-		key, issuer, err := v.chains.verify(certs, now)
+		key, issuer, err := CheckEnvironmentCertificate(certs, v.chains.roots, v.chains.host, now)
 		if err != nil {
 			return nil, "", err
 		}

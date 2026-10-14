@@ -80,11 +80,10 @@ func TestDialThroughProxy(t *testing.T) {
 		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\nhello")
 	}()
 	proxy := &url.URL{Scheme: "http", User: url.UserPassword("u", "p"),
-		Host: net.JoinHostPort("127.0.0.1", itoa(port))}
+		Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))}
 	strict, _ := New(Config{Proxy: proxy})
-	if _, _, err := strict.Dial(context.Background(), "db.internal", 5432); reason(
-		err,
-	) != rawpipe.ForbiddenAddress {
+	if _, _, err := strict.Dial(context.Background(), "db.internal", 5432); reason(err) !=
+		rawpipe.ForbiddenAddress {
 		t.Fatalf("hostname without ProxyResolves: %v", err)
 	}
 	p, _ := New(Config{Proxy: proxy, ProxyResolves: true})
@@ -97,8 +96,6 @@ func TestDialThroughProxy(t *testing.T) {
 		t.Fatalf("read %q through the tunnel", b)
 	}
 }
-
-func itoa(p uint16) string { return strconv.Itoa(int(p)) }
 
 // TestEmbeddedIPv4: an IPv6 address carrying a forbidden IPv4 address is
 // forbidden, wherever its prefix puts it.
@@ -131,9 +128,8 @@ func TestExtraForbidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, host := range []string{"10.9.0.1", "db.test", "64:ff9b::a09:304"} {
-		if _, _, err := p.Dial(context.Background(), host, port); reason(
-			err,
-		) != rawpipe.ForbiddenAddress {
+		if _, _, err := p.Dial(context.Background(), host, port); reason(err) !=
+			rawpipe.ForbiddenAddress {
 			t.Errorf("%s: %v, want %s", host, err, rawpipe.ForbiddenAddress)
 		}
 	}
