@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -63,7 +65,8 @@ func envCert(
 }
 
 func rootsConfig(roots ...*capabilitytest.Root) capability.VerifierConfig {
-	cfg := capability.VerifierConfig{Subject: "integration-proxy", ControllerHost: chainHost}
+	cfg := capability.VerifierConfig{Subject: capability.SubjectIntegrationProxy,
+		ControllerHost: chainHost}
 	for _, r := range roots {
 		cfg.Roots = append(cfg.Roots, r.Certificate)
 	}
@@ -348,6 +351,83 @@ func TestParseRootsPEM(t *testing.T) {
 			t.Errorf("%s: ParseRootsPEM succeeded", name)
 		}
 	}
+}
+
+// TestParseTrust: what each bundle loads, reported sorted and never nil,
+// and a config NewVerifier takes; a bad bundle refuses the whole, and the
+// error names it.
+func TestParseTrust(t *testing.T) {
+	current, next := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	if fingerprints(current, next)[0] == rawpipe.RootFingerprint(current.DER) {
+		current, next = next, current // bundle order is not sorted order
+	}
+	roots := rootsPEM(current, next)
+	keys := keyPEM("k2", &key.PublicKey) + keyPEM("k1", &envKey.PublicKey)
+	for name, c := range map[string]struct {
+		keys, roots string
+		want        capability.Loaded
+	}{
+		"keys":  {keys: keys, want: capability.Loaded{Kids: []string{"k1", "k2"}, Roots: []string{}}},
+		"roots": {roots: roots, want: capability.Loaded{Kids: []string{}, Roots: fingerprints(current, next)}},
+		"blank keys": {keys: "\n", roots: roots,
+			want: capability.Loaded{Kids: []string{}, Roots: fingerprints(current, next)}},
+		"blank roots": {keys: keys, roots: " \n",
+			want: capability.Loaded{Kids: []string{"k1", "k2"}, Roots: []string{}}},
+		"both": {keys: keys, roots: roots,
+			want: capability.Loaded{Kids: []string{"k1", "k2"}, Roots: fingerprints(current, next)}},
+	} {
+		vc, loaded, err := capability.ParseTrust(c.keys, c.roots, issuer, chainHost)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !slices.Equal(loaded.Kids, c.want.Kids) || loaded.Kids == nil ||
+			!slices.Equal(loaded.Roots, c.want.Roots) || loaded.Roots == nil {
+			t.Errorf("%s: loaded %+v, want %+v", name, loaded, c.want)
+		}
+		if vc.Subject != capability.SubjectIntegrationProxy || vc.Issuer != issuer ||
+			vc.ControllerHost != chainHost || len(vc.Keys) != len(c.want.Kids) ||
+			len(vc.Roots) != len(c.want.Roots) {
+			t.Errorf("%s: config %+v", name, vc)
+		}
+		if _, err := capability.NewVerifier(vc); err != nil {
+			t.Errorf("%s: NewVerifier: %v", name, err)
+		}
+	}
+	for bundle, c := range map[capability.Bundle]struct{ keys, roots, want string }{
+		capability.BundleKeys: {keys: "junk", roots: roots, want: "keys: capability: no keys"},
+		capability.BundleRoots: {keys: keys, roots: roots + "junk",
+			want: "roots: capability: roots: data outside PEM blocks"},
+	} {
+		_, _, err := capability.ParseTrust(c.keys, c.roots, issuer, chainHost)
+		te, ok := errors.AsType[*capability.TrustError](err)
+		if !ok || te.Bundle != bundle || err.Error() != c.want || errors.Unwrap(err) != te.Err {
+			t.Errorf("%s: error %v, want %q", bundle, err, c.want)
+		}
+	}
+}
+
+func keyPEM(kid string, k *ecdsa.PublicKey) string {
+	der, _ := x509.MarshalPKIXPublicKey(k)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY",
+		Headers: map[string]string{"Key-ID": kid}, Bytes: der}))
+}
+
+func rootsPEM(roots ...*capabilitytest.Root) string {
+	var s string
+	for _, r := range roots {
+		s += string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.DER}))
+	}
+	return s
+}
+
+// fingerprints is roots' rawpipe.RootFingerprint, sorted.
+func fingerprints(roots ...*capabilitytest.Root) []string {
+	var fps []string
+	for _, r := range roots {
+		fps = append(fps, rawpipe.RootFingerprint(r.DER))
+	}
+	slices.Sort(fps)
+	return fps
 }
 
 // TestCheckEnvironmentCertificate: the exported check returns the certified

@@ -24,6 +24,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,10 @@ const (
 	// letting a leaked token open many pipes.
 	maxOpens = 4
 )
+
+// SubjectIntegrationProxy is the sub of a capability issued to the
+// Integration Proxy, the caller that opens raw pipes.
+const SubjectIntegrationProxy = "integration-proxy"
 
 // Claims is a capability's payload. Every field is required.
 type Claims struct {
@@ -318,4 +324,61 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 		return nil, errors.New("capability: no keys")
 	}
 	return keys, nil
+}
+
+// Loaded is the capability trust a verifier holds, as connectors report it
+// in their preface: its pinned keys' kids and its roots' fingerprints
+// (rawpipe.RootFingerprint), each sorted, and empty rather than nil.
+type Loaded struct {
+	Kids  []string `json:"kids"`
+	Roots []string `json:"roots"`
+}
+
+// Bundle is which of ParseTrust's bundles a TrustError is about.
+type Bundle string
+
+// Bundles.
+const (
+	BundleKeys  Bundle = "keys"
+	BundleRoots Bundle = "roots"
+)
+
+// TrustError is a bundle ParseTrust could not read: Bundle is BundleKeys or
+// BundleRoots, Err why.
+type TrustError struct {
+	Bundle Bundle
+	Err    error
+}
+
+func (e *TrustError) Error() string { return string(e.Bundle) + ": " + e.Err.Error() }
+
+func (e *TrustError) Unwrap() error { return e.Err }
+
+// ParseTrust reads the trust a verifier of capabilities issued to the
+// Integration Proxy holds: the keys in keyPEM (ParseKeys) with issuer, and
+// the roots in rootPEM (ParseRootsPEM) for controllerHost. A blank bundle is
+// none. It returns the config for NewVerifier, which refuses one with
+// neither, keys without an issuer, or roots without a controller host name,
+// and what it loaded. Its errors are *TrustError, naming the bad bundle.
+func ParseTrust(keyPEM, rootPEM, issuer, controllerHost string) (VerifierConfig, Loaded, error) {
+	vc := VerifierConfig{Issuer: issuer, Subject: SubjectIntegrationProxy,
+		ControllerHost: controllerHost}
+	loaded := Loaded{Kids: []string{}, Roots: []string{}}
+	var err error
+	if strings.TrimSpace(keyPEM) != "" {
+		if vc.Keys, err = ParseKeys([]byte(keyPEM)); err != nil {
+			return VerifierConfig{}, Loaded{}, &TrustError{Bundle: BundleKeys, Err: err}
+		}
+		loaded.Kids = slices.Sorted(maps.Keys(vc.Keys))
+	}
+	if strings.TrimSpace(rootPEM) != "" {
+		if vc.Roots, err = ParseRootsPEM([]byte(rootPEM)); err != nil {
+			return VerifierConfig{}, Loaded{}, &TrustError{Bundle: BundleRoots, Err: err}
+		}
+		for _, root := range vc.Roots {
+			loaded.Roots = append(loaded.Roots, rawpipe.RootFingerprint(root.Raw))
+		}
+		slices.Sort(loaded.Roots)
+	}
+	return vc, loaded, nil
 }

@@ -35,7 +35,7 @@ func Key(seed string) *ecdsa.PrivateKey {
 func Claims(issuer, connector, host string, port uint16) capability.Claims {
 	now := time.Now()
 	return capability.Claims{
-		Issuer: issuer, Audience: capability.Audience, Subject: "integration-proxy",
+		Issuer: issuer, Audience: capability.Audience, Subject: capability.SubjectIntegrationProxy,
 		OrganizationID: "org", IntegrationID: "integration", ConnectorID: connector,
 		ConsumerID: "consumer", SessionID: "session", Host: host, Port: port,
 		JTI: now.Format(time.RFC3339Nano), IssuedAt: now.Unix(),

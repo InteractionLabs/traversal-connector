@@ -34,7 +34,7 @@ func verifier(t *testing.T) *capability.Verifier {
 }
 
 func pinnedConfig() capability.VerifierConfig {
-	return capability.VerifierConfig{Issuer: issuer, Subject: "integration-proxy",
+	return capability.VerifierConfig{Issuer: issuer, Subject: capability.SubjectIntegrationProxy,
 		Keys: map[string]*ecdsa.PublicKey{"k1": &key.PublicKey}}
 }
 
