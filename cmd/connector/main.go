@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/logging"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/telemetry"
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
-	"github.com/InteractionLabs/traversal-connector/internal/logging"
 	"github.com/InteractionLabs/traversal-connector/internal/pipeserver"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"

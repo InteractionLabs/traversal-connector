@@ -1,3 +1,6 @@
+// Package logging is the colored text slog handler for local runs. It is
+// go-traversal's pkg/logging TextHandler, plus the request ID slog-gin puts
+// in a request's context; go-traversal adopts this one in a later step.
 package logging
 
 import (
@@ -35,6 +38,8 @@ func levelColor(l slog.Level) string {
 	}
 }
 
+// TextHandler writes one colored line per record: time, level, source,
+// message, then attributes.
 type TextHandler struct {
 	w      io.Writer
 	mu     *sync.Mutex
