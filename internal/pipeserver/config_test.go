@@ -154,7 +154,7 @@ func TestNew(t *testing.T) {
 				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
 				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200 ||
-					!slices.Equal(tunnels.Kids, []string{"k1"}) || tunnels.Roots != nil):
+					!slices.Equal(tunnels.Kids, []string{"k1"}) || len(tunnels.Roots) != 0):
 				t.Fatalf("defaults: %+v", tunnels)
 			}
 		})
@@ -233,7 +233,7 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(tunnels.Roots, []string{rawpipe.RootFingerprint(root.DER)}) ||
-		tunnels.Kids != nil {
+		len(tunnels.Kids) != 0 {
 		t.Fatalf("reported trust: roots %v kids %v", tunnels.Roots, tunnels.Kids)
 	}
 	for host, want := range map[string]bool{"edge.example.com": true, "edge.other.com": false} {
@@ -259,3 +259,23 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 }
 
 func base64Of(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+// TestNewVerifierBundleErrors: a bad bundle's error starts with the setting
+// it came from, so an operator knows which to fix.
+func TestNewVerifierBundleErrors(t *testing.T) {
+	for setting, want := range map[string]string{
+		"TRAVERSAL_CAPABILITY_KEYS":  "TRAVERSAL_CAPABILITY_KEYS: capability: no keys",
+		"TRAVERSAL_CAPABILITY_ROOTS": "TRAVERSAL_CAPABILITY_ROOTS: capability: roots: ",
+	} {
+		t.Run(setting, func(t *testing.T) {
+			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
+			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
+			t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(testRoot(t)))
+			t.Setenv(setting, base64Of("junk"))
+			_, _, err := newVerifier("https://edge.example.com")
+			if err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("error %v, want one starting %q", err, want)
+			}
+		})
+	}
+}
