@@ -8,33 +8,27 @@
 // ignored, which lets Traversal add informational claims without a connector
 // release. That is safe because nothing a capability adds can widen what a
 // connector allows: its dial policy and the customer's redaction config bound
-// every pipe, whatever the token says. Everything else stays strict: the JWS
-// header holds exactly alg, typ, kid and optionally x5c; every known claim
-// must be present with its JSON type; keys may not repeat, exactly or by
-// case, anywhere in either segment; and nothing may trail the JSON.
+// every pipe, whatever the token says. Everything else stays strict, as
+// package jws parses every token: the JWS header holds exactly alg, typ, kid
+// and optionally x5c; every known claim must be present with its JSON type;
+// keys may not repeat, exactly or by case, anywhere in either segment; and
+// nothing may trail the JSON.
 package capability
 
 import (
-	"bytes"
 	"container/heap"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
-	"encoding/json/jsontext"
-	jsonv2 "encoding/json/v2"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-
+	"github.com/InteractionLabs/traversal-connector/connector-lib/jws"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -68,25 +62,12 @@ type Claims struct {
 	ExpiresAt      int64  `json:"exp"`
 }
 
-var (
-	headerKeys = JSONKeys(header{})
-	claimKeys  = JSONKeys(Claims{})
-)
-
-type header struct {
-	Alg string `json:"alg"`
-	Typ string `json:"typ"`
-	Kid string `json:"kid"`
-	// X5C is the signing key's certificate chain (chain.go), optional.
-	X5C []string `json:"x5c,omitempty"`
-}
-
 // reject is an invalid capability. It never quotes the token.
 func reject(msg string) error { return rawpipe.Errorf(rawpipe.InvalidCapability, "%s", msg) }
 
 // Sign returns claims as a capability signed by key under kid.
 func Sign(key *ecdsa.PrivateKey, kid string, c Claims) (string, error) {
-	return sign(key, header{Alg: "ES256", Typ: tokenType, Kid: kid}, c)
+	return sign(key, jws.Header{Typ: tokenType, Kid: kid}, c)
 }
 
 // SignChained is Sign that also sends x5c, the DER certificate chain of key
@@ -104,21 +85,14 @@ func SignChained(key *ecdsa.PrivateKey, kid string, x5c [][]byte, c Claims) (str
 		return "", fmt.Errorf("capability: x5c must be 1 to %d certificates, at most %d bytes",
 			maxChainCerts, maxChainBytes)
 	}
-	return sign(key, header{Alg: "ES256", Typ: tokenType, Kid: kid, X5C: chain}, c)
+	return sign(key, jws.Header{Typ: tokenType, Kid: kid, X5C: chain}, c)
 }
 
-func sign(key *ecdsa.PrivateKey, h header, c Claims) (string, error) {
+func sign(key *ecdsa.PrivateKey, h jws.Header, c Claims) (string, error) {
 	if err := c.valid(); err != nil {
 		return "", err
 	}
-	hdr, _ := json.Marshal(h)
-	p, _ := json.Marshal(c)
-	input := b64(hdr) + "." + b64(p)
-	sig, err := jwt.SigningMethodES256.Sign(input, key)
-	if err != nil {
-		return "", err
-	}
-	return input + "." + b64(sig), nil
+	return jws.Sign(key, h, c)
 }
 
 // Verifier checks capabilities and limits how often each is accepted. It is
@@ -241,26 +215,17 @@ func (v *Verifier) Verify(token, connector, host string, port uint16) (*Claims, 
 // parse checks token's structure and signature, and returns its claims and
 // the issuer they must carry.
 func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
-	parts := strings.Split(token, ".")
-	if len(token) > maxTokenLen || len(parts) != 3 {
-		return nil, "", reject("not a compact JWS")
+	t, err := jws.Parse(token, maxTokenLen, tokenType, true)
+	if err != nil {
+		return nil, "", reject(err.Error())
 	}
-	var h header
-	if err := DecodeSegment(parts[0], headerKeys, false, &h); err != nil || h.Alg != "ES256" ||
-		h.Typ != tokenType {
-		return nil, "", reject("bad header")
-	}
-	key, issuer, err := v.signingKey(h, now)
+	key, issuer, err := v.signingKey(t.Header, now)
 	if err != nil {
 		return nil, "", err
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || jwt.SigningMethodES256.Verify(parts[0]+"."+parts[1], sig, key) != nil {
-		return nil, "", reject("bad signature")
-	}
 	var c Claims
-	if err := DecodeSegment(parts[1], claimKeys, true, &c); err != nil {
-		return nil, "", reject("bad claims")
+	if err := t.Verify(key, &c, jws.IgnoreUnknown); err != nil {
+		return nil, "", reject(err.Error())
 	}
 	if err := c.valid(); err != nil {
 		return nil, "", err
@@ -274,7 +239,7 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 // same key, so a verifier with keys and one with roots never accept a token
 // under two different keys. Without roots x5c is ignored, which keeps pinned
 // keys working as a signer starts sending its certificate.
-func (v *Verifier) signingKey(h header, now time.Time) (*ecdsa.PublicKey, string, error) {
+func (v *Verifier) signingKey(h jws.Header, now time.Time) (*ecdsa.PublicKey, string, error) {
 	pinned := v.keys[h.Kid]
 	switch {
 	case h.X5C != nil && v.chains != nil:
@@ -356,78 +321,4 @@ func ParseKeys(bundle []byte) (map[string]*ecdsa.PublicKey, error) {
 		return nil, errors.New("capability: no keys")
 	}
 	return keys, nil
-}
-
-func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
-
-// DecodeSegment parses a JWS segment, a JSON object, into v. Every key in known
-// marked required must be present and not null. A key not in known is
-// refused, or ignored if lenient. encoding/json/v2 refuses a key repeated
-// exactly at any depth, trailing data and invalid UTF-8, and matches keys
-// exactly (v1 folds case, and "ſ" onto "s"); foldedUnique refuses what it
-// allows, a key repeated by case.
-//
-// Exported so every JWS connector-lib verifies (capabilities, signed
-// configs) is parsed the same strict way; build known with JSONKeys.
-func DecodeSegment(segment string, known map[string]bool, lenient bool, v any) error {
-	raw, err := base64.RawURLEncoding.DecodeString(segment)
-	if err != nil {
-		return err
-	}
-	var obj map[string]jsontext.Value
-	if err := jsonv2.Unmarshal(raw, &obj); err != nil {
-		return err
-	}
-	if err := foldedUnique(raw); err != nil {
-		return err
-	}
-	for k, required := range known {
-		if val, ok := obj[k]; required && (!ok || val.Kind() == 'n') {
-			return fmt.Errorf("missing field %q", k)
-		}
-	}
-	return jsonv2.Unmarshal(raw, v, jsonv2.RejectUnknownMembers(!lenient))
-}
-
-// foldedUnique refuses a JSON object, at any depth of raw, with two keys
-// that differ only by case. jsontext has no option for this: it compares
-// names exactly.
-func foldedUnique(raw []byte) error {
-	d := jsontext.NewDecoder(bytes.NewReader(raw))
-	var seen []map[string]bool // one per open object
-	for {
-		tok, err := d.ReadToken()
-		if errors.Is(err, io.EOF) {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		switch tok.Kind() {
-		case '{':
-			seen = append(seen, map[string]bool{})
-		case '}':
-			seen = seen[:len(seen)-1]
-		case '"':
-			// A string at an odd position in an object is a key.
-			if kind, n := d.StackIndex(d.StackDepth()); kind == '{' && n%2 == 1 {
-				key := strings.ToLower(tok.String())
-				if seen[len(seen)-1][key] {
-					return fmt.Errorf("duplicate key %q", key)
-				}
-				seen[len(seen)-1][key] = true
-			}
-		}
-	}
-}
-
-// JSONKeys maps each JSON key of struct v to whether it is required: every
-// field but those tagged omitempty.
-func JSONKeys(v any) map[string]bool {
-	t := reflect.TypeOf(v)
-	keys := make(map[string]bool, t.NumField())
-	for i := range t.NumField() {
-		name, opts, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-		keys[name] = opts != "omitempty"
-	}
-	return keys
 }
