@@ -1,6 +1,7 @@
 package rawpipes
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -67,6 +68,7 @@ func TestNew(t *testing.T) {
 			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME": "1h", "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "0s",
 			"TRAVERSAL_TUNNELS_CONNECT_TO":     "10.0.0.1:443",
 			"TRAVERSAL_RAW_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES": "true",
+			"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
@@ -90,6 +92,12 @@ func TestNew(t *testing.T) {
 			wantErr: "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT"},
 		{name: "bad bool", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES": "yes"},
 			wantErr: "must be true or false"},
+		{name: "bad forbidden CIDR", spiffeID: orgScoped,
+			env:     map[string]string{"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
+			wantErr: `TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
+		{name: "empty forbidden CIDR", spiffeID: orgScoped,
+			env:     map[string]string{"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,"},
+			wantErr: "TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS"},
 		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_EGRESS_PROXY": "https://p:3128"},
 			wantErr: "must be an http:// URL"},
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
@@ -134,6 +142,8 @@ func TestNew(t *testing.T) {
 				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
 					tunnels.Server.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour):
 				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
+			case c.name == "every setting" && forbidden(tunnels, "10.9.1.1") != rawpipe.ForbiddenAddress:
+				t.Fatal("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS not applied")
 			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
 				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
@@ -143,6 +153,21 @@ func TestNew(t *testing.T) {
 			}
 		})
 	}
+}
+
+// forbidden is the reason tunnels' dial policy refuses host, or "" if it
+// allows it. Policies refuse before dialing, so nothing is dialed.
+func forbidden(tunnels *Tunnels, host string) rawpipe.Reason {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // an allowed host fails to dial at once
+	conn, _, err := tunnels.Server.Policy.Dial(ctx, host, 443)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if r := rawpipe.ReasonOf(err, ""); r == rawpipe.ForbiddenAddress {
+		return r
+	}
+	return ""
 }
 
 var (
