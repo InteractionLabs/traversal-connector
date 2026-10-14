@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,6 +12,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
@@ -232,7 +232,7 @@ func logTLSState(label, addr string, state tls.ConnectionState) {
 // ---------------------------------------------------------------------------
 
 func testProxyTCPReachability(egressProxyURL *url.URL) {
-	proxyAddr := proxyHostPort(egressProxyURL)
+	proxyAddr := dialpolicy.ProxyAddr(egressProxyURL)
 	slog.Info(
 		"connectivity test [proxy-tcp]: dialing proxy",
 		"proxy_address", proxyAddr,
@@ -276,7 +276,7 @@ func testManualCONNECT(
 	caPool *x509.CertPool,
 ) {
 	label := "proxy-manual-connect"
-	proxyAddr := proxyHostPort(egressProxyURL)
+	proxyAddr := dialpolicy.ProxyAddr(egressProxyURL)
 	slog.Info(
 		fmt.Sprintf("connectivity test [%s]: starting", label),
 		"proxy_address", proxyAddr,
@@ -290,110 +290,23 @@ func testManualCONNECT(
 
 	start := time.Now()
 
-	// Step 1 — TCP to proxy.
-	slog.Debug(
-		fmt.Sprintf(
-			"connectivity test [%s]: TCP dialing proxy", label,
-		),
-		"proxy_address", proxyAddr,
-	)
-	rawConn, err := (&net.Dialer{}).DialContext(
-		ctx, "tcp", proxyAddr,
-	)
+	// Steps 1-3 — TCP to the proxy, CONNECT, and its answer; any bytes the
+	// proxy sent after its answer stay readable on the tunnel.
+	tunnelConn, err := dialpolicy.DialConnect(ctx, egressProxyURL, targetAddr)
 	if err != nil {
 		slog.Warn(
 			fmt.Sprintf(
-				"connectivity test [%s]: FAILED — TCP to proxy",
+				"connectivity test [%s]: FAILED — CONNECT tunnel",
 				label,
 			),
 			"proxy_address", proxyAddr,
+			"target_address", targetAddr,
 			"error", err,
-		)
-		return
-	}
-
-	// Step 2 — HTTP CONNECT request.
-	slog.Debug(
-		fmt.Sprintf(
-			"connectivity test [%s]: sending CONNECT", label,
-		),
-		"target_address", targetAddr,
-	)
-	connectReq := &http.Request{
-		Method: http.MethodConnect,
-		URL:    &url.URL{Opaque: targetAddr},
-		Host:   targetAddr,
-		Header: make(http.Header),
-	}
-	if writeErr := connectReq.Write(rawConn); writeErr != nil {
-		_ = rawConn.Close()
-		slog.Warn(
-			fmt.Sprintf(
-				"connectivity test [%s]: FAILED — write CONNECT",
-				label,
-			),
-			"error", writeErr,
-		)
-		return
-	}
-
-	// Step 3 — read CONNECT response. Use a bufio.Reader, but wrap the
-	// connection so reads after the HTTP response come from the buffer
-	// (avoids losing bytes the reader may have read ahead of the response).
-	br := bufio.NewReader(rawConn)
-	resp, err := http.ReadResponse(br, connectReq)
-	if err != nil {
-		_ = rawConn.Close()
-		slog.Warn(
-			fmt.Sprintf(
-				"connectivity test [%s]: "+
-					"FAILED — read CONNECT response",
-				label,
-			),
-			"error", err,
-		)
-		return
-	}
-	_ = resp.Body.Close()
-
-	slog.Info(
-		fmt.Sprintf(
-			"connectivity test [%s]: CONNECT response received",
-			label,
-		),
-		"status", resp.Status,
-		"status_code", resp.StatusCode,
-		"proto", resp.Proto,
-		"content_length", resp.ContentLength,
-	)
-	for k, v := range resp.Header {
-		slog.Debug(
-			fmt.Sprintf(
-				"connectivity test [%s]: CONNECT response header",
-				label,
-			),
-			"key", k,
-			"value", v,
-		)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_ = rawConn.Close()
-		slog.Warn(
-			fmt.Sprintf(
-				"connectivity test [%s]: FAILED — proxy rejected",
-				label,
-			),
-			"status", resp.Status,
 		)
 		return
 	}
 
 	// Step 4 — TLS handshake over the tunneled connection.
-	// Wrap with bufferedConn so any bytes already buffered by the
-	// bufio.Reader are not lost during the TLS handshake.
-	tunnelConn := newBufferedConn(br, rawConn)
-
 	//nolint:gosec // InsecureSkipVerify intentional for diagnostics.
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true,
@@ -410,7 +323,7 @@ func testManualCONNECT(
 	)
 	tlsConn := tls.Client(tunnelConn, tlsCfg)
 	if hsErr := tlsConn.HandshakeContext(ctx); hsErr != nil {
-		_ = rawConn.Close()
+		_ = tunnelConn.Close()
 		slog.Warn(
 			fmt.Sprintf(
 				"connectivity test [%s]: "+
@@ -609,35 +522,6 @@ func directTLSDial(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
-
-// bufferedConn wraps a bufio.Reader (which may contain buffered bytes
-// read ahead from the underlying connection during HTTP response parsing)
-// together with the raw net.Conn. Reads come from the bufio.Reader first,
-// writes and other net.Conn methods go to the raw connection.
-//
-// This avoids the classic CONNECT-proxy pitfall where bufio.Reader
-// consumes bytes beyond the HTTP response boundary, causing the
-// subsequent TLS handshake on the raw conn to fail.
-type bufferedConn struct {
-	r *bufio.Reader
-	net.Conn
-}
-
-func newBufferedConn(r *bufio.Reader, c net.Conn) *bufferedConn {
-	return &bufferedConn{r: r, Conn: c}
-}
-
-func (bc *bufferedConn) Read(p []byte) (int, error) {
-	return bc.r.Read(p)
-}
-
-// proxyHostPort returns host:port for the proxy, defaulting to port 80.
-func proxyHostPort(u *url.URL) string {
-	if u.Port() != "" {
-		return u.Host
-	}
-	return net.JoinHostPort(u.Hostname(), "80")
-}
 
 // extractHostPort parses a URL-style address and returns host:port
 // suitable for net.Dial.

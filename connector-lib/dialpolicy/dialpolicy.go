@@ -10,13 +10,10 @@
 package dialpolicy
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -102,6 +99,10 @@ func New(cfg Config) (*Policy, error) {
 
 // Dial connects to a canonical host:port. Every error is a *rawpipe.Error. It
 // returns the address dialed, or the proxy, for the audit log.
+//
+// It is not a net.Dialer with a Control hook: Control sees one address per
+// attempt, so it cannot refuse a name with any forbidden answer, and the
+// dialer would resolve again rather than dial the addresses checked.
 func (p *Policy) Dial(
 	ctx context.Context,
 	host string,
@@ -117,8 +118,11 @@ func (p *Policy) Dial(
 			return nil, "", rawpipe.Errorf(rawpipe.ForbiddenAddress,
 				"hostnames through the proxy are not allowed")
 		}
+		if p.cfg.Proxy.Scheme != "http" {
+			return nil, "", rawpipe.Errorf(rawpipe.DialFailed, "the forward proxy must be http://")
+		}
 		// No trailing dot: customer proxy ACLs match the name as written.
-		conn, err := p.dialProxy(ctx, net.JoinHostPort(host, fmt.Sprint(port)))
+		conn, err := DialConnect(ctx, p.cfg.Proxy, net.JoinHostPort(host, fmt.Sprint(port)))
 		if err != nil {
 			return nil, "", refuse(rawpipe.DialFailed, err)
 		}
@@ -212,53 +216,3 @@ func race(ctx context.Context, addrs []netip.Addr, port uint16) (*net.TCPConn, e
 	}
 	return winner, nil
 }
-
-// dialProxy opens a tunnel to authority through the forward proxy with
-// HTTP CONNECT, authenticating with the URL's user info.
-func (p *Policy) dialProxy(ctx context.Context, authority string) (rawpipe.HalfCloser, error) {
-	proxy := p.cfg.Proxy
-	if proxy.Scheme != "http" {
-		return nil, errors.New("the forward proxy must be http://")
-	}
-	addr := proxy.Host
-	if proxy.Port() == "" {
-		addr = net.JoinHostPort(proxy.Hostname(), "80")
-	}
-	c, err := (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	conn := c.(*net.TCPConn) //nolint:errcheck,forcetypeassert // tcp dials return *net.TCPConn
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
-	defer stop()
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", authority, authority)
-	if u := proxy.User; u != nil {
-		pw, _ := u.Password()
-		req += "Proxy-Authorization: Basic " +
-			base64.StdEncoding.EncodeToString([]byte(u.Username()+":"+pw)) + "\r\n"
-	}
-	br := bufio.NewReader(conn)
-	if _, err = fmt.Fprint(conn, req+"\r\n"); err == nil {
-		var resp *http.Response
-		if resp, err = http.ReadResponse(br, &http.Request{Method: http.MethodConnect}); err == nil {
-			// A 200's body is the tunnel itself, so it is never read or closed.
-			if resp.StatusCode != http.StatusOK {
-				_ = resp.Body.Close()
-				err = fmt.Errorf("forward proxy refused CONNECT: %d", resp.StatusCode)
-			}
-		}
-	}
-	if err != nil || !stop() {
-		_ = conn.Close()
-		return nil, errors.Join(err, ctx.Err())
-	}
-	// Bytes the proxy sent after its answer belong to the tunnel.
-	return &proxied{TCPConn: conn, r: br}, conn.SetDeadline(time.Time{})
-}
-
-type proxied struct {
-	*net.TCPConn
-	r *bufio.Reader
-}
-
-func (c *proxied) Read(b []byte) (int, error) { return c.r.Read(b) }

@@ -117,22 +117,3 @@ func TestHTTPConnectDialer_ProxyRejects(t *testing.T) {
 		t.Errorf("expected 403 in error, got: %v", err)
 	}
 }
-
-func TestProxyHostPort(t *testing.T) {
-	tests := []struct {
-		raw  string
-		want string
-	}{
-		{"http://proxy.example.com:3128", "proxy.example.com:3128"},
-		{"http://proxy.example.com", "proxy.example.com:80"},
-	}
-	for _, tt := range tests {
-		u, err := url.Parse(tt.raw)
-		if err != nil {
-			t.Fatalf("parse %q: %v", tt.raw, err)
-		}
-		if got := proxyHostPort(u); got != tt.want {
-			t.Errorf("proxyHostPort(%q) = %q, want %q", tt.raw, got, tt.want)
-		}
-	}
-}
