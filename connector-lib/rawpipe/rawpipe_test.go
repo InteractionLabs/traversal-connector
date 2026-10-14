@@ -18,7 +18,11 @@ func TestTenantID(t *testing.T) {
 			t.Errorf("TenantID(%q) = %q %q %v", uri, o, c, ok)
 		}
 	}
-	for _, uri := range []string{"spiffe://traversal.com/processor/x", "spiffe://traversal.com/tenant/ORG/acme", ""} {
+	for _, uri := range []string{
+		"spiffe://traversal.com/processor/x",
+		"spiffe://traversal.com/tenant/ORG/acme",
+		"",
+	} {
 		if _, _, ok := rawpipe.TenantID(uri); ok {
 			t.Errorf("TenantID(%q) accepted", uri)
 		}
