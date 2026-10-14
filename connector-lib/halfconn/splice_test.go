@@ -7,26 +7,8 @@ import (
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn/halfconntest"
 )
-
-// pair is two ends of a loopback TCP connection.
-func pair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	a, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := ln.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
-	return a.(*net.TCPConn), b.(*net.TCPConn) //nolint:forcetypeassert // tcp
-}
 
 // splice runs Splice between a caller and a destination, returning their
 // far ends and its result.
@@ -34,8 +16,8 @@ func splice(
 	t *testing.T,
 	l halfconn.Limits,
 ) (caller, dest *net.TCPConn, done <-chan halfconn.Outcome) {
-	caller, callerNear := pair(t)
-	destNear, dest := pair(t)
+	caller, callerNear := halfconntest.TCPPair(t)
+	destNear, dest := halfconntest.TCPPair(t)
 	ch := make(chan halfconn.Outcome, 1)
 	go func() {
 		_, _, o := halfconn.Splice(halfconn.ConnEnd(callerNear), halfconn.ConnEnd(destNear), l)

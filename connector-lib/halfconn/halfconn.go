@@ -10,8 +10,8 @@
 //
 // A wrapper that buffers a conn's first bytes must also implement WriteTo:
 // io.Copy prefers the source's WriteTo, and an embedded *net.TCPConn's would
-// splice from the socket and skip what the buffer holds. Buffered does, and
-// is the one such wrapper.
+// splice from the socket and skip what the buffer holds. Prefixed does, and
+// is the one such wrapper; Buffered is built on it.
 package halfconn
 
 import (
@@ -28,10 +28,36 @@ type Conn interface {
 	CloseWrite() error
 }
 
+// Prefixed is c with r's bytes read first: bytes already taken from c's
+// peer, such as a sniffed TLS ClientHello. Reads drain r, then c; WriteTo
+// does the same, so io.Copy still reaches c's own WriteTo (*net.TCPConn's
+// splice) once r is drained. CloseWrite and every other method are c's.
+func Prefixed(c Conn, r io.Reader) Conn {
+	return &prefixed{Conn: c, r: io.MultiReader(r, c)}
+}
+
+type prefixed struct {
+	Conn
+	r io.Reader
+}
+
+func (p *prefixed) Read(b []byte) (int, error) { return p.r.Read(b) }
+
+// WriteTo lets io.Copy drain the prefix and then use c's own WriteTo rather
+// than copy through Read.
+func (p *prefixed) WriteTo(w io.Writer) (int64, error) { return io.Copy(w, p.r) }
+
+// SetLinger reaches c's, so ConnEnd's Abort still resets a TCP connection.
+func (p *prefixed) SetLinger(sec int) error {
+	if l, ok := p.Conn.(interface{ SetLinger(int) error }); ok {
+		return l.SetLinger(sec)
+	}
+	return errors.ErrUnsupported
+}
+
 // Buffered is c read through r, a bufio.Reader over c that may already hold
 // bytes c's peer sent: what followed a CONNECT request a server hijacked, or
-// a CONNECT answer a client read. Reads drain r before c; CloseWrite and
-// every other method are c's.
+// a CONNECT answer a client read. It is Prefixed with what r holds.
 //
 // With nothing buffered it returns c itself, which keeps io.Copy's
 // zero-copy paths (*net.TCPConn's ReadFrom and WriteTo).
@@ -39,26 +65,8 @@ func Buffered(c Conn, r *bufio.Reader) Conn {
 	if r == nil || r.Buffered() == 0 {
 		return c
 	}
-	return &buffered{Conn: c, r: r}
-}
-
-type buffered struct {
-	Conn
-	r *bufio.Reader
-}
-
-func (b *buffered) Read(p []byte) (int, error) { return b.r.Read(p) }
-
-// WriteTo lets io.Copy drain the buffer and then use c's own WriteTo, such
-// as *net.TCPConn's splice, rather than copy through Read.
-func (b *buffered) WriteTo(w io.Writer) (int64, error) { return b.r.WriteTo(w) }
-
-// SetLinger reaches c's, so ConnEnd's Abort still resets a TCP connection.
-func (b *buffered) SetLinger(sec int) error {
-	if l, ok := b.Conn.(interface{ SetLinger(int) error }); ok {
-		return l.SetLinger(sec)
-	}
-	return errors.ErrUnsupported
+	// Reading no more than r holds never makes r read c.
+	return Prefixed(c, io.LimitReader(r, int64(r.Buffered())))
 }
 
 // Hijack takes over the HTTP/1 connection under w, for a CONNECT the handler
@@ -76,4 +84,19 @@ func Hijack(w http.ResponseWriter) (Conn, error) {
 		return nil, errors.New("halfconn: hijacked connection cannot half-close")
 	}
 	return Buffered(hc, rw.Reader), nil
+}
+
+// Established is Hijack that also accepts the CONNECT: it writes the 200,
+// after which the connection is the tunnel. On error the connection is
+// closed.
+func Established(w http.ResponseWriter) (Conn, error) {
+	c, err := Hijack(w)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	return c, nil
 }
