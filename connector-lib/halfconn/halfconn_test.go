@@ -1,4 +1,4 @@
-package rawpipe_test
+package halfconn_test
 
 import (
 	"bufio"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 )
 
 // plainWriter is an io.Writer that is not an io.ReaderFrom, so io.Copy uses
@@ -36,8 +36,8 @@ func TestBuffered(t *testing.T) {
 			if _, err := br.Peek(5); err != nil {
 				t.Fatal(err)
 			}
-			c := rawpipe.Buffered(near, br)
-			if c == rawpipe.HalfCloser(near) {
+			c := halfconn.Buffered(near, br)
+			if c == halfconn.Conn(near) {
 				t.Fatal("Buffered dropped the buffered bytes")
 			}
 			_, _ = far.Write([]byte(" world"))
@@ -55,7 +55,7 @@ func TestBuffered(t *testing.T) {
 	}
 	t.Run("nothing buffered", func(t *testing.T) {
 		_, near := pair(t)
-		if c := rawpipe.Buffered(near, bufio.NewReader(near)); c != rawpipe.HalfCloser(near) {
+		if c := halfconn.Buffered(near, bufio.NewReader(near)); c != halfconn.Conn(near) {
 			t.Fatalf("Buffered wrapped an empty reader: %T", c)
 		}
 	})
@@ -66,7 +66,7 @@ func TestBuffered(t *testing.T) {
 func TestHijack(t *testing.T) {
 	got := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		c, err := rawpipe.Hijack(w)
+		c, err := halfconn.Hijack(w)
 		if err != nil {
 			got <- err.Error()
 			return
@@ -103,7 +103,7 @@ func TestHijack(t *testing.T) {
 	}
 }
 
-// TestBufferedAbort: rawpipe.Conn's Abort still resets a buffered TCP
+// TestBufferedAbort: halfconn.ConnEnd's Abort still resets a buffered TCP
 // connection, so the peer sees a failure rather than an end.
 func TestBufferedAbort(t *testing.T) {
 	far, near := pair(t)
@@ -112,7 +112,7 @@ func TestBufferedAbort(t *testing.T) {
 	if _, err := br.Peek(1); err != nil {
 		t.Fatal(err)
 	}
-	rawpipe.Conn(rawpipe.Buffered(near, br)).Abort()
+	halfconn.ConnEnd(halfconn.Buffered(near, br)).Abort()
 	_ = far.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadAll(far); err == nil {
 		t.Fatal("peer saw a clean end, not a reset")

@@ -17,7 +17,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 )
 
 // Dial connects to proxy (an http:// URL; user info becomes
@@ -35,7 +35,7 @@ func Dial(
 	proxy *url.URL,
 	authority string,
 	header http.Header,
-) (rawpipe.HalfCloser, *http.Response, error) {
+) (halfconn.Conn, *http.Response, error) {
 	if proxy.Scheme != "http" {
 		return nil, nil, fmt.Errorf("forward proxy %s must be http://", proxy.Redacted())
 	}
@@ -76,7 +76,7 @@ func Dial(
 		return nil, resp, errors.Join(err, ctx.Err())
 	}
 	// Bytes the proxy sent after its answer belong to the tunnel.
-	return rawpipe.Buffered(conn, br), nil, conn.SetDeadline(time.Time{})
+	return halfconn.Buffered(conn, br), nil, conn.SetDeadline(time.Time{})
 }
 
 // ProxyAddr is proxy's host:port, port 80 if the URL names none.

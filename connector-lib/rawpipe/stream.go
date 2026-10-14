@@ -1,10 +1,6 @@
-// Splice is the pipe copy the connector, the edge controller and the
-// Integration Proxy share. It is not io.Copy or httputil.ReverseProxy because
-// those cannot tell a clean end from a failure: here a clean end on one side
-// becomes a half-close (CloseWrite) on the other, and a failure a reset
-// (Abort). Go's HTTP/2 server ends a stream only when its handler returns,
-// hence ServerStream. Splice also enforces idle and lifetime limits and
-// counts bytes for the audit log.
+// The HTTP/2 CONNECT streams a tunnel carries pipes on, as halfconn.End
+// values for halfconn.Splice. Go's HTTP/2 server ends a stream only when its
+// handler returns, hence ServerStream's Finish.
 
 package rawpipe
 
@@ -13,118 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// End is one side of a pipe. Its Read returns io.EOF at a clean end.
-type End interface {
-	io.Reader
-	io.Writer
-	// CloseWrite ends the bytes toward this end cleanly.
-	CloseWrite() error
-	// Abort resets this end, so it sees a failure rather than an end, and
-	// unblocks any Read or Write on it.
-	Abort()
-}
-
-// Outcome is how a pipe ended.
-type Outcome string
-
-// Outcomes.
-const (
-	Completed     Outcome = "completed"
-	Limit         Outcome = "limit"
-	CallerAborted Outcome = "caller_aborted"
-	DestAborted   Outcome = "destination_aborted"
-)
-
-// Limits end a pipe that is Lifetime old or has moved no bytes for Idle.
-// Zero is no limit.
-type Limits struct{ Lifetime, Idle time.Duration }
-
-// Splice copies both ways until both directions end. A clean end on one side
-// is a clean end on the other; the first failure, or a limit, aborts both
-// ends, so neither mistakes it for an end. sent is caller to dest.
-func Splice(caller, dest End, l Limits) (sent, received int64, outcome Outcome) {
-	var once sync.Once
-	outcome = Completed
-	fail := func(o Outcome) {
-		once.Do(func() { outcome = o; caller.Abort(); dest.Abort() })
-	}
-	limit := func() { fail(Limit) }
-	touch := func() {}
-	if l.Idle > 0 {
-		idle := time.AfterFunc(l.Idle, limit)
-		defer idle.Stop()
-		touch = func() { idle.Reset(l.Idle) }
-	}
-	if l.Lifetime > 0 {
-		defer time.AfterFunc(l.Lifetime, limit).Stop()
-	}
-	up := make(chan int64, 1)
-	go func() { up <- copyEnd(dest, caller, touch, fail, CallerAborted, DestAborted) }()
-	received = copyEnd(caller, dest, touch, fail, DestAborted, CallerAborted)
-	sent = <-up
-	// A limit firing now waits for this, or finds it done: outcome is settled.
-	once.Do(func() {})
-	return sent, received, outcome
-}
-
-const copyBuffer = 64 << 10
-
-func copyEnd(dst, src End, touch func(), fail func(Outcome), srcFailed, dstFailed Outcome) int64 {
-	buf := make([]byte, copyBuffer)
-	var n int64
-	for {
-		r, err := src.Read(buf)
-		if r > 0 {
-			touch()
-			if _, werr := dst.Write(buf[:r]); werr != nil {
-				fail(dstFailed)
-				return n
-			}
-			n += int64(r)
-		}
-		switch {
-		case errors.Is(err, io.EOF):
-			if dst.CloseWrite() != nil {
-				fail(dstFailed)
-			}
-			return n
-		case err != nil:
-			fail(srcFailed)
-			return n
-		}
-	}
-}
-
-// HalfCloser is a connection that can half-close, such as *net.TCPConn.
-type HalfCloser interface {
-	net.Conn
-	CloseWrite() error
-}
-
-// Conn is a connection as a pipe End. Abort resets it.
-func Conn(c HalfCloser) End { return connEnd{c} }
-
-type connEnd struct{ HalfCloser }
-
-func (c connEnd) Abort() {
-	if tcp, ok := c.HalfCloser.(interface{ SetLinger(int) error }); ok {
-		_ = tcp.SetLinger(0)
-	}
-	_ = c.Close()
-}
-
 // past is a deadline that unblocks a read or write at once.
 var past = time.Unix(1, 0)
 
-// ServerStream is an HTTP/2 server CONNECT stream as a pipe End. The stock
+// ServerStream is an HTTP/2 server CONNECT stream as a halfconn.End. The stock
 // server ends a stream only when its handler returns, so CloseWrite stops
 // reading the peer and the stream ends with the handler: bytes the peer sends
 // after it are dropped. The handler must call Finish once Splice returns.
@@ -188,7 +82,7 @@ func (s *ServerStream) Finish() {
 	}
 }
 
-// ClientStream is an HTTP/2 client CONNECT stream as a pipe End.
+// ClientStream is an HTTP/2 client CONNECT stream as a halfconn.End.
 type ClientStream struct {
 	body   *io.PipeWriter
 	resp   *http.Response

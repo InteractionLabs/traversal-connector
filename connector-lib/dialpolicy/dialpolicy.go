@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/httpconnect"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
@@ -122,7 +123,7 @@ func (p *Policy) Dial(
 	ctx context.Context,
 	host string,
 	port uint16,
-) (rawpipe.HalfCloser, string, error) {
+) (halfconn.Conn, string, error) {
 	literal, err := netip.ParseAddr(host)
 	isLiteral := err == nil
 	if isLiteral && p.forbidden(literal) || forbiddenName(host) {

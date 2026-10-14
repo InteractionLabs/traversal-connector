@@ -1,4 +1,4 @@
-package rawpipe_test
+package halfconn_test
 
 import (
 	"io"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 )
 
 // pair is two ends of a loopback TCP connection.
@@ -32,13 +32,13 @@ func pair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 // far ends and its result.
 func splice(
 	t *testing.T,
-	l rawpipe.Limits,
-) (caller, dest *net.TCPConn, done <-chan rawpipe.Outcome) {
+	l halfconn.Limits,
+) (caller, dest *net.TCPConn, done <-chan halfconn.Outcome) {
 	caller, callerNear := pair(t)
 	destNear, dest := pair(t)
-	ch := make(chan rawpipe.Outcome, 1)
+	ch := make(chan halfconn.Outcome, 1)
 	go func() {
-		_, _, o := rawpipe.Splice(rawpipe.Conn(callerNear), rawpipe.Conn(destNear), l)
+		_, _, o := halfconn.Splice(halfconn.ConnEnd(callerNear), halfconn.ConnEnd(destNear), l)
 		ch <- o
 	}()
 	return caller, dest, ch
@@ -46,7 +46,7 @@ func splice(
 
 func TestSplice(t *testing.T) {
 	t.Run("ends map to ends", func(t *testing.T) {
-		caller, dest, done := splice(t, rawpipe.Limits{})
+		caller, dest, done := splice(t, halfconn.Limits{})
 		_, _ = caller.Write([]byte("ping"))
 		_ = caller.CloseWrite()
 		if b, _ := io.ReadAll(dest); string(b) != "ping" {
@@ -57,27 +57,27 @@ func TestSplice(t *testing.T) {
 		if b, err := io.ReadAll(caller); string(b) != "pong" || err != nil {
 			t.Fatalf("caller read %q %v", b, err)
 		}
-		if o := <-done; o != rawpipe.Completed {
+		if o := <-done; o != halfconn.Completed {
 			t.Fatal(o)
 		}
 	})
 	t.Run("a reset is a reset", func(t *testing.T) {
-		caller, dest, done := splice(t, rawpipe.Limits{})
+		caller, dest, done := splice(t, halfconn.Limits{})
 		_ = dest.SetLinger(0)
 		_ = dest.Close()
 		if _, err := io.ReadAll(caller); err == nil {
 			t.Fatal("caller saw a clean end")
 		}
-		if o := <-done; o != rawpipe.DestAborted {
+		if o := <-done; o != halfconn.DestAborted {
 			t.Fatal(o)
 		}
 	})
 	t.Run("idle limit", func(t *testing.T) {
-		caller, _, done := splice(t, rawpipe.Limits{Idle: time.Millisecond})
+		caller, _, done := splice(t, halfconn.Limits{Idle: time.Millisecond})
 		if _, err := io.ReadAll(caller); err == nil {
 			t.Fatal("caller saw a clean end")
 		}
-		if o := <-done; o != rawpipe.Limit {
+		if o := <-done; o != halfconn.Limit {
 			t.Fatal(o)
 		}
 	})
