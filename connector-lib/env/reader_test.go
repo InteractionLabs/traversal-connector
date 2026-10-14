@@ -1,7 +1,6 @@
 package env_test
 
 import (
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -57,11 +56,8 @@ func TestReaderCollects(t *testing.T) {
 	var r env.Reader
 	r.Int("R_A", 1, 2)
 	r.Bool("R_B", false)
-	custom := errors.New("R_C is wrong")
-	r.Fail(custom)
-	err := r.Err()
-	if !errors.Is(err, custom) || !strings.Contains(err.Error(), "R_A") ||
+	if err := r.Err(); !strings.Contains(err.Error(), "R_A") ||
 		!strings.Contains(err.Error(), "R_B") {
-		t.Fatalf("Err = %v, want all three", err)
+		t.Fatalf("Err = %v, want both", err)
 	}
 }

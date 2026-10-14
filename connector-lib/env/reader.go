@@ -55,8 +55,5 @@ func (r *Reader) Bool(key string, def bool) bool {
 	}
 }
 
-// Fail records an invalid setting the caller checked itself.
-func (r *Reader) Fail(err error) { r.errs = append(r.errs, err) }
-
 // Err is every invalid setting read so far, or nil.
 func (r *Reader) Err() error { return errors.Join(r.errs...) }
