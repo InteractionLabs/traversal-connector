@@ -98,3 +98,11 @@ func TestPreface(t *testing.T) {
 		}
 	}
 }
+
+// TestHeaderPeerURISAN pins the header the edge gateway's Envoy config sets,
+// which lives in another repository.
+func TestHeaderPeerURISAN(t *testing.T) {
+	if rawpipe.HeaderPeerURISAN != "X-Traversal-Peer-Uri-San" {
+		t.Fatal(rawpipe.HeaderPeerURISAN)
+	}
+}

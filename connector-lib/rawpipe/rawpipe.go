@@ -165,6 +165,11 @@ const (
 	HeaderNodeID = "X-Node-Id"
 )
 
+// HeaderPeerURISAN is the URI SAN of the connector certificate the edge
+// gateway verified (Envoy's %DOWNSTREAM_PEER_URI_SAN%), on the CONNECT stream
+// that carries a tunnel from the gateway to the edge controller.
+const HeaderPeerURISAN = "X-Traversal-Peer-Uri-San"
+
 // Error is a refused open.
 type Error struct {
 	Reason Reason
