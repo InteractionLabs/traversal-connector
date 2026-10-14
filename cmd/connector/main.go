@@ -10,18 +10,17 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/telemetry"
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
 	"github.com/InteractionLabs/traversal-connector/internal/pipeserver"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
-	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -103,71 +102,28 @@ func main() {
 }
 
 // setupTelemetry starts log, metric and trace export over otlpTLS, and
-// returns what flushes them at exit.
+// returns what flushes them at exit. Local runs log text; others log JSON to
+// stdout, and to OTLP when its endpoint is set.
 func setupTelemetry(cfg *config.Config, otlpTLS *tls.Config) (flush func(), err error) {
-	var flushes []func()
-	flush = func() {
-		for _, f := range slices.Backward(flushes) {
-			f()
-		}
+	var localLogs slog.Handler
+	if cfg.EnvLevel.IsDev() {
+		localLogs = logging.NewTextHandler(os.Stdout)
 	}
-	// EGRESS_PROXY_URL, the exporters' forward proxy: used only when mTLS is
-	// configured and the endpoint is TLS.
-	otlpEgressProxyURL := parseOTLPEgressProxyURL(cfg.EgressProxyURL)
-	shutdown := func(name string, f func(context.Context) error) {
-		flushes = append(flushes, func() {
-			ctx, cancel := context.WithTimeout(context.Background(), shutdownContextTimeout)
-			defer cancel()
-			if err := f(ctx); err != nil {
-				slog.ErrorContext(ctx, "failed to shutdown "+name, "error", err)
-			}
-		})
-	}
-
-	// OTLP logs endpoint set: stdout JSON and OTLP. Otherwise stdout JSON,
-	// or text when local.
-	switch {
-	case cfg.OTLPLogsEndpoint != "":
-		logger, shutdownLogs, err := telemetry.InitLogging(context.Background(),
-			cfg.OTELServiceName, cfg.OTLPLogsEndpoint, cfg.OTLPProtocol, cfg.EnvName,
-			otlpTLS, otlpEgressProxyURL, cfg.OTLPConnectTo)
-		if err != nil {
-			return flush, fmt.Errorf("OTLP log export: %w", err)
-		}
-		if shutdownLogs != nil {
-			shutdown("log exporter", shutdownLogs)
-		}
-		slog.SetDefault(logger)
-	case !cfg.EnvLevel.IsDev():
-		slog.SetDefault(slog.New(
-			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})))
-	default:
-		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout)))
-	}
-
-	shutdownMetrics, err := telemetry.InitMetrics(context.Background(),
-		cfg.OTELServiceName, cfg.OTLPMetricsEndpoint, cfg.OTLPProtocol, cfg.EnvName,
-		otlpTLS, otlpEgressProxyURL, cfg.OTLPConnectTo)
-	if err != nil {
-		return flush, fmt.Errorf("metrics: %w", err)
-	}
-	if shutdownMetrics != nil {
-		shutdown("metrics", shutdownMetrics)
-	}
-	if err := telemetry.StartRuntimeMetricsCollector(); err != nil {
-		return flush, fmt.Errorf("runtime metrics: %w", err)
-	}
-
-	shutdownTracing, err := telemetry.InitTracing(context.Background(),
-		cfg.OTELServiceName, cfg.OTLPTracesEndpoint, cfg.OTLPProtocol, cfg.EnvName,
-		otlpTLS, otlpEgressProxyURL, cfg.OTLPConnectTo)
-	if err != nil {
-		return flush, fmt.Errorf("tracing: %w", err)
-	}
-	if shutdownTracing != nil {
-		shutdown("tracing", shutdownTracing)
-	}
-	return flush, nil
+	flushTelemetry, err := telemetry.Setup(context.Background(), telemetry.Config{
+		ServiceName:     cfg.OTELServiceName,
+		Env:             cfg.EnvName,
+		Protocol:        cfg.OTLPProtocol,
+		LogsEndpoint:    cfg.OTLPLogsEndpoint,
+		MetricsEndpoint: cfg.OTLPMetricsEndpoint,
+		TracesEndpoint:  cfg.OTLPTracesEndpoint,
+		TLS:             otlpTLS,
+		// EGRESS_PROXY_URL, the exporters' forward proxy: used only when
+		// mTLS is configured and the endpoint is TLS.
+		EgressProxy: parseOTLPEgressProxyURL(cfg.EgressProxyURL),
+		ConnectTo:   cfg.OTLPConnectTo,
+		Fallback:    localLogs,
+	})
+	return func() { flushTelemetry(shutdownContextTimeout) }, err
 }
 
 // startRedaction loads the redaction rules, from a local file or Traversal's

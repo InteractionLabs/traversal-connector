@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/signedconfig"
+	otlp "github.com/InteractionLabs/traversal-connector/connector-lib/telemetry"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
@@ -143,11 +144,8 @@ func NewRemoteLoader(
 	if err != nil {
 		return nil, fmt.Errorf("config refresh metric: %w", err)
 	}
-	_, err = meter.Int64ObservableGauge(telemetry.MetricConfigRuleCount,
-		metric.WithInt64Callback(func(_ context.Context, observer metric.Int64Observer) error {
-			observer.Observe(l.status.Load().rules)
-			return nil
-		}))
+	err = otlp.NewObservableGauge(meter, telemetry.MetricConfigRuleCount,
+		func() int64 { return l.status.Load().rules })
 	if err != nil {
 		return nil, fmt.Errorf("config rule count metric: %w", err)
 	}
