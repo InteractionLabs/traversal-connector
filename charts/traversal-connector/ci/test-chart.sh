@@ -180,13 +180,15 @@ render raw "$fixtures/direct-export-values.yaml" --set rawPipes.enabled=true \
   --set-string rawPipes.capabilityIssuer=traversal-raw-tunnel/ci \
   --set-string rawPipes.capabilityKeys=a2V5cw== \
   --set rawPipes.tunnelCount=4 --set rawPipes.egressProxyResolves=true \
-  --set rawPipes.refuseTCP=true
+  --set rawPipes.refuseTCP=true \
+  --set-string 'rawPipes.forbiddenCIDRs=10.9.0.0/16\,fd00:1::/32'
 for want in 'TRAVERSAL_RAW_PIPES\n              value: "enabled"' \
   'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
   'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
   'TRAVERSAL_TUNNEL_COUNT\n              value: "4"' \
   'TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"' \
-  'TRAVERSAL_RAW_PIPES_REFUSE_TCP\n              value: "true"'; do
+  'TRAVERSAL_RAW_PIPES_REFUSE_TCP\n              value: "true"' \
+  'TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS\n              value: "10.9.0.0/16,fd00:1::/32"'; do
   assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
 done
 assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_RAW_PIPES_MAX'
