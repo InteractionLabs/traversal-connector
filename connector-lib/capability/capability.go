@@ -31,7 +31,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/InteractionLabs/traversal-connector/connector-lib/internal/es256"
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -110,7 +111,12 @@ func sign(key *ecdsa.PrivateKey, h header, c Claims) (string, error) {
 	}
 	hdr, _ := json.Marshal(h)
 	p, _ := json.Marshal(c)
-	return es256.Sign(key, b64(hdr)+"."+b64(p))
+	input := b64(hdr) + "." + b64(p)
+	sig, err := jwt.SigningMethodES256.Sign(input, key)
+	if err != nil {
+		return "", err
+	}
+	return input + "." + b64(sig), nil
 }
 
 // Verifier checks capabilities and limits how often each is accepted. It is
@@ -246,7 +252,8 @@ func (v *Verifier) parse(token string, now time.Time) (*Claims, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if !es256.Verify(key, parts[0]+"."+parts[1], parts[2]) {
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || jwt.SigningMethodES256.Verify(parts[0]+"."+parts[1], sig, key) != nil {
 		return nil, "", reject("bad signature")
 	}
 	var c Claims

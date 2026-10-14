@@ -10,9 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
-	"github.com/InteractionLabs/traversal-connector/connector-lib/internal/es256"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -260,9 +261,9 @@ func resign(t *testing.T, header, payload string) string {
 // resignWith signs header.payload with k.
 func resignWith(t *testing.T, k *ecdsa.PrivateKey, header, payload string) string {
 	t.Helper()
-	token, err := es256.Sign(k, header+"."+payload)
+	sig, err := jwt.SigningMethodES256.Sign(header+"."+payload, k)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return token
+	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
