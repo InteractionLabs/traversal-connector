@@ -1,7 +1,7 @@
 // Package dialpolicy dials a raw pipe's destination, refusing addresses a
 // pipe must never reach: loopback, link-local, cloud metadata, and the
-// connector's own addresses. Private ranges are allowed; reaching them is
-// what raw pipes are for.
+// connector's own addresses, and any the operator adds. Private ranges are
+// allowed; reaching them is what raw pipes are for.
 //
 // A direct dial resolves the name once, refuses the pipe if any answer is
 // forbidden, and races the checked addresses. A proxied dial sends CONNECT to
@@ -23,6 +23,8 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
+// forbiddenPrefixes is the floor every Policy denies; Config.ExtraForbidden
+// adds to it and cannot remove from it.
 var forbiddenPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("127.0.0.0/8"),
@@ -63,6 +65,9 @@ type Config struct {
 	// ProxyResolves sends hostnames to Proxy, delegating their address checks
 	// to it. Off, only IP literals go through the proxy.
 	ProxyResolves bool
+	// ExtraForbidden adds prefixes to the built-in deny list. Like the
+	// built-ins, an IPv4 prefix also denies its NAT64, 6to4 and Teredo forms.
+	ExtraForbidden []netip.Prefix
 	// Resolver resolves hostnames; nil uses net.DefaultResolver.
 	Resolver interface {
 		LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
@@ -83,6 +88,15 @@ func New(cfg Config) (*Policy, error) {
 		cfg.Resolver = net.DefaultResolver
 	}
 	deny := append([]netip.Prefix(nil), forbiddenPrefixes...)
+	for _, extra := range cfg.ExtraForbidden {
+		// Addresses are unmapped before they are checked, so an IPv4-mapped
+		// prefix would never match.
+		if !extra.IsValid() || extra.Addr().Is4In6() {
+			return nil, fmt.Errorf("dialpolicy: forbidden prefix %q: not an IPv4 or IPv6 prefix",
+				extra)
+		}
+		deny = append(deny, extra.Masked())
+	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return nil, err

@@ -119,6 +119,34 @@ func TestEmbeddedIPv4(t *testing.T) {
 	}
 }
 
+// TestExtraForbidden: an operator's prefixes join the deny list, for literals,
+// resolved names and the IPv6 forms that embed an IPv4 address.
+func TestExtraForbidden(t *testing.T) {
+	_, port := listen(t)
+	p, err := New(Config{
+		ExtraForbidden: []netip.Prefix{netip.MustParsePrefix("10.9.0.0/16")},
+		Resolver:       resolver{"db.test.": {netip.MustParseAddr("10.9.3.4")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"10.9.0.1", "db.test", "64:ff9b::a09:304"} {
+		if _, _, err := p.Dial(context.Background(), host, port); reason(
+			err,
+		) != rawpipe.ForbiddenAddress {
+			t.Errorf("%s: %v, want %s", host, err, rawpipe.ForbiddenAddress)
+		}
+	}
+	if p.forbidden(netip.MustParseAddr("10.8.0.1")) {
+		t.Error("10.8.0.1 is outside the extra prefix but forbidden")
+	}
+	for _, bad := range []netip.Prefix{{}, netip.MustParsePrefix("::ffff:10.0.0.0/104")} {
+		if _, err := New(Config{ExtraForbidden: []netip.Prefix{bad}}); err == nil {
+			t.Errorf("New accepted forbidden prefix %q", bad)
+		}
+	}
+}
+
 func TestProxyAddr(t *testing.T) {
 	for raw, want := range map[string]string{
 		"http://proxy.example.com:3128": "proxy.example.com:3128",
