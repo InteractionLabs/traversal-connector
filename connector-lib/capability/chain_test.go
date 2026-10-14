@@ -2,6 +2,8 @@ package capability_test
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -344,6 +346,102 @@ func TestParseRootsPEM(t *testing.T) {
 	} {
 		if _, err := capability.ParseRootsPEM([]byte(input)); err == nil {
 			t.Errorf("%s: ParseRootsPEM succeeded", name)
+		}
+	}
+}
+
+// TestCheckEnvironmentCertificate: an issuer's check of a certificate it is
+// about to hand out agrees with a verifier's check of x5c.
+func TestCheckEnvironmentCertificate(t *testing.T) {
+	root, other := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	pool := x509.NewCertPool()
+	pool.AddCert(root.Certificate)
+	check := func(der []byte, host string) (*ecdsa.PublicKey, string, error) {
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return capability.CheckEnvironmentCertificate(
+			[]*x509.Certificate{cert}, pool, host, time.Now())
+	}
+	key, iss, err := check(envCert(t, root, nil), chainHost)
+	if err != nil || !key.Equal(&envKey.PublicKey) || iss != chainIssuer {
+		t.Fatalf("valid certificate: %v %q %v", key, iss, err)
+	}
+	for name, c := range map[string]struct {
+		der  []byte
+		host string
+	}{
+		"another root": {envCert(t, other, nil), chainHost},
+		"another host": {envCert(t, root, nil), "edge.prod.traversal.com"},
+		"invalid env":  {envCert(t, root, func(s *capabilitytest.EnvironmentCert) { s.Issuer += "_x" }), chainHost},
+		"no issuer":    {envCert(t, root, func(s *capabilitytest.EnvironmentCert) { s.Issuer = "" }), chainHost},
+		"not code signing": {envCert(t, root, func(s *capabilitytest.EnvironmentCert) {
+			s.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		}), chainHost},
+	} {
+		_, _, err := check(c.der, c.host)
+		if rawpipe.ReasonOf(err, "") != rawpipe.InvalidCapability {
+			t.Errorf("%s: %v, want invalid_capability", name, err)
+		}
+	}
+	if _, _, err := capability.CheckEnvironmentCertificate(nil, pool, chainHost, time.Now()); err == nil {
+		t.Error("empty chain: accepted")
+	}
+}
+
+func TestValidEnvironment(t *testing.T) {
+	for env, want := range map[string]bool{
+		"dev": true, "prod-eu-1": true, "a": true, strings.Repeat("a", 32): true,
+		"": false, "-dev": false, "Dev": false, "dev_1": false, "dev.1": false,
+		strings.Repeat("a", 33): false,
+	} {
+		if capability.ValidEnvironment(env) != want {
+			t.Errorf("ValidEnvironment(%q) = %v", env, !want)
+		}
+	}
+}
+
+func TestParseSigningKey(t *testing.T) {
+	sec1, err := x509.MarshalECPrivateKey(envKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(envKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384DER, err := x509.MarshalPKCS8PrivateKey(p384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := x509.MarshalPKIXPublicKey(&envKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := func(typ string, der []byte) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
+	}
+	for name, data := range map[string][]byte{
+		"SEC 1":   block("EC PRIVATE KEY", sec1),
+		"PKCS #8": block("PRIVATE KEY", pkcs8),
+	} {
+		if key, err := capability.ParseSigningKey(data); err != nil || !key.Equal(envKey) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, data := range map[string][]byte{
+		"P-384":       block("PRIVATE KEY", p384DER),
+		"public key":  block("PUBLIC KEY", pub),
+		"mislabelled": block("EC PRIVATE KEY", pkcs8),
+		"not PEM":     []byte("key"),
+	} {
+		if _, err := capability.ParseSigningKey(data); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

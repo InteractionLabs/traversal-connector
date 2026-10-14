@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"time"
@@ -103,48 +104,94 @@ func (c *chains) verify(
 	certs []*x509.Certificate,
 	now time.Time,
 ) (*ecdsa.PublicKey, string, error) {
-	leaf := certs[0]
+	return CheckEnvironmentCertificate(certs, c.roots, c.host, now)
+}
+
+// CheckEnvironmentCertificate applies the environment certificate profile
+// above to chain (the certificate, then any intermediate) against roots for
+// controllerHost at now, as a verifier does for x5c, and returns the key it
+// certifies and the issuer that key's capabilities carry. An issuer checks
+// a certificate with it before handing it out, so that it never issues one
+// connectors refuse. Errors are *rawpipe.Error (invalid_capability).
+func CheckEnvironmentCertificate(
+	chain []*x509.Certificate,
+	roots *x509.CertPool,
+	controllerHost string,
+	now time.Time,
+) (*ecdsa.PublicKey, string, error) {
+	if len(chain) == 0 || roots == nil {
+		return nil, "", reject("no environment certificate or no roots")
+	}
+	leaf := chain[0]
 	intermediates := x509.NewCertPool()
-	for _, cert := range certs[1:] {
+	for _, cert := range chain[1:] {
 		intermediates.AddCert(cert)
 	}
 	// Verify checks signatures, every certificate's validity at now, CA
 	// constraints, path length, the extended key usage, and that a DNS SAN
 	// (never the common name) is the controller host.
 	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         c.roots,
+		Roots:         roots,
 		Intermediates: intermediates,
 		CurrentTime:   now,
-		DNSName:       c.host,
+		DNSName:       controllerHost,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
 	}); err != nil {
-		return nil, "", reject("x5c does not chain to a trusted root for this controller host")
+		return nil, "", reject(
+			"environment certificate does not chain to a trusted root for this controller host")
 	}
 	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 ||
 		len(leaf.IPAddresses) != 0 {
-		return nil, "", reject("x5c leaf is not a signing certificate for a host name")
+		return nil, "", reject(
+			"environment certificate is not a signing certificate for a host name")
 	}
 	key, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || key.Curve != elliptic.P256() {
-		return nil, "", reject("x5c certificate does not certify a P-256 key")
+		return nil, "", reject("environment certificate does not certify a P-256 key")
 	}
 	if len(leaf.URIs) != 1 {
-		return nil, "", reject("x5c certificate must name exactly one issuer")
+		return nil, "", reject("environment certificate must name exactly one issuer")
 	}
 	env, ok := strings.CutPrefix(leaf.URIs[0].String(), IssuerURIPrefix)
-	if !ok || !validEnvironment(env) {
-		return nil, "", reject("x5c certificate names no capability issuer")
+	if !ok || !ValidEnvironment(env) {
+		return nil, "", reject("environment certificate names no capability issuer")
 	}
 	return key, IssuerPrefix + env, nil
 }
 
-// validEnvironment accepts lower-case environment names: letters, digits and
-// hyphens, not starting with a hyphen.
-func validEnvironment(env string) bool {
+// ValidEnvironment reports whether env can name an environment in an
+// issuer URI SAN (IssuerURIPrefix + env): lower-case letters, digits and
+// hyphens, not starting with a hyphen, at most 32 bytes.
+func ValidEnvironment(env string) bool {
 	if env == "" || len(env) > maxEnvironmentLen || env[0] == '-' {
 		return false
 	}
 	return strings.Trim(env, "abcdefghijklmnopqrstuvwxyz0123456789-") == ""
+}
+
+// ParseSigningKey reads a capability signing key: one PEM EC PRIVATE KEY
+// (SEC 1) or PRIVATE KEY (PKCS #8) block holding a P-256 key, the only
+// curve ES256 signs with.
+func ParseSigningKey(data []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("capability: signing key: not PEM")
+	}
+	var parsed any
+	var err error
+	switch block.Type {
+	case "EC PRIVATE KEY":
+		parsed, err = x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	default:
+		return nil, fmt.Errorf("capability: signing key: unexpected %s block", block.Type)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if err != nil || !ok || key.Curve != elliptic.P256() {
+		return nil, errors.New("capability: signing key: expected a P-256 private key")
+	}
+	return key, nil
 }
 
 // ParseRootsPEM parses PEM CERTIFICATE blocks into capability roots. Anything
