@@ -187,8 +187,9 @@ func BenchmarkVerifyManyLive(b *testing.B) {
 }
 
 // TestClaimsDecoding: an unknown claim, of any JSON type, is ignored; a
-// duplicate or case-variant key (at any depth), trailing data, and a missing,
-// null or mistyped required claim are refused even when correctly signed.
+// duplicate or case-variant key (at any depth), trailing data, invalid UTF-8,
+// and a missing, null or mistyped required claim are refused even when
+// correctly signed.
 func TestClaimsDecoding(t *testing.T) {
 	good := sign(t, nil)
 	parts := strings.Split(good, ".")
@@ -214,6 +215,7 @@ func TestClaimsDecoding(t *testing.T) {
 		"case variant":          {with(`"HOST":"evil.test",`), false},
 		"nested duplicate":      {with(`"extra":{"a":1,"A":2},`), false},
 		"trailing data":         {claims + `{}`, false},
+		"invalid UTF-8":         {with("\"note\":\"\xff\","), false},
 		"missing claim":         {without("connector_id"), false},
 		"null claim":            {strings.Replace(without("jti"), "{", `{"jti":null,`, 1), false},
 		"mistyped port":         {strings.Replace(without("port"), "{", `{"port":"5432",`, 1), false},

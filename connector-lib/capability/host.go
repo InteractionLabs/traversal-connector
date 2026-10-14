@@ -10,6 +10,10 @@ import (
 // Canonical returns the one spelling of host that capabilities carry: an IP
 // literal in its shortest form, or a lowercase ASCII name without a trailing
 // dot. It refuses names a resolver could read as an address ("127.1").
+//
+// It is not golang.org/x/net/idna: idna maps Unicode and full-width names
+// onto ASCII, so many spellings would reach one host, and refuses the
+// underscores real internal names use. A capability names its host once.
 func Canonical(host string) (string, bool) {
 	if a, err := netip.ParseAddr(host); err == nil {
 		return a.Unmap().String(), a.Zone() == ""

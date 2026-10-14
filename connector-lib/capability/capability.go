@@ -22,6 +22,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -360,80 +362,59 @@ func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 // decode parses a JWS segment, a JSON object, into v. Every key in known
 // marked required must be present and not null. A key not in known is
-// refused, or ignored if lenient. Keys may not repeat, exactly or by case, at
-// any depth, and nothing may trail the object. Only the exact known keys
-// reach encoding/json, which would otherwise match keys case-insensitively
-// (and fold "ſ" onto "s") and let an ignored key overwrite a known one.
+// refused, or ignored if lenient. encoding/json/v2 refuses a key repeated
+// exactly at any depth, trailing data and invalid UTF-8, and matches keys
+// exactly (v1 folds case, and "ſ" onto "s"); foldedUnique refuses what it
+// allows, a key repeated by case.
 func decode(segment string, known map[string]bool, lenient bool, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(segment)
 	if err != nil {
 		return err
 	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	if err := uniqueKeys(d); err != nil {
+	var obj map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(raw, &obj); err != nil {
 		return err
 	}
-	if _, err := d.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("trailing data")
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	if err := foldedUnique(raw); err != nil {
 		return err
-	}
-	exact := make(map[string]json.RawMessage, len(known))
-	for k, val := range obj {
-		if _, ok := known[k]; !ok {
-			if !lenient {
-				return fmt.Errorf("unknown field %q", k)
-			}
-			continue
-		}
-		exact[k] = val
 	}
 	for k, required := range known {
-		if val, ok := exact[k]; required && (!ok || string(val) == "null") {
+		if val, ok := obj[k]; required && (!ok || val.Kind() == 'n') {
 			return fmt.Errorf("missing field %q", k)
 		}
 	}
-	b, _ := json.Marshal(exact)
-	return json.Unmarshal(b, v)
+	return jsonv2.Unmarshal(raw, v, jsonv2.RejectUnknownMembers(!lenient))
 }
 
-// uniqueKeys reads one JSON value from d, refusing an object, at any depth,
-// with a key repeated exactly or case-insensitively.
-func uniqueKeys(d *json.Decoder) error {
-	t, err := d.Token()
-	if err != nil {
-		return err
-	}
-	switch t {
-	case json.Delim('{'):
-		seen := map[string]bool{}
-		for d.More() {
-			k, err := d.Token()
-			if err != nil {
-				return err
-			}
-			key := strings.ToLower(k.(string)) //nolint:forcetypeassert // object keys are strings
-			if seen[key] {
-				return fmt.Errorf("duplicate key %q", key)
-			}
-			seen[key] = true
-			if err := uniqueKeys(d); err != nil {
-				return err
+// foldedUnique refuses a JSON object, at any depth of raw, with two keys
+// that differ only by case. jsontext has no option for this: it compares
+// names exactly.
+func foldedUnique(raw []byte) error {
+	d := jsontext.NewDecoder(bytes.NewReader(raw))
+	var seen []map[string]bool // one per open object
+	for {
+		tok, err := d.ReadToken()
+		if errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		switch tok.Kind() {
+		case '{':
+			seen = append(seen, map[string]bool{})
+		case '}':
+			seen = seen[:len(seen)-1]
+		case '"':
+			// A string at an odd position in an object is a key.
+			if kind, n := d.StackIndex(d.StackDepth()); kind == '{' && n%2 == 1 {
+				key := strings.ToLower(tok.String())
+				if seen[len(seen)-1][key] {
+					return fmt.Errorf("duplicate key %q", key)
+				}
+				seen[len(seen)-1][key] = true
 			}
 		}
-	case json.Delim('['):
-		for d.More() {
-			if err := uniqueKeys(d); err != nil {
-				return err
-			}
-		}
-	default:
-		return nil
 	}
-	_, err = d.Token() // the closing delimiter
-	return err
 }
 
 // jsonKeys maps each JSON key of struct v to whether it is required: every
