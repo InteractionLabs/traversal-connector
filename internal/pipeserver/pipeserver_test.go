@@ -140,7 +140,7 @@ func read(r io.Reader) string { b, _ := io.ReadAll(r); return string(b) }
 func TestPipes(t *testing.T) {
 	key := capabilitytest.Key("pipeserver")
 	verifier, err := capability.NewVerifier(capability.VerifierConfig{
-		Issuer: "traversal-raw-tunnel/test", Subject: "integration-proxy",
+		Issuer: "traversal-raw-tunnel/test", Subject: capability.SubjectIntegrationProxy,
 		Keys: map[string]*ecdsa.PublicKey{"k": &key.PublicKey},
 	})
 	if err != nil {

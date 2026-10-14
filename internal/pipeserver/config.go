@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -69,8 +68,8 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		ConnectorID: cfg.ConnectorID,
 		Count:       e.int("TRAVERSAL_TUNNEL_COUNT", 2, 8),
 		Server:      server,
-		Roots:       trust.roots,
-		Kids:        trust.kids,
+		Roots:       trust.Roots,
+		Kids:        trust.Kids,
 	}
 	server.Tunnels = t.Count
 	if t.TLS, t.Addr, err = tunnelTLS(cfg); err != nil {
@@ -88,59 +87,44 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 	return t, errors.Join(e.errs...)
 }
 
-// trust is the capability trust a connector has loaded, as it reports it:
-// each root's rawpipe.RootFingerprint, and the pinned keys' IDs, sorted.
-type trust struct{ roots, kids []string }
+// bundleEnv is the setting each capability trust bundle comes from.
+var bundleEnv = map[capability.Bundle]string{
+	capability.BundleKeys:  "TRAVERSAL_CAPABILITY_KEYS",
+	capability.BundleRoots: "TRAVERSAL_CAPABILITY_ROOTS",
+}
 
 // newVerifier trusts capabilities signed by a pinned key
 // (TRAVERSAL_CAPABILITY_KEYS, with TRAVERSAL_CAPABILITY_ISSUER), or certified
 // under a pinned root (TRAVERSAL_CAPABILITY_ROOTS) for the controller host
 // the connector dials, or both while moving from keys to roots.
-func newVerifier(controllerURL string) (*capability.Verifier, trust, error) {
-	vc := capability.VerifierConfig{
-		Issuer:  os.Getenv("TRAVERSAL_CAPABILITY_ISSUER"),
-		Subject: "integration-proxy",
-	}
+func newVerifier(controllerURL string) (*capability.Verifier, capability.Loaded, error) {
+	issuer := os.Getenv("TRAVERSAL_CAPABILITY_ISSUER")
 	keys, roots := os.Getenv("TRAVERSAL_CAPABILITY_KEYS"), os.Getenv("TRAVERSAL_CAPABILITY_ROOTS")
-	if keys == "" && roots == "" {
-		return nil, trust{}, errors.New(
+	var host string
+	switch {
+	case keys == "" && roots == "":
+		return nil, capability.Loaded{}, errors.New(
 			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required")
-	}
-	var err error
-	if keys != "" {
-		if vc.Keys, err = capability.ParseKeys([]byte(config.DecodePEM(keys))); err != nil {
-			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_KEYS: %w", err)
-		}
-		if vc.Issuer == "" {
-			return nil, trust{}, errors.New(
-				"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS")
-		}
-	}
-	if roots != "" {
-		if vc.Roots, err = capability.ParseRootsPEM([]byte(config.DecodePEM(roots))); err != nil {
-			return nil, trust{}, fmt.Errorf("TRAVERSAL_CAPABILITY_ROOTS: %w", err)
-		}
+	case keys != "" && issuer == "":
+		return nil, capability.Loaded{}, errors.New(
+			"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS")
+	case roots != "":
 		u, err := url.Parse(controllerURL)
-		host, ok := "", false
+		ok := false
 		if err == nil {
 			host, ok = capability.Canonical(u.Hostname())
 		}
 		if !ok {
-			return nil, trust{}, errors.New(
+			return nil, capability.Loaded{}, errors.New(
 				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name")
 		}
-		vc.ControllerHost = host
 	}
-	var t trust
-	for _, root := range vc.Roots {
-		t.roots = append(t.roots, rawpipe.RootFingerprint(root.Raw))
+	v, loaded, err := capability.ParseTrust(
+		config.DecodePEM(keys), config.DecodePEM(roots), issuer, host)
+	if te, ok := errors.AsType[*capability.TrustError](err); ok {
+		return nil, capability.Loaded{}, fmt.Errorf("%s: %w", bundleEnv[te.Bundle], te.Err)
 	}
-	for kid := range vc.Keys {
-		t.kids = append(t.kids, kid)
-	}
-	slices.Sort(t.kids)
-	v, err := capability.NewVerifier(vc)
-	return v, t, err
+	return v, loaded, err
 }
 
 // tunnelTLS is mutual TLS 1.3 to the controller host, with the connector's

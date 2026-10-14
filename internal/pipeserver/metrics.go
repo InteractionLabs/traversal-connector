@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
@@ -49,12 +50,12 @@ func newMetrics() (*metrics, error) {
 // observeTrust reports the capability trust the connector has loaded, one
 // series per root fingerprint and per kid, so the fleet's trust can be read
 // before a signing change relies on it.
-func observeTrust(t trust) error {
+func observeTrust(t capability.Loaded) error {
 	_, err := otel.Meter(InstrumentationName).Int64ObservableGauge(
 		telemetry.MetricCapabilityTrust,
 		metric.WithDescription("Capability roots (by fingerprint) and pinned kids loaded; always 1"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			for kind, ids := range map[string][]string{"root": t.roots, "kid": t.kids} {
+			for kind, ids := range map[string][]string{"root": t.Roots, "kid": t.Kids} {
 				for _, id := range ids {
 					o.Observe(1, metric.WithAttributes(attribute.String("kind", kind),
 						attribute.String("id", id)))
