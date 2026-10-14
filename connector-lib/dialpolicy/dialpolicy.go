@@ -139,8 +139,7 @@ func (p *Policy) Dial(
 		if err != nil {
 			return nil, "", refuse(rawpipe.DialFailed, err)
 		}
-		//nolint:errcheck,forcetypeassert // httpconnect.Dial's tunnels half-close
-		return conn.(rawpipe.HalfCloser), "proxy " + p.cfg.Proxy.Host, nil
+		return conn, "proxy " + p.cfg.Proxy.Host, nil
 	}
 	addrs := []netip.Addr{literal}
 	if !isLiteral {

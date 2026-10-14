@@ -12,11 +12,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
 // Dial connects to proxy (an http:// URL; user info becomes
@@ -28,14 +29,13 @@ import (
 // intact) and a non-nil error, so callers can read the refusal. On every
 // other failure the response is nil.
 //
-// The tunnel is TCP and can half-close: assert it to
-// interface{ CloseWrite() error }, such as rawpipe.HalfCloser.
+// The tunnel is TCP and can half-close.
 func Dial(
 	ctx context.Context,
 	proxy *url.URL,
 	authority string,
 	header http.Header,
-) (net.Conn, *http.Response, error) {
+) (rawpipe.HalfCloser, *http.Response, error) {
 	if proxy.Scheme != "http" {
 		return nil, nil, fmt.Errorf("forward proxy %s must be http://", proxy.Redacted())
 	}
@@ -76,7 +76,7 @@ func Dial(
 		return nil, resp, errors.Join(err, ctx.Err())
 	}
 	// Bytes the proxy sent after its answer belong to the tunnel.
-	return &tunnel{TCPConn: conn, r: br}, nil, conn.SetDeadline(time.Time{})
+	return rawpipe.Buffered(conn, br), nil, conn.SetDeadline(time.Time{})
 }
 
 // ProxyAddr is proxy's host:port, port 80 if the URL names none.
@@ -86,16 +86,3 @@ func ProxyAddr(proxy *url.URL) string {
 	}
 	return net.JoinHostPort(proxy.Hostname(), "80")
 }
-
-// tunnel is a TCP connection through a CONNECT proxy. Its reads first return
-// any bytes the proxy sent after its answer.
-type tunnel struct {
-	*net.TCPConn
-	r *bufio.Reader
-}
-
-func (t *tunnel) Read(b []byte) (int, error) { return t.r.Read(b) }
-
-// WriteTo shadows the embedded TCPConn's, which io.Copy would otherwise use
-// to skip the buffered bytes.
-func (t *tunnel) WriteTo(w io.Writer) (int64, error) { return t.r.WriteTo(w) }
