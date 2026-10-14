@@ -10,12 +10,12 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
@@ -61,6 +61,7 @@ type Server struct {
 	Policy      interface {
 		Dial(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
 	}
+	// MaxPipes caps the pipes open at once; zero is no cap.
 	MaxPipes int64
 	// RequiresInspection reports hosts redaction rules cover; a raw pipe to
 	// one is refused (inspection_required). Nil covers none.
@@ -76,9 +77,7 @@ type Server struct {
 	MaxLifetime, IdleTimeout time.Duration
 	metrics                  *metrics
 
-	inFlight atomic.Int64
-	draining atomic.Bool
-	pipes    sync.WaitGroup
+	pipes drain.Tracker
 }
 
 // ServeConn serves pipes on one tunnel until it closes. drained runs once if
@@ -102,13 +101,9 @@ func (s *Server) ServeConn(nc net.Conn, drained func()) {
 // tunnels stay up so a pipe already on its way gets a connector_draining
 // refusal, a reason, rather than a reset.
 func (s *Server) Drain(ctx context.Context) {
-	s.draining.Store(true)
-	done := make(chan struct{})
-	go func() { s.pipes.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		slog.Warn("drain timed out; ending open pipes", "open", s.inFlight.Load())
+	s.pipes.Drain()
+	if err := s.pipes.Wait(ctx); err != nil {
+		slog.Warn("drain timed out; ending open pipes", "err", err)
 	}
 }
 
@@ -146,7 +141,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	host, port, ok := capability.SplitAuthority(r.Host)
 	switch {
-	case s.draining.Load():
+	case s.pipes.Draining():
 		return nil, "", rawpipe.Errorf(rawpipe.Draining, "draining")
 	case r.Method != http.MethodConnect || !ok:
 		return nil, "", rawpipe.Errorf(
@@ -171,11 +166,9 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
 		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
 		"session_id", claims.SessionID, "authority", r.Host)
-	if s.inFlight.Add(1) > s.MaxPipes {
-		s.inFlight.Add(-1)
+	if !s.pipes.Add(int(s.MaxPipes)) {
 		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
-	s.pipes.Add(1)
 	if s.RequiresInspection != nil && s.RequiresInspection(host) {
 		s.closed()
 		return nil, "", rawpipe.Errorf(rawpipe.InspectionRequired, "redaction rules cover the host")
@@ -189,4 +182,4 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	return conn, upstream, err
 }
 
-func (s *Server) closed() { s.inFlight.Add(-1); s.pipes.Done() }
+func (s *Server) closed() { s.pipes.Done() }

@@ -196,7 +196,7 @@ func TestPipes(t *testing.T) {
 	hold := make(chan struct{})
 	_, _, held := open(t, cc, token(), "held", hold)
 	cancel()
-	for !tunnels.Server.draining.Load() {
+	for !tunnels.Server.pipes.Draining() {
 		time.Sleep(time.Millisecond)
 	}
 	if status, reason, _ := open(t, cc, token(), "", nil); status != 503 ||
