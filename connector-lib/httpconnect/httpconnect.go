@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
@@ -85,4 +86,31 @@ func ProxyAddr(proxy *url.URL) string {
 		return proxy.Host
 	}
 	return net.JoinHostPort(proxy.Hostname(), "80")
+}
+
+// A refused CONNECT says why in Proxy-Status (RFC 9209), as the Integration
+// Proxy sends it:
+//
+//	Proxy-Status: traversal-integration-proxy; error=<reason>
+const (
+	headerProxyStatus = "Proxy-Status"
+	proxyStatusName   = "traversal-integration-proxy"
+	errorParam        = "error="
+)
+
+// SetRefusal sets h's Proxy-Status to say a CONNECT was refused for reason.
+func SetRefusal(h http.Header, reason string) {
+	h.Set(headerProxyStatus, proxyStatusName+"; "+errorParam+reason)
+}
+
+// RefusalReason is the error parameter of resp's Proxy-Status, as
+// SetRefusal writes it (any later parameter dropped), or empty if resp is
+// nil or names none.
+func RefusalReason(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	_, reason, _ := strings.Cut(resp.Header.Get(headerProxyStatus), errorParam)
+	reason, _, _ = strings.Cut(reason, ";")
+	return reason
 }

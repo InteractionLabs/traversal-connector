@@ -90,19 +90,44 @@ type writer []byte
 
 func (w *writer) Write(b []byte) (int, error) { *w = append(*w, b...); return len(b), nil }
 
-// TestRefusal: a non-200 answer comes back with its status and headers.
+// TestRefusal: a non-200 answer comes back with its status and headers, and
+// RefusalReason reads the reason SetRefusal wrote in them.
 func TestRefusal(t *testing.T) {
 	p, _ := proxy(t, func(c net.Conn, _ *http.Request) {
-		_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n"+
-			"Proxy-Status: integration-proxy; error=forbidden_address\r\nContent-Length: 4\r\n\r\nnope")
+		resp := &http.Response{StatusCode: http.StatusForbidden, ProtoMajor: 1, ProtoMinor: 1,
+			Header: http.Header{}}
+		SetRefusal(resp.Header, "forbidden_address")
+		_ = resp.Write(c)
 	})
 	conn, resp, err := dial(t, p, nil)
 	if err == nil || conn != nil {
 		t.Fatalf("Dial: %v, conn %v; want a refusal", err, conn)
 	}
 	if resp == nil || resp.StatusCode != http.StatusForbidden ||
-		resp.Header.Get("Proxy-Status") != "integration-proxy; error=forbidden_address" {
+		resp.Header.Get("Proxy-Status") != "traversal-integration-proxy; error=forbidden_address" {
 		t.Fatalf("response %+v", resp)
+	}
+	if r := RefusalReason(resp); r != "forbidden_address" {
+		t.Fatalf("RefusalReason = %q", r)
+	}
+}
+
+// TestRefusalReason: the error parameter alone, without later parameters,
+// and nothing without one.
+func TestRefusalReason(t *testing.T) {
+	for status, want := range map[string]string{
+		"traversal-integration-proxy; error=dns_failed": "dns_failed",
+		"egress; error=dial_failed; details=\"x\"":      "dial_failed",
+		"traversal-integration-proxy":                   "",
+		"":                                              "",
+	} {
+		resp := &http.Response{Header: http.Header{"Proxy-Status": {status}}}
+		if got := RefusalReason(resp); got != want {
+			t.Errorf("RefusalReason(%q) = %q, want %q", status, got, want)
+		}
+	}
+	if got := RefusalReason(nil); got != "" {
+		t.Errorf("RefusalReason(nil) = %q", got)
 	}
 }
 
