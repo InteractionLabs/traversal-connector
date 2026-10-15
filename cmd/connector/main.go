@@ -219,24 +219,12 @@ func main() {
 		go loader.Run(ctx)
 	}
 
-	cm, err := client.NewConnectionManager(&cfg, redactor)
+	tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection)
 	if err != nil {
-		slog.Error("failed to create connection manager", "err", err)
-		return
+		slog.ErrorContext(ctx, "tunnels cannot start", "err", err)
+		os.Exit(1)
 	}
-
-	var rawTunnels router.RawTunnels
-	if os.Getenv("TRAVERSAL_PIPES") == "enabled" {
-		if tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection); err != nil {
-			// Raw pipes never stop the legacy transport.
-			slog.ErrorContext(ctx, "raw pipes cannot start; serving the legacy transport only",
-				"error", err)
-		} else {
-			rawTunnels = tunnels
-			done := tunnels.Start(ctx)
-			defer func() { <-done }()
-		}
-	}
+	done := tunnels.Start(ctx)
 
 	slog.InfoContext(ctx, "traversal connector service starting",
 		"controller_logical_url", cfg.TraversalControllerURL,
@@ -244,16 +232,15 @@ func main() {
 		"controller_effective_address", effectiveAddress(
 			cfg.TraversalControllerConnectTo, cfg.TraversalControllerURL,
 		),
-		"max_tunnels", cfg.MaxTunnelsAllowed,
+		"tunnels", tunnels.Count,
 		"env", cfg.EnvName)
 
-	// Run a TLS connectivity test (equivalent to grpcurl -insecure -cert -key ... list).
 	if err = client.TestConnectivity(&cfg); err != nil {
 		slog.Error("connectivity test failed", "err", err)
 	}
 
 	// Start HTTP server for health and readiness endpoints.
-	ginRouter := router.NewRouter(cfg, cm, rawTunnels)
+	ginRouter := router.NewRouter(cfg, tunnels)
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
 		Handler:           ginRouter,
@@ -277,11 +264,7 @@ func main() {
 		}
 	}()
 
-	if err = cm.Run(ctx); err != nil {
-		slog.ErrorContext(ctx,
-			"connection manager exited with error", "err", err)
-	}
-
+	<-done
 	slog.InfoContext(ctx, "traversal connector service shutting down")
 }
 

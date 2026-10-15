@@ -10,20 +10,20 @@ import (
 	sloggin "github.com/samber/slog-gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
-	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
-// RawTunnels is the raw pipe side as readiness sees it.
-type RawTunnels interface {
-	// Ready reports whether raw pipes can take traffic, and if not, why.
+// Tunnels is the connector's tunnels as readiness sees them.
+type Tunnels interface {
+	// Up is how many tunnels are up.
+	Up() int
+	// Ready reports whether the connector can take pipes, and if not, why.
 	Ready(ctx context.Context) (ready bool, reason string)
 }
 
 // NewRouter creates a gin HTTP engine for the traversal connector with health and
-// readiness endpoints. The connector is ready when it holds a legacy tunnel and,
-// if raw is set, raw pipes are ready.
-func NewRouter(cfg config.Config, cm *client.ConnectionManager, raw RawTunnels) *gin.Engine {
+// readiness endpoints. Readiness is the tunnels'.
+func NewRouter(cfg config.Config, tunnels Tunnels) *gin.Engine {
 	if cfg.EnvLevel.IsDev() {
 		gin.SetMode(gin.DebugMode)
 	} else {
@@ -50,7 +50,7 @@ func NewRouter(cfg config.Config, cm *client.ConnectionManager, raw RawTunnels) 
 	}
 
 	r.GET("/healthz", healthCheckHandler)
-	r.GET("/readyz", readinessHandler(cm, raw))
+	r.GET("/readyz", ReadinessHandler(tunnels))
 
 	return r
 }
@@ -61,30 +61,16 @@ func healthCheckHandler(c *gin.Context) {
 	})
 }
 
-func readinessHandler(cm *client.ConnectionManager, raw RawTunnels) gin.HandlerFunc {
+// ReadinessHandler answers /readyz. Pipes to rawpipe.ProbeAuthority get the
+// same answer, so the status probe reads the same body either way:
+// active_tunnels is the field it parses.
+func ReadinessHandler(tunnels Tunnels) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		activeTunnels := cm.ActiveCount()
-		if activeTunnels == 0 {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status":         "not ready",
-				"active_tunnels": activeTunnels,
-				"reason":         "no active tunnel connections",
-			})
-			return
+		body := gin.H{"status": "ready", "active_tunnels": tunnels.Up()}
+		status := http.StatusOK
+		if ready, reason := tunnels.Ready(c.Request.Context()); !ready {
+			body["status"], body["reason"], status = "not ready", reason, http.StatusServiceUnavailable
 		}
-		if raw != nil {
-			if ready, reason := raw.Ready(c.Request.Context()); !ready {
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"status":         "not ready",
-					"active_tunnels": activeTunnels,
-					"reason":         reason,
-				})
-				return
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"status":         "ready",
-			"active_tunnels": activeTunnels,
-		})
+		c.JSON(status, body)
 	}
 }

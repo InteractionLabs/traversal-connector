@@ -2,19 +2,22 @@
 
 The Traversal Connector runs inside a private network and exposes its internal
 data sources to the Traversal control plane *without* opening any inbound
-firewall holes. It dials out to the control plane over gRPC, multiplexes one
-or more bidirectional tunnels, and executes HTTP requests it receives on those
-tunnels against upstream services on the local network.
+firewall holes. It holds outbound tunnels to the controller's host on port 443
+(mutual TLS, ALPN `x-traversal-tunnel`). Traversal opens a pipe on a tunnel per
+destination, carrying a signed capability for one host:port; the connector
+checks it, applies its dial policy, and serves the pipe as an HTTP/2 or
+HTTP/1.1 forward proxy inside TLS of its own, redacting responses from hosts
+its rules cover.
 
 ```
-   ┌────────────────────┐  outbound gRPC tunnels   ┌────────────────────┐  HTTP   ┌──────────────────┐
-   │  Traversal control │ ◄──────────────────────► │ Traversal Connector│ ──────► │ upstream services│
-   │       plane        │      (h2c or mTLS)       │  (this binary)     │         │ (Prometheus, …)  │
-   └────────────────────┘                          └────────────────────┘         └──────────────────┘
+   ┌────────────────────┐  outbound tunnels (mTLS)  ┌────────────────────┐  HTTP(S)  ┌──────────────────┐
+   │  Traversal control │ ◄───────────────────────► │ Traversal Connector│ ────────► │ upstream services│
+   │       plane        │   pipes: TLS, then HTTP   │  (this binary)     │           │ (Prometheus, …)  │
+   └────────────────────┘                           └────────────────────┘           └──────────────────┘
 ```
 
-The wire protocol is defined in
-[`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
+The tunnel and pipe protocol is defined in
+[`connector-lib/rawpipe`](connector-lib/rawpipe).
 
 ## Setup
 
@@ -265,17 +268,13 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | URL of the Traversal control plane; tunnels go to its host on port 443. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
 | `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
-| `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
-| `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
-| `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
-| `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
 | `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |
 | `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
-| `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
+| `TRAVERSAL_CONNECTOR_ID` | **required** | This connector's ID, a lower-case UUID provided by Traversal. It names the connector's tunnels and must match its certificate's SPIFFE ID if that is connector-scoped. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
 ### mTLS to the control plane

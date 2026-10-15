@@ -21,21 +21,17 @@ import (
 
 const (
 	// Default configuration values.
-	defaultMaxTunnelsAllowed = 2
-	defaultBodySizeMB        = 32
+	defaultBodySizeMB = 32
 	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
 	// deliberately far above the wire ceiling rather than equal to it.
-	defaultDecodedBodySizeMB     = 256
-	defaultHTTPPort              = "8080"
-	defaultMaxConcurrentRequests = 10
-	defaultUpstreamTLSVerify     = true
+	defaultDecodedBodySizeMB = 256
+	defaultHTTPPort          = "8080"
+	defaultUpstreamTLSVerify = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
 	// Default timeout and interval durations.
-	defaultReconnectInterval       = 5 * time.Second
-	defaultMaxBackoffDelay         = 60 * time.Second
 	defaultRequestTimeout          = 60 * time.Second
 	defaultConfigRefreshInterval   = 30 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
@@ -61,15 +57,6 @@ type Config struct {
 	// Container image builds bake in "production"; falls back to "development"
 	// when ENV_LEVEL is unset.
 	EnvLevel env.EnvLevel
-	// MaxTunnelsAllowed is the maximum number of concurrent gRPC
-	// tunnels this traversal connector creates.
-	MaxTunnelsAllowed int
-	// ReconnectInterval is the interval for periodic connection rebalancing,
-	// distributing tunnels across available Traversal control plane pods.
-	ReconnectInterval time.Duration
-	// MaxBackoffDelay is the maximum delay cap for exponential backoff on
-	// reconnection attempts.
-	MaxBackoffDelay time.Duration
 	// RequestTimeout is the timeout for individual upstream HTTP requests
 	// executed within the customer network.
 	RequestTimeout time.Duration
@@ -142,9 +129,6 @@ type Config struct {
 	// is strongly discouraged: with it set, Traversal cannot diagnose or assist
 	// with issues in this deployment. applyTelemetryPolicy enforces its inverse.
 	DisableTelemetry bool
-	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
-	// this traversal connector can handle per tunnel when multiplexing is active.
-	MaxConcurrentRequests int
 	// UpstreamTLSVerify controls whether TLS certificates are validated when
 	// making HTTPS requests to upstream observability platforms.
 	// When true, certificates must be valid and signed by a trusted CA.
@@ -253,10 +237,7 @@ func Load() (Config, error) {
 		EnvLevel: env.EnvLevel(
 			env.GetEnvString("ENV_LEVEL", string(env.EnvLevelDevelopment)),
 		),
-		MaxTunnelsAllowed: env.GetEnvInt("MAX_TUNNELS_ALLOWED", defaultMaxTunnelsAllowed),
-		ReconnectInterval: env.GetEnvDuration("RECONNECT_INTERVAL", defaultReconnectInterval),
-		MaxBackoffDelay:   env.GetEnvDuration("MAX_BACKOFF_DELAY", defaultMaxBackoffDelay),
-		RequestTimeout:    env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
+		RequestTimeout: env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
 			defaultBodySizeMB,
@@ -287,12 +268,8 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
-		OTLPConnectTo:    otlpConnectTo,
-		DisableTelemetry: disableTelemetry,
-		MaxConcurrentRequests: env.GetEnvInt(
-			"MAX_CONCURRENT_REQUESTS",
-			defaultMaxConcurrentRequests,
-		),
+		OTLPConnectTo:     otlpConnectTo,
+		DisableTelemetry:  disableTelemetry,
 		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
 		UpstreamTLSCA:     upstreamTLSCA,
 		ConfigEnabled:     configEnabled,
