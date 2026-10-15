@@ -70,8 +70,6 @@ func outcome(o string) metric.MeasurementOption {
 	return metric.WithAttributes(attribute.String("outcome", o))
 }
 
-func (m *metrics) tunnel(delta int64) { m.tunnelsUp.Add(context.Background(), delta) }
-
 // dialed records a dial: connected, replaced (the edge controller asked for
 // a new tunnel), or failed.
 func (m *metrics) dialed(result string) {
@@ -85,8 +83,6 @@ func (m *metrics) opened(reason rawpipe.Reason) {
 	}
 	m.opens.Add(context.Background(), 1, outcome(o))
 }
-
-func (m *metrics) pipe(delta int64) { m.pipes.Add(context.Background(), delta) }
 
 func (m *metrics) ended(sent, received int64, o halfconn.Outcome) {
 	ctx := context.Background()

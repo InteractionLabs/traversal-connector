@@ -126,11 +126,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.opened("")
-	s.metrics.pipe(1)
+	s.metrics.pipes.Add(context.Background(), 1)
 	sent, received, outcome := halfconn.Splice(stream, halfconn.ConnEnd(conn),
 		halfconn.Limits{Lifetime: s.MaxLifetime, Idle: s.IdleTimeout})
 	_ = conn.Close()
-	s.metrics.pipe(-1)
+	s.metrics.pipes.Add(context.Background(), -1)
 	s.metrics.ended(sent, received, outcome)
 	log.Info("pipe", "upstream", upstream, "outcome", outcome, "bytes_sent", sent,
 		"bytes_received", received, "duration_ms", time.Since(start).Milliseconds())
