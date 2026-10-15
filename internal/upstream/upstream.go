@@ -81,7 +81,10 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 // trust is the customer's: UPSTREAM_TLS_VERIFY, and UPSTREAM_TLS_CA_BASE64 or
 // UPSTREAM_TLS_CA_FILE beside the system roots.
 func trust(cfg *config.Config) (*tls.Config, error) {
-	tlsCfg := &tls.Config{InsecureSkipVerify: !cfg.UpstreamTLSVerify} //nolint:gosec // opt-in
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: !cfg.UpstreamTLSVerify, //nolint:gosec // opt-in
+	}
 	if cfg.UpstreamTLSCA != nil && *cfg.UpstreamTLSCA != "" {
 		var err error
 		if tlsCfg.RootCAs, err = config.SystemPoolWith(*cfg.UpstreamTLSCA, "upstream"); err != nil {
