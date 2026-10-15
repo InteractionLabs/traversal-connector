@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -51,41 +52,39 @@ func TestPreface(t *testing.T) {
 		t.Fatalf("fingerprint %q", root)
 	}
 	for _, c := range []struct {
-		roots, kids []string
-		want        string
+		hello rawpipe.Hello
+		want  string
 	}{
-		{nil, nil, rawpipe.Preface + " " + conn + "\n"},
-		{[]string{root}, nil, rawpipe.Preface + " " + conn + " roots=" + root + "\n"},
-		{[]string{root, "0123456789abcdef"}, []string{"k1", "k2"}, rawpipe.Preface + " " + conn +
-			" roots=" + root + ",0123456789abcdef kids=k1,k2\n"},
+		{rawpipe.Hello{ConnectorID: conn}, rawpipe.Preface + " " + conn + "\n"},
+		{rawpipe.Hello{ConnectorID: conn, Roots: []string{root, "0123456789abcdef"},
+			Kids: []string{"k1", "k2"}, TLS: true}, rawpipe.Preface + " " + conn +
+			" roots=" + root + ",0123456789abcdef kids=k1,k2 tls=1\n"},
 	} {
 		var b strings.Builder
-		if err := rawpipe.WritePreface(&b, conn, c.roots, c.kids); err != nil ||
-			b.String() != c.want {
+		if err := rawpipe.WritePreface(&b, c.hello); err != nil || b.String() != c.want {
 			t.Fatalf("WritePreface = %q, %v; want %q", b.String(), err, c.want)
 		}
-		id, roots, kids, ok := rawpipe.ParsePreface(b.String())
-		if !ok || id != conn || strings.Join(roots, ",") != strings.Join(c.roots, ",") ||
-			strings.Join(kids, ",") != strings.Join(c.kids, ",") {
-			t.Fatalf("ParsePreface(%q) = %q %v %v %v", b.String(), id, roots, kids, ok)
+		if got, ok := rawpipe.ParsePreface(b.String()); !ok || !reflect.DeepEqual(got, c.hello) {
+			t.Fatalf("ParsePreface(%q) = %+v %v", b.String(), got, ok)
 		}
 	}
 	for name, kids := range map[string][]string{
 		"empty kid": {""}, "comma": {"a,b"}, "space": {"a b"}, "long": {strings.Repeat("k", 512)},
 	} {
-		if err := rawpipe.WritePreface(io.Discard, conn, nil, kids); err == nil {
+		if err := rawpipe.WritePreface(io.Discard, rawpipe.Hello{ConnectorID: conn, Kids: kids}); err == nil {
 			t.Errorf("WritePreface with %s: accepted", name)
 		}
 	}
-	if err := rawpipe.WritePreface(io.Discard, strings.ToUpper(conn), nil, nil); err == nil {
+	if err := rawpipe.WritePreface(io.Discard, rawpipe.Hello{ConnectorID: strings.ToUpper(conn)}); err == nil {
 		t.Error("WritePreface with an upper-case connector ID: accepted")
 	}
 
-	// Unknown fields are ignored; the tag and connector ID are strict.
-	if id, _, kids, ok := rawpipe.ParsePreface(
-		rawpipe.Preface + " " + conn + " future=x kids=k1\n"); !ok || id != conn ||
-		len(kids) != 1 {
-		t.Errorf("unknown field: %q %v %v", id, kids, ok)
+	// Unknown fields are ignored, which is how a controller older than tls=1
+	// reads it; the tag, the connector ID and known fields are strict.
+	if h, ok := rawpipe.ParsePreface(
+		rawpipe.Preface + " " + conn + " future=x kids=k1\n"); !ok || h.ConnectorID != conn ||
+		len(h.Kids) != 1 || h.TLS {
+		t.Errorf("unknown field: %+v %v", h, ok)
 	}
 	for _, line := range []string{
 		rawpipe.Preface + "\n",
@@ -95,8 +94,10 @@ func TestPreface(t *testing.T) {
 		rawpipe.Preface + " " + conn + " bare\n",
 		rawpipe.Preface + " " + conn + " kids=a kids=b\n",
 		rawpipe.Preface + " " + conn + " =x\n",
+		rawpipe.Preface + " " + conn + " tls=0\n",
+		rawpipe.Preface + " " + conn + " tls=1 tls=1\n",
 	} {
-		if _, _, _, ok := rawpipe.ParsePreface(line); ok {
+		if _, ok := rawpipe.ParsePreface(line); ok {
 			t.Errorf("ParsePreface(%q) accepted", line)
 		}
 	}
@@ -107,32 +108,31 @@ func TestPreface(t *testing.T) {
 // ErrPreface; a reader that fails first is not.
 func TestReadPreface(t *testing.T) {
 	const conn = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
-	line := rawpipe.Preface + " " + conn + " kids=k1\n"
+	line := rawpipe.Preface + " " + conn + " kids=k1 tls=1\n"
 	r := bufio.NewReader(strings.NewReader(line + "rest"))
-	if id, _, kids, err := rawpipe.ReadPreface(r); err != nil || id != conn ||
-		strings.Join(kids, ",") != "k1" {
-		t.Fatalf("ReadPreface = %q %v %v", id, kids, err)
+	if h, err := rawpipe.ReadPreface(r); err != nil || h.ConnectorID != conn || !h.TLS ||
+		strings.Join(h.Kids, ",") != "k1" {
+		t.Fatalf("ReadPreface = %+v %v", h, err)
 	}
 	if rest, _ := io.ReadAll(r); string(rest) != "rest" {
 		t.Fatalf("left %q, want the bytes after the preface", rest)
 	}
-	// An unknown field pads the line to exactly the cap.
 	prefix := rawpipe.Preface + " " + conn + " pad="
 	pad := func(n int) string { return prefix + strings.Repeat("x", n-len(prefix)-1) + "\n" }
-	exact := pad(rawpipe.MaxPrefaceLen)
-	if _, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(exact))); err != nil {
+	if _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(
+		pad(rawpipe.MaxPrefaceLen)))); err != nil {
 		t.Fatalf("at the cap: %v", err)
 	}
 	for name, in := range map[string]string{
 		"over the cap": pad(rawpipe.MaxPrefaceLen + 1),
 		"bad preface":  rawpipe.Preface + " not-a-connector\n",
 	} {
-		_, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(in)))
+		_, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(in)))
 		if !errors.Is(err, rawpipe.ErrPreface) {
 			t.Errorf("%s: %v, want ErrPreface", name, err)
 		}
 	}
-	_, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(rawpipe.Preface)))
+	_, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(rawpipe.Preface)))
 	if !errors.Is(err, io.EOF) || errors.Is(err, rawpipe.ErrPreface) {
 		t.Errorf("cut short: %v, want EOF", err)
 	}
@@ -185,10 +185,16 @@ func TestIsNoTunnel(t *testing.T) {
 	}
 }
 
-// TestHeaderPeerURISAN pins the header the edge gateway's Envoy config sets,
-// which lives in another repository.
-func TestHeaderPeerURISAN(t *testing.T) {
-	if rawpipe.HeaderPeerURISAN != "X-Traversal-Peer-Uri-San" {
-		t.Fatal(rawpipe.HeaderPeerURISAN)
+// TestWireNames pins names other repositories send or match on: the edge
+// gateway's Envoy config, and the Integration Proxy's probes.
+func TestWireNames(t *testing.T) {
+	for got, want := range map[string]string{
+		rawpipe.HeaderPeerURISAN:             "X-Traversal-Peer-Uri-San",
+		rawpipe.ProbeAuthority:               "traversal-connector.internal:443",
+		string(rawpipe.RedactionUnsupported): "redaction_unsupported",
+	} {
+		if got != want {
+			t.Errorf("%q, want %q", got, want)
+		}
 	}
 }

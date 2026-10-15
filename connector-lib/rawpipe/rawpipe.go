@@ -29,16 +29,30 @@ const (
 )
 
 // A preface line is Preface, a space, the connector ID, then optional
-// space-separated key=value fields naming the capability trust the connector
-// has loaded, each a comma-separated list:
+// space-separated key=value fields:
 //
-//	TRAVERSAL-TUNNEL/1 <connector-id> roots=<fingerprint>,... kids=<kid>,...
+//	TRAVERSAL-TUNNEL/1 <connector-id> roots=<fingerprint>,... kids=<kid>,... tls=1
 //
-// A field whose list is empty is left out.
+// roots and kids name the capability trust the connector has loaded, each a
+// comma-separated list; a field whose list is empty is left out. tls=1 says
+// the connector serves TLS inside every pipe (PipeServerTLS); a connector
+// that does not leaves it out.
 const (
 	prefaceRoots = "roots"
 	prefaceKids  = "kids"
+	prefaceTLS   = "tls"
 )
+
+// Hello is what a preface line reports.
+type Hello struct {
+	ConnectorID string
+	// Roots and Kids are the capability trust the connector has loaded: each
+	// root's RootFingerprint, and the pinned keys' IDs.
+	Roots, Kids []string
+	// TLS is a connector that serves TLS inside every pipe, so a caller must
+	// speak it (PipeClientTLS).
+	TLS bool
+}
 
 // RootFingerprint names a capability root in a preface: the first 16 hex
 // digits of the SHA-256 of its DER.
@@ -47,20 +61,19 @@ func RootFingerprint(der []byte) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// WritePreface writes the preface line for connectorID, reporting roots
-// (RootFingerprint each) and kids, the pinned keys' IDs. It refuses a line
-// ParsePreface would not read back: a connector ID that is not a lower-case
-// UUID, a value that is empty or holds a space, comma or control byte, or a
-// line over MaxPrefaceLen.
-func WritePreface(w io.Writer, connectorID string, roots, kids []string) error {
-	if !IsConnectorID(connectorID) {
-		return fmt.Errorf("rawpipe: preface: %q is not a connector ID", connectorID)
+// WritePreface writes h's preface line. It refuses a line ParsePreface would
+// not read back: a connector ID that is not a lower-case UUID, a root or kid
+// that is empty or holds a space, comma or control byte, or a line over
+// MaxPrefaceLen.
+func WritePreface(w io.Writer, h Hello) error {
+	if !IsConnectorID(h.ConnectorID) {
+		return fmt.Errorf("rawpipe: preface: %q is not a connector ID", h.ConnectorID)
 	}
-	line := Preface + " " + connectorID
+	line := Preface + " " + h.ConnectorID
 	for _, f := range []struct {
 		key    string
 		values []string
-	}{{prefaceRoots, roots}, {prefaceKids, kids}} {
+	}{{prefaceRoots, h.Roots}, {prefaceKids, h.Kids}} {
 		if len(f.values) == 0 {
 			continue
 		}
@@ -71,6 +84,9 @@ func WritePreface(w io.Writer, connectorID string, roots, kids []string) error {
 		}
 		line += " " + f.key + "=" + strings.Join(f.values, ",")
 	}
+	if h.TLS {
+		line += " " + prefaceTLS + "=1"
+	}
 	if line += "\n"; len(line) > MaxPrefaceLen {
 		return fmt.Errorf("rawpipe: preface: %d bytes, over %d", len(line), MaxPrefaceLen)
 	}
@@ -79,20 +95,23 @@ func WritePreface(w io.Writer, connectorID string, roots, kids []string) error {
 }
 
 // ParsePreface reads a preface line, with or without its newline. It is
-// strict about the tag and the connector ID, and lenient about fields:
-// unknown key=value fields are ignored, so a connector can report more
-// without a controller release. A field that is not key=value, or a known
-// key given twice, refuses the line.
-func ParsePreface(line string) (connectorID string, roots, kids []string, ok bool) {
+// strict about the tag, the connector ID and the fields it knows, and
+// lenient about the rest: unknown key=value fields are ignored, so a
+// connector can report more without a controller release. That is how
+// controllers older than tls=1 read a line carrying it. A field that is not
+// key=value, a known key given twice, or tls with any value but 1 refuses
+// the line.
+func ParsePreface(line string) (Hello, bool) {
 	fields := strings.Split(strings.TrimSuffix(line, "\n"), " ")
 	if len(fields) < 2 || fields[0] != Preface || !IsConnectorID(fields[1]) {
-		return "", nil, nil, false
+		return Hello{}, false
 	}
+	h := Hello{ConnectorID: fields[1]}
 	seen := map[string]bool{}
 	for _, f := range fields[2:] {
 		key, value, isField := strings.Cut(f, "=")
 		if !isField || key == "" || seen[key] {
-			return "", nil, nil, false
+			return Hello{}, false
 		}
 		seen[key] = true
 		var list []string
@@ -101,12 +120,19 @@ func ParsePreface(line string) (connectorID string, roots, kids []string, ok boo
 		}
 		switch key {
 		case prefaceRoots:
-			roots = list
+			h.Roots = list
 		case prefaceKids:
-			kids = list
+			h.Kids = list
+		case prefaceTLS:
+			// One version so far; a later one adds a field rather than a
+			// value, so this connector's line stays readable here.
+			if value != "1" {
+				return Hello{}, false
+			}
+			h.TLS = true
 		}
 	}
-	return fields[1], roots, kids, true
+	return h, true
 }
 
 // ErrPreface is a preface line ReadPreface refused: over MaxPrefaceLen, or
@@ -116,22 +142,22 @@ var ErrPreface = errors.New("rawpipe: bad preface")
 // ReadPreface reads a preface line from r a byte at a time, so a peer that
 // sends more than MaxPrefaceLen bytes, its newline included, is refused before
 // the line is buffered, and leaves what follows it in r.
-func ReadPreface(r *bufio.Reader) (connectorID string, roots, kids []string, err error) {
+func ReadPreface(r *bufio.Reader) (Hello, error) {
 	var line []byte
 	for len(line) < MaxPrefaceLen {
 		b, err := r.ReadByte()
 		if err != nil {
-			return "", nil, nil, err
+			return Hello{}, err
 		}
 		if line = append(line, b); b == '\n' {
-			connectorID, roots, kids, ok := ParsePreface(string(line))
+			h, ok := ParsePreface(string(line))
 			if !ok {
-				return "", nil, nil, fmt.Errorf("%w: %q", ErrPreface, line)
+				return Hello{}, fmt.Errorf("%w: %q", ErrPreface, line)
 			}
-			return connectorID, roots, kids, nil
+			return h, nil
 		}
 	}
-	return "", nil, nil, fmt.Errorf("%w: longer than %d bytes", ErrPreface, MaxPrefaceLen)
+	return Hello{}, fmt.Errorf("%w: longer than %d bytes", ErrPreface, MaxPrefaceLen)
 }
 
 // prefaceValue reports whether v can stand in a preface list: printable
@@ -165,6 +191,13 @@ const (
 	OpenTimeout        Reason = "open_timeout"
 	// TCPRefused is a connector whose operator turned raw TCP pipes off.
 	TCPRefused Reason = "raw_tcp_refused"
+	// RedactionUnsupported is a request to a host redaction rules cover
+	// whose body cannot be redacted: gRPC, binary, an upgrade, a stream with
+	// no end, or one over the limits. It is refused, never sent unredacted.
+	RedactionUnsupported Reason = "redaction_unsupported"
+	// UpstreamFailed is a request the destination did not answer: a TLS
+	// failure, a reset or a timeout.
+	UpstreamFailed Reason = "upstream_failed"
 	// Other stands for any reason that is not Known.
 	Other Reason = "other"
 )
@@ -176,7 +209,7 @@ func (r Reason) Known() bool {
 	switch r {
 	case InvalidCapability, WrongConnector, WrongDestination, Exhausted, InspectionRequired,
 		ForbiddenAddress, DNSFailed, DialFailed, Capacity, Draining, ProtocolError, NoTunnel,
-		OpenTimeout, TCPRefused:
+		OpenTimeout, TCPRefused, RedactionUnsupported, UpstreamFailed:
 		return true
 	}
 	return false
@@ -231,7 +264,7 @@ func (r Reason) Status() int {
 	switch r {
 	case InvalidCapability:
 		return http.StatusUnauthorized
-	case DNSFailed, DialFailed:
+	case DNSFailed, DialFailed, RedactionUnsupported, UpstreamFailed:
 		return http.StatusBadGateway
 	case Capacity, Draining, NoTunnel, OpenTimeout:
 		return http.StatusServiceUnavailable
