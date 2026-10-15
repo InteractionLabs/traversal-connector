@@ -219,11 +219,12 @@ func main() {
 		go loader.Run(ctx)
 	}
 
-	tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection)
+	tunnels, err := pipeserver.New(&cfg, redactor)
 	if err != nil {
 		slog.ErrorContext(ctx, "tunnels cannot start", "err", err)
 		os.Exit(1)
 	}
+	tunnels.Server.Ready = router.Readiness(tunnels)
 	done := tunnels.Start(ctx)
 
 	slog.InfoContext(ctx, "traversal connector service starting",

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"net/url"
@@ -17,32 +18,23 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/upstream"
 )
 
-// New builds the raw pipe side from the environment, or says why the
-// connector cannot run it. requiresInspection reports hosts redaction rules
-// cover.
-func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, error) {
+// New builds the pipe side from the environment, or says why the connector
+// cannot run it. Responses from hosts r's rules cover are redacted.
+func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 	e := envReader{}
 	verifier, trust, err := newVerifier(cfg.TraversalControllerURL)
 	if err != nil {
 		return nil, err
 	}
-	var proxy *url.URL
-	if raw := os.Getenv("TRAVERSAL_PIPES_EGRESS_PROXY"); raw != "" {
-		if proxy, err = url.Parse(raw); err != nil || proxy.Scheme != "http" || proxy.Host == "" {
-			return nil, errors.New("TRAVERSAL_PIPES_EGRESS_PROXY must be an http:// URL")
-		}
-	}
-	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_PIPES_FORBIDDEN_CIDRS"))
+	policy, err := newPolicy(&e)
 	if err != nil {
 		return nil, err
 	}
-	policy, err := dialpolicy.New(dialpolicy.Config{
-		Proxy:          proxy,
-		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES"),
-		ExtraForbidden: forbidden,
-	})
+	up, err := upstream.New(cfg, r, policy.Dial)
 	if err != nil {
 		return nil, err
 	}
@@ -54,15 +46,18 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		return nil, err
 	}
 	server := &Server{
-		metrics:            m,
-		ConnectorID:        cfg.ConnectorID,
-		Verifier:           verifier,
-		Policy:             policy,
-		MaxPipes:           e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
-		RequiresInspection: requiresInspection,
-		RefuseTCP:          e.bool("TRAVERSAL_PIPES_REFUSE_TCP"),
-		MaxLifetime:        e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
-		IdleTimeout:        e.duration("TRAVERSAL_PIPES_IDLE_TIMEOUT", 15*time.Minute),
+		metrics:     m,
+		ConnectorID: cfg.ConnectorID,
+		Verifier:    verifier,
+		Upstream:    up,
+		MaxPipes:    e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
+		MaxLifetime: e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
+		Inner: Inner{
+			MaxStreams:       e.int("TRAVERSAL_PIPES_MAX_STREAMS", 100, 1000),
+			StreamWindow:     e.int("TRAVERSAL_PIPES_STREAM_WINDOW_KB", 256, 16<<10) << 10,
+			ConnectionWindow: e.int("TRAVERSAL_PIPES_CONNECTION_WINDOW_KB", 1<<10, 64<<10) << 10,
+			IdleTimeout:      e.duration("TRAVERSAL_PIPES_IDLE_TIMEOUT", 15*time.Minute),
+		},
 	}
 	t := &Tunnels{
 		ConnectorID: cfg.ConnectorID,
@@ -75,6 +70,7 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 	if t.TLS, t.Addr, err = tunnelTLS(cfg); err != nil {
 		return nil, err
 	}
+	server.Certificate = t.TLS.Certificates[0]
 	if connectTo := os.Getenv("TRAVERSAL_TUNNELS_CONNECT_TO"); connectTo != "" {
 		if err := config.ValidateConnectTo("TRAVERSAL_TUNNELS_CONNECT_TO", connectTo); err != nil {
 			return nil, err
@@ -85,6 +81,35 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		return nil, errors.New("tunnels through EGRESS_PROXY_URL are not supported yet")
 	}
 	return t, errors.Join(e.errs...)
+}
+
+// newPolicy is the dial policy every request a pipe carries goes through.
+func newPolicy(e *envReader) (*dialpolicy.Policy, error) {
+	var proxy *url.URL
+	if raw := os.Getenv("TRAVERSAL_PIPES_EGRESS_PROXY"); raw != "" {
+		var err error
+		if proxy, err = url.Parse(raw); err != nil || proxy.Scheme != "http" || proxy.Host == "" {
+			return nil, errors.New("TRAVERSAL_PIPES_EGRESS_PROXY must be an http:// URL")
+		}
+	}
+	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_PIPES_FORBIDDEN_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
+	if proxy == nil {
+		for _, v := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
+			if os.Getenv(v) != "" {
+				slog.Warn(v + " is ignored: requests to destinations go through the dial " +
+					"policy only; set TRAVERSAL_PIPES_EGRESS_PROXY to use a forward proxy")
+				break
+			}
+		}
+	}
+	return dialpolicy.New(dialpolicy.Config{
+		Proxy:          proxy,
+		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES"),
+		ExtraForbidden: forbidden,
+	})
 }
 
 // bundleEnv is the setting each capability trust bundle comes from.

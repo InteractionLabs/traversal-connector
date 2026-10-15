@@ -71,6 +71,11 @@ pipes:
   maxPipes: ""             # TRAVERSAL_PIPES_MAX (default 200)
   maxLifetime: ""          # TRAVERSAL_PIPES_MAX_LIFETIME (default 4h)
   idleTimeout: ""          # TRAVERSAL_PIPES_IDLE_TIMEOUT (default 15m)
+  # HTTP/2 inside one pipe: concurrent requests, and the flow-control windows
+  # per request and per pipe (KiB). They nest inside the tunnel's own.
+  pipeMaxStreams: ""       # TRAVERSAL_PIPES_MAX_STREAMS (default 100)
+  pipeStreamWindowKB: ""   # TRAVERSAL_PIPES_STREAM_WINDOW_KB (default 256)
+  pipeConnectionWindowKB: ""  # TRAVERSAL_PIPES_CONNECTION_WINDOW_KB (default 1024)
   tunnelCount: ""          # TRAVERSAL_TUNNELS_COUNT (default 2, at most 8)
   # host:port to dial instead of <controller host>:443, such as a PrivateLink
   # endpoint; SNI and certificate checks still use the controller's host.
@@ -85,9 +90,6 @@ pipes:
   # (loopback, link-local, metadata and the connector's own addresses), which
   # cannot be removed. An entry that does not parse stops raw pipes starting.
   forbiddenCIDRs: ""       # TRAVERSAL_PIPES_FORBIDDEN_CIDRS
-  # Refuse every raw TCP pipe while keeping tunnels (redacted HTTP still
-  # flows). For a connector that must never carry raw TCP.
-  refuseTCP: ""            # TRAVERSAL_PIPES_REFUSE_TCP
 
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference

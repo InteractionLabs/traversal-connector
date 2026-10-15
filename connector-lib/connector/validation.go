@@ -4,12 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
-	"github.com/InteractionLabs/traversal-connector/internal/iter"
 )
 
 // ValidateTargetURL validates the target URL for connector requests.
@@ -59,8 +60,8 @@ func filterHeaders(headers []*pb.Header, exclude map[string]bool) []*pb.Header {
 		return headers
 	}
 
-	filtered := iter.Filter(headers, func(header *pb.Header) bool {
-		return !exclude[strings.ToLower(header.Key)]
+	filtered := slices.DeleteFunc(slices.Clone(headers), func(header *pb.Header) bool {
+		return exclude[strings.ToLower(header.Key)]
 	})
 
 	slog.Debug(
@@ -86,7 +87,7 @@ func HTTPToProtoHeaders(h http.Header) []*pb.Header {
 	}
 
 	headers := make([]*pb.Header, 0, len(h))
-	for _, key := range iter.Keys(h) {
+	for key := range maps.Keys(h) {
 		for _, value := range h[key] {
 			headers = append(headers, &pb.Header{Key: key, Value: value})
 		}
