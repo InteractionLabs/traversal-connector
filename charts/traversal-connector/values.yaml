@@ -82,7 +82,8 @@ pipes:
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
   # An http:// forward proxy pipes reach their destinations through. Unset,
   # HTTPS_PROXY/HTTP_PROXY and NO_PROXY in the pod are used instead, for
-  # backwards compatibility with #67; this is the documented setting.
+  # backwards compatibility with #67, and that proxy resolves hostnames unless
+  # egressProxyResolves is set; this is the documented setting.
   egressProxy: ""          # TRAVERSAL_PIPES_EGRESS_PROXY
   # Send hostnames to egressProxy, which resolves them. Off, only IP
   # literals go through it. Turn on only if the proxy refuses loopback,

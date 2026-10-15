@@ -269,8 +269,9 @@ func TestNewVerifierBundleErrors(t *testing.T) {
 }
 
 // TestEgressProxyFromEnvironment: with TRAVERSAL_PIPES_EGRESS_PROXY unset,
-// HTTPS_PROXY is the egress proxy and NO_PROXY hosts are dialed direct, both
-// through the dial policy; the setting, when set, wins.
+// HTTPS_PROXY is the egress proxy, resolving hostnames as in #67, and NO_PROXY
+// hosts are dialed direct, both through the dial policy; the setting, when set,
+// wins.
 func TestEgressProxyFromEnvironment(t *testing.T) {
 	const dest = "192.0.2.10" // TEST-NET-1: allowed, and never answers
 	for _, c := range []struct {
@@ -283,6 +284,8 @@ func TestEgressProxyFromEnvironment(t *testing.T) {
 			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
 		{name: "HTTP_PROXY without HTTPS_PROXY", host: dest, via: "proxy",
 			env: map[string]string{"HTTP_PROXY": "{proxy}"}},
+		{name: "hostname through HTTPS_PROXY goes unresolved", host: "db.internal", via: "proxy",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
 		{name: "NO_PROXY host dialed direct", host: dest, via: "direct",
 			env: map[string]string{"HTTPS_PROXY": "{proxy}", "NO_PROXY": "192.0.2.0/24"}},
 		{name: "setting wins over HTTPS_PROXY and NO_PROXY", host: dest, via: "proxy",
@@ -295,7 +298,8 @@ func TestEgressProxyFromEnvironment(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			proxyURL, connects := recordingProxy(t)
-			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY", "HTTPS_PROXY",
+			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+				"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY",
 				"https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
 				t.Setenv(k, strings.ReplaceAll(c.env[k], "{proxy}", proxyURL))
 			}
