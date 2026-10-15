@@ -535,20 +535,25 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 	}
 
 	if cfg.TLSCA != nil && *cfg.TLSCA != "" {
-		caCertPool, err := systemCertPool()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to load system certificate pool for controller TLS: %w",
-				err,
-			)
+		if tlsConfig.RootCAs, err = SystemPoolWith(*cfg.TLSCA, "controller"); err != nil {
+			return nil, err
 		}
-		if !caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)) {
-			return nil, errors.New("failed to parse controller CA certificate")
-		}
-		tlsConfig.RootCAs = caCertPool
 	}
 
 	return tlsConfig, nil
+}
+
+// SystemPoolWith is the system roots plus the PEM CA certificates in caPEM,
+// for the TLS that what names (controller, upstream).
+func SystemPoolWith(caPEM, what string) (*x509.CertPool, error) {
+	pool, err := systemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load system certificate pool for %s TLS: %w", what, err)
+	}
+	if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+		return nil, fmt.Errorf("failed to parse %s CA certificate", what)
+	}
+	return pool, nil
 }
 
 // Both set is rejected rather than resolved by precedence, so no CA is silently ignored.

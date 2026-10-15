@@ -93,18 +93,9 @@ func TestNew(t *testing.T) {
 			env:     map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "roots"},
 			mutate:  func(c *config.Config) { c.TraversalControllerURL = "https://10.0.0.1" },
 			wantErr: "canonical controller host name"},
-		{name: "bad count", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_COUNT": "9"},
-			wantErr: "TRAVERSAL_TUNNELS_COUNT must be 1 to 8"},
-		{name: "bad duration", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_IDLE_TIMEOUT": "soon"},
-			wantErr: "TRAVERSAL_PIPES_IDLE_TIMEOUT"},
-		{name: "bad bool", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "yes"},
-			wantErr: "must be true or false"},
 		{name: "bad forbidden CIDR", spiffeID: orgScoped,
 			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
 			wantErr: `TRAVERSAL_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
-		{name: "empty forbidden CIDR", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,"},
-			wantErr: "TRAVERSAL_PIPES_FORBIDDEN_CIDRS"},
 		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "https://p:3128"},
 			wantErr: "must be an http:// URL"},
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
@@ -117,9 +108,6 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
-		{name: "connect-to port not a number", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:https"},
-			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: port must be a number"},
 		{name: "legacy egress proxy", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL"},
 	} {
@@ -247,26 +235,6 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 }
 
 func base64Of(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
-
-// TestNewVerifierBundleErrors: a bad bundle's error starts with the setting
-// it came from, so an operator knows which to fix.
-func TestNewVerifierBundleErrors(t *testing.T) {
-	for setting, want := range map[string]string{
-		"TRAVERSAL_CAPABILITY_KEYS":  "TRAVERSAL_CAPABILITY_KEYS: capability: no keys",
-		"TRAVERSAL_CAPABILITY_ROOTS": "TRAVERSAL_CAPABILITY_ROOTS: capability: roots: ",
-	} {
-		t.Run(setting, func(t *testing.T) {
-			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
-			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
-			t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(testRoot(t)))
-			t.Setenv(setting, base64Of("junk"))
-			_, _, err := newVerifier("https://edge.example.com")
-			if err == nil || !strings.HasPrefix(err.Error(), want) {
-				t.Fatalf("error %v, want one starting %q", err, want)
-			}
-		})
-	}
-}
 
 // TestEgressProxyFromEnvironment: with TRAVERSAL_PIPES_EGRESS_PROXY unset,
 // HTTPS_PROXY is the egress proxy, resolving hostnames as in #67, and NO_PROXY

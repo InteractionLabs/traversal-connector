@@ -7,7 +7,6 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,8 +34,6 @@ import (
 const InstrumentationName = "traversal-connector/upstream"
 
 const bytesPerMB = 1 << 20
-
-var systemCertPool = x509.SystemCertPool
 
 // Dialer reaches a canonical host:port, as dialpolicy.Policy.Dial does.
 type Dialer func(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
@@ -86,17 +83,10 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 func trust(cfg *config.Config) (*tls.Config, error) {
 	tlsCfg := &tls.Config{InsecureSkipVerify: !cfg.UpstreamTLSVerify} //nolint:gosec // opt-in
 	if cfg.UpstreamTLSCA != nil && *cfg.UpstreamTLSCA != "" {
-		pool, err := systemCertPool()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to load system certificate pool for upstream TLS: %w",
-				err,
-			)
+		var err error
+		if tlsCfg.RootCAs, err = config.SystemPoolWith(*cfg.UpstreamTLSCA, "upstream"); err != nil {
+			return nil, err
 		}
-		if !pool.AppendCertsFromPEM([]byte(*cfg.UpstreamTLSCA)) {
-			return nil, errors.New("failed to parse upstream CA certificate")
-		}
-		tlsCfg.RootCAs = pool
 	}
 	return tlsCfg, nil
 }
