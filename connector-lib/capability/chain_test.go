@@ -25,19 +25,18 @@ const (
 	chainIssuer = capability.IssuerPrefix + "staging"
 )
 
-var (
-	rootKey     = capabilitytest.Key("capability test: root")
-	nextRootKey = capabilitytest.Key("capability test: next root")
-	envKey      = capabilitytest.Key("capability test: environment")
+// Seeds of the roots' keys (capabilitytest.ValidRoot).
+const (
+	rootSeed     = "capability test: root"
+	nextRootSeed = "capability test: next root"
 )
 
-func testRoot(t *testing.T, k *ecdsa.PrivateKey) *capabilitytest.Root {
+var envKey = capabilitytest.Key("capability test: environment")
+
+// rootPair is the current root and the next, as during a root rotation.
+func rootPair(t *testing.T) (current, next *capabilitytest.Root) {
 	t.Helper()
-	root, err := capabilitytest.NewRoot(k, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
+	return capabilitytest.ValidRoot(t, rootSeed), capabilitytest.ValidRoot(t, nextRootSeed)
 }
 
 // envCert is a valid environment certificate for envKey, after mutate.
@@ -120,8 +119,8 @@ func verifyChained(v *capability.Verifier, token string) error {
 }
 
 func TestChainedCapabilityVerifies(t *testing.T) {
-	root := testRoot(t, rootKey)
-	token := signChained(t, envKey, "env", chainedClaims(nil), envCert(t, root, nil))
+	root := capabilitytest.ValidRoot(t, rootSeed)
+	token := capabilitytest.Chained(t, root, envKey, "env", chainHost, chainedClaims(nil))
 	got, err := newVerifier(t, rootsConfig(root)).Verify(token, connector, "db.internal", 5432)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +131,7 @@ func TestChainedCapabilityVerifies(t *testing.T) {
 }
 
 func TestChainedCapabilityRejections(t *testing.T) {
-	root, other := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	root, other := rootPair(t)
 	cert := func(mutate func(*capabilitytest.EnvironmentCert)) []byte {
 		return envCert(t, root, mutate)
 	}
@@ -188,7 +187,7 @@ func TestChainedCapabilityRejections(t *testing.T) {
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.Issuer = capability.IssuerURIPrefix + "Staging"
 			}))},
-		{"the root signs directly", signChained(t, rootKey, "env", chainedClaims(nil),
+		{"the root signs directly", signChained(t, capabilitytest.Key(rootSeed), "env", chainedClaims(nil),
 			root.DER)},
 		{"claims name another environment's issuer", signChained(t, envKey, "env",
 			chainedClaims(func(c *capability.Claims) { c.Issuer = capability.IssuerPrefix + "prod" }),
@@ -230,7 +229,7 @@ func TestChainedCapabilityRejections(t *testing.T) {
 // A connector that trusts the next root before Traversal issues from it
 // accepts both, so a root rotation needs no flag day.
 func TestRootRotation(t *testing.T) {
-	current, next := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	current, next := rootPair(t)
 	v := newVerifier(t, rootsConfig(current, next))
 	for name, root := range map[string]*capabilitytest.Root{"current": current, "next": next} {
 		token := signChained(t, envKey, "env", chainedClaims(nil), envCert(t, root, nil))
@@ -243,7 +242,7 @@ func TestRootRotation(t *testing.T) {
 // A verifier with roots and pinned keys accepts both kinds of capability, so
 // connectors move from pinned keys to roots without a cutover.
 func TestPinnedKeysBesideRoots(t *testing.T) {
-	root := testRoot(t, rootKey)
+	root := capabilitytest.ValidRoot(t, rootSeed)
 	cfg := rootsConfig(root)
 	cfg.Keys = map[string]*ecdsa.PublicKey{"k1": &key.PublicKey, "env": &envKey.PublicKey}
 	cfg.Issuer = chainIssuer
@@ -276,7 +275,7 @@ func TestPinnedKeysBesideRoots(t *testing.T) {
 // Without roots, x5c is ignored: a pinned kid still verifies as a signer
 // starts sending its certificate, and anything else is refused.
 func TestPinnedOnlyVerifierAndX5C(t *testing.T) {
-	root := testRoot(t, rootKey)
+	root := capabilitytest.ValidRoot(t, rootSeed)
 	v := newVerifier(t, pinnedConfig())
 	pinned := signChained(t, key, "k1", capabilitytest.Claims(issuer, connector, "db.internal",
 		5432), envCert(t, root, nil))
@@ -290,7 +289,7 @@ func TestPinnedOnlyVerifierAndX5C(t *testing.T) {
 }
 
 func TestNewVerifierConfig(t *testing.T) {
-	root := testRoot(t, rootKey)
+	root := capabilitytest.ValidRoot(t, rootSeed)
 	leaf, err := x509.ParseCertificate(envCert(t, root, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -317,8 +316,39 @@ func TestNewVerifierConfig(t *testing.T) {
 	newVerifier(t, rootsConfig(root))
 }
 
+// TestSigner: a Signer with a chain signs chained capabilities, which a
+// verifier pinning only the root trusts; without one it signs for verifiers
+// that pin its kid, which the root alone cannot vouch for.
+func TestSigner(t *testing.T) {
+	root := capabilitytest.ValidRoot(t, rootSeed)
+	roots := newVerifier(t, rootsConfig(root))
+	pinned := newVerifier(t, capability.VerifierConfig{Issuer: chainIssuer,
+		Subject: capability.SubjectIntegrationProxy,
+		Keys:    map[string]*ecdsa.PublicKey{"env": &envKey.PublicKey}})
+	for name, c := range map[string]struct {
+		chain      [][]byte
+		roots, kid bool
+	}{
+		"chained":   {chain: [][]byte{envCert(t, root, nil)}, roots: true, kid: true},
+		"unchained": {kid: true},
+	} {
+		token, err := capability.Signer{Key: envKey, KID: "env", Chain: c.chain}.Sign(
+			chainedClaims(nil))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for verifier, want := range map[string]bool{"root": c.roots, "kid": c.kid} {
+			v := map[string]*capability.Verifier{"root": roots, "kid": pinned}[verifier]
+			if err := verifyChained(v, token); (err == nil) != want {
+				t.Errorf("%s at a verifier pinning the %s: %v, want accepted %v", name,
+					verifier, err, want)
+			}
+		}
+	}
+}
+
 func TestSignChainedBounds(t *testing.T) {
-	root := testRoot(t, rootKey)
+	root := capabilitytest.ValidRoot(t, rootSeed)
 	c := envCert(t, root, nil)
 	for name, x5c := range map[string][][]byte{
 		"none":  nil,
@@ -332,7 +362,7 @@ func TestSignChainedBounds(t *testing.T) {
 }
 
 func TestParseRootsPEM(t *testing.T) {
-	current, next := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	current, next := rootPair(t)
 	block := func(der []byte) string {
 		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	}
@@ -354,15 +384,23 @@ func TestParseRootsPEM(t *testing.T) {
 }
 
 // TestParseTrust: what each bundle loads, reported sorted and never nil,
-// and a config NewVerifier takes; a bad bundle refuses the whole, and the
-// error names it.
+// and a verifier for it under the issuer and controller host given; a bad
+// bundle refuses the whole, and the error names it.
 func TestParseTrust(t *testing.T) {
-	current, next := testRoot(t, rootKey), testRoot(t, nextRootKey)
+	current, next := rootPair(t)
 	if fingerprints(current, next)[0] == rawpipe.RootFingerprint(current.DER) {
 		current, next = next, current // bundle order is not sorted order
 	}
-	roots := rootsPEM(current, next)
-	keys := keyPEM("k2", &key.PublicKey) + keyPEM("k1", &envKey.PublicKey)
+	roots := string(capabilitytest.RootsPEM(current, next))
+	keys := string(capabilitytest.KeysPEM(map[string]*ecdsa.PublicKey{
+		"k2": &key.PublicKey, "k1": &envKey.PublicKey,
+	}))
+	claims := capabilitytest.Claims(issuer, connector, "db.internal", 5432)
+	pinned, err := capability.Sign(key, "k2", claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chained := capabilitytest.Chained(t, next, envKey, "env", chainHost, claims)
 	for name, c := range map[string]struct {
 		keys, roots string
 		want        capability.Loaded
@@ -376,7 +414,7 @@ func TestParseTrust(t *testing.T) {
 		"both": {keys: keys, roots: roots,
 			want: capability.Loaded{Kids: []string{"k1", "k2"}, Roots: fingerprints(current, next)}},
 	} {
-		vc, loaded, err := capability.ParseTrust(c.keys, c.roots, issuer, chainHost)
+		v, loaded, err := capability.ParseTrust(c.keys, c.roots, issuer, chainHost)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -384,13 +422,12 @@ func TestParseTrust(t *testing.T) {
 			!slices.Equal(loaded.Roots, c.want.Roots) || loaded.Roots == nil {
 			t.Errorf("%s: loaded %+v, want %+v", name, loaded, c.want)
 		}
-		if vc.Subject != capability.SubjectIntegrationProxy || vc.Issuer != issuer ||
-			vc.ControllerHost != chainHost || len(vc.Keys) != len(c.want.Kids) ||
-			len(vc.Roots) != len(c.want.Roots) {
-			t.Errorf("%s: config %+v", name, vc)
-		}
-		if _, err := capability.NewVerifier(vc); err != nil {
-			t.Errorf("%s: NewVerifier: %v", name, err)
+		for kind, token := range map[string]string{"pinned": pinned, "chained": chained} {
+			_, err := v.Verify(token, connector, "db.internal", 5432)
+			if want := kind == "pinned" && len(c.want.Kids) > 0 ||
+				kind == "chained" && len(c.want.Roots) > 0; (err == nil) != want {
+				t.Errorf("%s: %s capability: %v, want accepted %v", name, kind, err, want)
+			}
 		}
 	}
 	for bundle, c := range map[capability.Bundle]struct{ keys, roots, want string }{
@@ -404,20 +441,11 @@ func TestParseTrust(t *testing.T) {
 			t.Errorf("%s: error %v, want %q", bundle, err, c.want)
 		}
 	}
-}
-
-func keyPEM(kid string, k *ecdsa.PublicKey) string {
-	der, _ := x509.MarshalPKIXPublicKey(k)
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY",
-		Headers: map[string]string{"Key-ID": kid}, Bytes: der}))
-}
-
-func rootsPEM(roots ...*capabilitytest.Root) string {
-	var s string
-	for _, r := range roots {
-		s += string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.DER}))
+	// What NewVerifier refuses is refused, and is no bundle's fault.
+	_, _, err = capability.ParseTrust("", roots, issuer, "")
+	if _, isTrust := errors.AsType[*capability.TrustError](err); err == nil || isTrust {
+		t.Errorf("roots without a controller host: %v", err)
 	}
-	return s
 }
 
 // fingerprints is roots' rawpipe.RootFingerprint, sorted.
@@ -434,7 +462,7 @@ func fingerprints(roots ...*capabilitytest.Root) []string {
 // key and issuer. The verifier calls it for x5c, so
 // TestChainedCapabilityRejections covers what it refuses.
 func TestCheckEnvironmentCertificate(t *testing.T) {
-	root := testRoot(t, rootKey)
+	root := capabilitytest.ValidRoot(t, rootSeed)
 	pool := x509.NewCertPool()
 	pool.AddCert(root.Certificate)
 	cert, err := x509.ParseCertificate(envCert(t, root, nil))

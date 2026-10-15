@@ -94,6 +94,23 @@ func SignChained(key *ecdsa.PrivateKey, kid string, x5c [][]byte, c Claims) (str
 	return sign(key, jws.Header{Typ: tokenType, Kid: kid, X5C: chain}, c)
 }
 
+// Signer signs capabilities with Key under KID, chained to Chain, the DER
+// certificate chain of Key (SignChained), or unchained if Chain is empty, so
+// verifiers must pin KID (Sign).
+type Signer struct {
+	Key   *ecdsa.PrivateKey
+	KID   string
+	Chain [][]byte
+}
+
+// Sign returns c as a capability signed by s.
+func (s Signer) Sign(c Claims) (string, error) {
+	if len(s.Chain) > 0 {
+		return SignChained(s.Key, s.KID, s.Chain, c)
+	}
+	return Sign(s.Key, s.KID, c)
+}
+
 func sign(key *ecdsa.PrivateKey, h jws.Header, c Claims) (string, error) {
 	if err := c.valid(); err != nil {
 		return "", err
@@ -357,28 +374,32 @@ func (e *TrustError) Unwrap() error { return e.Err }
 // ParseTrust reads the trust a verifier of capabilities issued to the
 // Integration Proxy holds: the keys in keyPEM (ParseKeys) with issuer, and
 // the roots in rootPEM (ParseRootsPEM) for controllerHost. A blank bundle is
-// none. It returns the config for NewVerifier, which refuses one with
+// none. It returns a Verifier for them, which NewVerifier refuses with
 // neither, keys without an issuer, or roots without a controller host name,
-// and what it loaded. Its errors are *TrustError, naming the bad bundle.
-func ParseTrust(keyPEM, rootPEM, issuer, controllerHost string) (VerifierConfig, Loaded, error) {
+// and what it loaded. A bundle it cannot read is a *TrustError naming it.
+func ParseTrust(keyPEM, rootPEM, issuer, controllerHost string) (*Verifier, Loaded, error) {
 	vc := VerifierConfig{Issuer: issuer, Subject: SubjectIntegrationProxy,
 		ControllerHost: controllerHost}
 	loaded := Loaded{Kids: []string{}, Roots: []string{}}
 	var err error
 	if strings.TrimSpace(keyPEM) != "" {
 		if vc.Keys, err = ParseKeys([]byte(keyPEM)); err != nil {
-			return VerifierConfig{}, Loaded{}, &TrustError{Bundle: BundleKeys, Err: err}
+			return nil, Loaded{}, &TrustError{Bundle: BundleKeys, Err: err}
 		}
 		loaded.Kids = slices.Sorted(maps.Keys(vc.Keys))
 	}
 	if strings.TrimSpace(rootPEM) != "" {
 		if vc.Roots, err = ParseRootsPEM([]byte(rootPEM)); err != nil {
-			return VerifierConfig{}, Loaded{}, &TrustError{Bundle: BundleRoots, Err: err}
+			return nil, Loaded{}, &TrustError{Bundle: BundleRoots, Err: err}
 		}
 		for _, root := range vc.Roots {
 			loaded.Roots = append(loaded.Roots, rawpipe.RootFingerprint(root.Raw))
 		}
 		slices.Sort(loaded.Roots)
 	}
-	return vc, loaded, nil
+	v, err := NewVerifier(vc)
+	if err != nil {
+		return nil, Loaded{}, err
+	}
+	return v, loaded, nil
 }
