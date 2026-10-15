@@ -181,17 +181,20 @@ render raw "$fixtures/direct-export-values.yaml" \
   --set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci \
   --set-string pipes.capabilityKeys=a2V5cw== \
   --set pipes.tunnelCount=4 --set pipes.egressProxyResolves=true \
-  --set pipes.refuseTCP=true \
+  --set pipes.pipeMaxStreams=50 \
   --set-string 'pipes.forbiddenCIDRs=10.9.0.0/16\,fd00:1::/32'
 for want in 'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
   'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
   'TRAVERSAL_TUNNELS_COUNT\n              value: "4"' \
+  'TRAVERSAL_PIPES_MAX_STREAMS\n              value: "50"' \
   'TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"' \
-  'TRAVERSAL_PIPES_REFUSE_TCP\n              value: "true"' \
   'TRAVERSAL_PIPES_FORBIDDEN_CIDRS\n              value: "10.9.0.0/16,fd00:1::/32"'; do
   assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
 done
-assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_PIPES_MAX'
+# maxPipes unset renders no TRAVERSAL_PIPES_MAX (TRAVERSAL_PIPES_MAX_STREAMS is set).
+if grep -qx -- '            - name: TRAVERSAL_PIPES_MAX' "$tmp_dir/raw.yaml"; then
+  fail "did not expect TRAVERSAL_PIPES_MAX in $tmp_dir/raw.yaml"
+fi
 # Values from before the raw tunnel was the only one still upgrade: they are
 # ignored, not refused.
 render legacy-values "$fixtures/direct-export-values.yaml" --set pipes.enabled=false \

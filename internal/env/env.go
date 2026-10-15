@@ -15,17 +15,6 @@ func GetEnvString(key, defaultVal string) string {
 	return defaultVal
 }
 
-// GetEnvInt returns the value of the environment variable identified by key
-// parsed as an int, or defaultVal if the variable is empty, unset, or not a valid integer.
-func GetEnvInt(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		if parsed, err := strconv.Atoi(val); err == nil {
-			return parsed
-		}
-	}
-	return defaultVal
-}
-
 // GetEnvInt64 returns the value of the environment variable identified by key
 // parsed as an int64, or defaultVal if the variable is empty, unset, or not a valid integer.
 func GetEnvInt64(key string, defaultVal int64) int64 {

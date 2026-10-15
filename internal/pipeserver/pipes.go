@@ -1,26 +1,32 @@
-// Package pipeserver is the connector's raw pipe side. It holds tunnels to
+// Package pipeserver is the connector's pipe side. It holds tunnels to
 // Traversal's edge controller (tunnels.go) and serves each pipe the edge
-// controller opens on them: verify the capability, dial the destination,
-// copy bytes.
+// controller opens on them: verify the capability, then speak TLS with the
+// Integration Proxy and forward the HTTP inside it to the capability's
+// destination.
 package pipeserver
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/httpserve"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/internal/upstream"
 )
-
-// destinationDialTimeout bounds a pipe's dial to its destination.
-const destinationDialTimeout = 10 * time.Second
 
 const (
 	// streamWindow carries one pipe at full speed at WAN latency and bounds
@@ -34,6 +40,8 @@ const (
 	// prefaceTimeout bounds the wait for the edge controller's HTTP/2 preface
 	// on a new tunnel; net/http clears the deadline once HTTP/2 starts.
 	prefaceTimeout = 15 * time.Second
+	// handshakeTimeout bounds a pipe's TLS handshake, which holds a pipe slot.
+	handshakeTimeout = 10 * time.Second
 )
 
 // h2 is the tunnel's HTTP/2 configuration. Its stream limit is the
@@ -53,28 +61,36 @@ func (s *Server) h2() *http.HTTP2Config {
 	}
 }
 
+// clamp32 is n capped at limit, converted to a 32-bit type limit fits.
+func clamp32[T int32 | uint32](n, limit int64) T {
+	return T(min(max(n, 0), limit)) //nolint:gosec // limit fits T at every call
+}
+
+// Inner bounds the HTTP/2 inside one pipe. It nests in the tunnel stream's
+// flow control (streamWindow), so a window past that only buffers more.
+type Inner struct {
+	MaxStreams                     int
+	StreamWindow, ConnectionWindow int
+	// IdleTimeout closes a pipe that has carried no request for that long.
+	IdleTimeout time.Duration
+}
+
 // Server serves pipes on tunnels.
 type Server struct {
 	ConnectorID string
 	Verifier    *capability.Verifier
-	Policy      interface {
-		Dial(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
-	}
+	// Certificate is the tunnel certificate; each pipe's TLS presents it.
+	Certificate tls.Certificate
+	Upstream    *upstream.Client
+	// Ready answers requests to rawpipe.ProbeAuthority.
+	Ready http.Handler
 	// MaxPipes caps the pipes open at once; zero is no cap.
 	MaxPipes int
-	// RequiresInspection reports hosts redaction rules cover; a raw pipe to
-	// one is refused (inspection_required). Nil covers none.
-	RequiresInspection func(host string) bool
-	// RefuseTCP refuses every raw TCP pipe (raw_tcp_refused) while tunnels
-	// stay up: the customer's switch for a connector that must only carry
-	// redacted HTTP.
-	RefuseTCP bool
+	Inner    Inner
 	// Tunnels is how many tunnels share MaxPipes; 0 means 1.
-	Tunnels int
-	// MaxLifetime and IdleTimeout, if set, abort a pipe that is that old or
-	// has moved no bytes for that long.
-	MaxLifetime, IdleTimeout time.Duration
-	metrics                  *metrics
+	Tunnels     int
+	MaxLifetime time.Duration
+	metrics     *metrics
 
 	pipes drain.Tracker
 }
@@ -114,75 +130,186 @@ func (s *Server) Drain(ctx context.Context) {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	log := slog.With("target", r.Host)
-	conn, upstream, claims, err := s.open(r)
+	target, err := s.open(r)
 	if err != nil {
-		reason := rawpipe.ReasonOf(err, rawpipe.DialFailed)
+		reason := rawpipe.ReasonOf(err, rawpipe.ProtocolError)
 		s.metrics.opened(reason)
 		log.Info("pipe refused", "reason", reason, "error", err)
 		rawpipe.Refuse(w, reason, string(reason))
 		return
 	}
 	defer s.pipes.Done()
-	start := time.Now()
 	stream, err := rawpipe.Accept(w, r)
 	if err != nil {
-		_ = conn.Close()
-		s.metrics.acceptFailed()
-		log.Info("pipe", "upstream", upstream, "outcome", "accept_failed", "error", err)
 		return
 	}
-	// The audit line: logged only for a pipe admitted and accepted, so a pipe
-	// refused after its capability verified is never taken for one that ran.
-	log.Info("pipe opened", "jti", claims.JTI, "organization_id", claims.OrganizationID,
-		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
-		"session_id", claims.SessionID, "upstream", upstream)
 	s.metrics.opened("")
 	s.metrics.pipes.Add(context.Background(), 1)
-	sent, received, outcome := halfconn.Splice(stream, halfconn.ConnEnd(conn),
-		halfconn.Limits{Lifetime: s.MaxLifetime, Idle: s.IdleTimeout})
+	start := time.Now()
+	conn := halfconn.NewStreamConn(stream)
+	proto, outcome := s.intercept(r.Context(), conn, target)
 	_ = conn.Close()
+	sent, received := conn.Wait()
 	s.metrics.pipes.Add(context.Background(), -1)
 	s.metrics.ended(sent, received, outcome)
-	log.Info("pipe", "upstream", upstream, "outcome", outcome, "bytes_sent", sent,
+	log.Info("pipe", "protocol", proto, "outcome", outcome, "bytes_sent", sent,
 		"bytes_received", received, "duration_ms", time.Since(start).Milliseconds())
 	stream.Finish()
 }
 
-// open checks and admits the pipe and dials its destination. It returns the
-// pipe's verified capability with its connection.
-func (s *Server) open(r *http.Request) (halfconn.Conn, string, *capability.Claims, error) {
+// open checks and admits the pipe, and returns its destination.
+func (s *Server) open(r *http.Request) (*url.URL, error) {
 	host, port, ok := capability.SplitAuthority(r.Host)
 	switch {
 	case s.pipes.Draining():
-		return nil, "", nil, rawpipe.Errorf(rawpipe.Draining, "draining")
+		return nil, rawpipe.Errorf(rawpipe.Draining, "draining")
 	case r.Method != http.MethodConnect || !ok:
-		return nil, "", nil, rawpipe.Errorf(rawpipe.ProtocolError,
+		return nil, rawpipe.Errorf(rawpipe.ProtocolError,
 			"expected CONNECT to a canonical host:port")
 	}
 	claims, err := s.Verifier.Verify(r.Header.Get(rawpipe.HeaderCapability), s.ConnectorID,
 		host, port)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, err
 	}
-	// After verification, so only a valid capability learns the policy.
-	if s.RefuseTCP {
-		return nil, "", nil, rawpipe.Errorf(rawpipe.TCPRefused,
-			"raw TCP pipes are off on this connector")
+	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
+		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
+		"session_id", claims.SessionID, "target", r.Host)
+	authority := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	if host == rawpipe.ProbeHost && authority != rawpipe.ProbeAuthority {
+		// Never dialed: a customer resolver might answer for the name.
+		return nil, rawpipe.Errorf(rawpipe.WrongDestination, "probes are on port 443")
 	}
 	if !s.pipes.Add(s.MaxPipes) {
-		return nil, "", nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
+		return nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
-	if s.RequiresInspection != nil && s.RequiresInspection(host) {
-		s.pipes.Done()
-		return nil, "", nil, rawpipe.Errorf(rawpipe.InspectionRequired,
-			"redaction rules cover the host")
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), destinationDialTimeout)
-	defer cancel()
-	conn, upstream, err := s.Policy.Dial(ctx, host, port)
-	if err != nil {
-		s.pipes.Done()
-		return nil, "", nil, err
-	}
-	return conn, upstream, claims, nil
+	return &url.URL{Host: authority}, nil
 }
+
+// intercept runs the pipe's TLS and serves the protocol it negotiated until
+// the Integration Proxy closes it, it idles out, or it reaches MaxLifetime.
+func (s *Server) intercept(ctx context.Context, conn *halfconn.StreamConn, target *url.URL,
+) (string, halfconn.Outcome) {
+	if s.MaxLifetime > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.MaxLifetime)
+		defer cancel()
+	}
+	tc := tls.Server(conn, rawpipe.PipeServerTLS(s.Certificate))
+	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	err := tc.HandshakeContext(hctx)
+	cancel()
+	if err != nil {
+		slog.Info("pipe TLS failed", "error", err)
+		return "", halfconn.CallerAborted
+	}
+	// Neither server ends its connection when its context does.
+	defer context.AfterFunc(ctx, func() { _ = tc.Close() })()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.request(w, r, target)
+	})
+	proto := tc.ConnectionState().NegotiatedProtocol
+	switch proto {
+	case rawpipe.ALPNH2:
+		(&http2.Server{
+			MaxConcurrentStreams:         clamp32[uint32](int64(s.Inner.MaxStreams), 1<<20),
+			MaxUploadBufferPerStream:     clamp32[int32](int64(s.Inner.StreamWindow), 1<<30),
+			MaxUploadBufferPerConnection: clamp32[int32](int64(s.Inner.ConnectionWindow), 1<<30),
+			IdleTimeout:                  s.Inner.IdleTimeout,
+		}).ServeConn(tc, &http2.ServeConnOpts{Context: ctx, Handler: handler})
+	default:
+		srv := &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: handshakeTimeout,
+			IdleTimeout:       s.Inner.IdleTimeout,
+			BaseContext:       func(net.Listener) context.Context { return ctx },
+		}
+		_ = srv.Serve(&oneConn{conn: tc, done: conn.Closed()})
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return proto, halfconn.Limit
+	}
+	return proto, halfconn.Completed
+}
+
+// request forwards one request from inside a pipe. Its authority, the port
+// defaulting from its scheme, must be the pipe's: the capability is for that
+// host:port only.
+func (s *Server) request(w http.ResponseWriter, r *http.Request, pipe *url.URL) {
+	if r.Method == http.MethodConnect {
+		upstream.Refuse(w, rawpipe.ProtocolError, "CONNECT is not carried inside a pipe")
+		return
+	}
+	scheme, authority, ok := requestTarget(r)
+	if !ok {
+		upstream.Refuse(w, rawpipe.ProtocolError,
+			"HTTP/1.1 requests in a pipe are in absolute form (GET https://host/path)")
+		return
+	}
+	if authority != pipe.Host {
+		upstream.Refuse(
+			w,
+			rawpipe.WrongDestination,
+			"the request is not for this pipe's destination",
+		)
+		return
+	}
+	if pipe.Host == rawpipe.ProbeAuthority {
+		if r.URL.Path != rawpipe.ProbePath || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		s.Ready.ServeHTTP(w, r)
+		return
+	}
+	s.Upstream.Forward(w, r, &url.URL{Scheme: scheme, Host: pipe.Host})
+}
+
+// requestTarget is r's scheme and canonical host:port. On h2 the scheme is
+// :scheme, which net/http keeps only as whether r.TLS is set. On HTTP/1.1 it
+// is the absolute-form target's, and net/http takes r.Host from it; origin
+// form names no scheme, so it is refused rather than guessed.
+func requestTarget(r *http.Request) (scheme, authority string, ok bool) {
+	switch {
+	case r.ProtoMajor == 2 && r.TLS != nil:
+		scheme = "https"
+	case r.ProtoMajor == 2:
+		scheme = "http"
+	case r.URL.Scheme == "http" || r.URL.Scheme == "https":
+		scheme = r.URL.Scheme
+	default:
+		return "", "", false
+	}
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host, port = strings.Trim(r.Host, "[]"), "443"
+		if scheme == "http" {
+			port = "80"
+		}
+	}
+	if c, ok := capability.Canonical(host); ok {
+		host = c
+	}
+	return scheme, net.JoinHostPort(host, port), true
+}
+
+// oneConn is a Listener that accepts conn once, then blocks until done, so
+// http.Server serves exactly the pipe's connection.
+type oneConn struct {
+	conn net.Conn
+	done <-chan struct{}
+	once sync.Once
+}
+
+func (l *oneConn) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() { c = l.conn })
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *oneConn) Close() error   { return nil }
+func (l *oneConn) Addr() net.Addr { return l.conn.LocalAddr() }

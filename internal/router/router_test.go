@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/InteractionLabs/traversal-connector/internal/config"
@@ -32,7 +33,7 @@ func TestReadiness(t *testing.T) {
 		w := httptest.NewRecorder()
 		NewRouter(config.Config{}, c.tunnels).
 			ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		if w.Code != c.want || w.Body.String() != c.body {
+		if w.Code != c.want || strings.TrimSpace(w.Body.String()) != c.body {
 			t.Errorf("%+v: %d %s", c.tunnels, w.Code, w.Body)
 		}
 	}

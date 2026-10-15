@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -50,7 +51,7 @@ func NewRouter(cfg config.Config, tunnels Tunnels) *gin.Engine {
 	}
 
 	r.GET("/healthz", healthCheckHandler)
-	r.GET("/readyz", ReadinessHandler(tunnels))
+	r.GET("/readyz", gin.WrapH(Readiness(tunnels)))
 
 	return r
 }
@@ -61,16 +62,19 @@ func healthCheckHandler(c *gin.Context) {
 	})
 }
 
-// ReadinessHandler answers /readyz. Pipes to rawpipe.ProbeAuthority get the
-// same answer, so the status probe reads the same body either way:
-// active_tunnels is the field it parses.
-func ReadinessHandler(tunnels Tunnels) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		body := gin.H{"status": "ready", "active_tunnels": tunnels.Up()}
+// Readiness answers /readyz, and probes: requests in a pipe to
+// rawpipe.ProbeAuthority, so the status probe reads the same body either
+// way. active_tunnels is the field it parses.
+func Readiness(tunnels Tunnels) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"status": "ready", "active_tunnels": tunnels.Up()}
 		status := http.StatusOK
-		if ready, reason := tunnels.Ready(c.Request.Context()); !ready {
-			body["status"], body["reason"], status = "not ready", reason, http.StatusServiceUnavailable
+		if ready, reason := tunnels.Ready(r.Context()); !ready {
+			body["status"], body["reason"], status = "not ready", reason,
+				http.StatusServiceUnavailable
 		}
-		c.JSON(status, body)
-	}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
+	})
 }

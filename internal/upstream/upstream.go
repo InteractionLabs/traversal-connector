@@ -1,0 +1,220 @@
+// Package upstream is how the connector reaches destinations: each request a
+// pipe carries is forwarded with the customer's trust settings, through the
+// dial policy, and its response streamed back, or buffered and redacted when
+// the customer's rules cover the host.
+package upstream
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
+)
+
+// InstrumentationName names the OTel tracer and meter.
+const InstrumentationName = "traversal-connector/upstream"
+
+const bytesPerMB = 1 << 20
+
+var systemCertPool = x509.SystemCertPool
+
+// Dialer reaches a canonical host:port, as dialpolicy.Policy.Dial does.
+type Dialer func(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
+
+// Client forwards requests to destinations.
+type Client struct {
+	// auto speaks HTTP/2 to a server that offers it over TLS, as gRPC needs,
+	// and HTTP/1.1 otherwise. h2c is gRPC to an http:// server: with no ALPN
+	// to offer h2 it must be assumed, and gRPC has no HTTP/1. http1 carries
+	// upgrades, which Go's transport keeps on HTTP/1 only for WebSocket.
+	auto, h2c, http1 *http.Transport
+	redactor         *redact.Redactor
+	// maxRequest bounds a request body as it streams. maxBody and maxDecoded
+	// bound a buffered response on the wire and decoded; bufferFor bounds how
+	// long it may take to end.
+	maxRequest, maxBody, maxDecoded int64
+	bufferFor                       time.Duration
+	tracer                          trace.Tracer
+	metrics                         *metrics
+}
+
+func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
+	tlsCfg, err := trust(cfg)
+	if err != nil {
+		return nil, err
+	}
+	m, err := newMetrics()
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		auto:       transport(tlsCfg, dial, true, true, false),
+		h2c:        transport(tlsCfg, dial, false, false, true),
+		http1:      transport(tlsCfg, dial, true, false, false),
+		redactor:   r,
+		maxRequest: cfg.MaxRequestBodySizeMB * bytesPerMB,
+		maxBody:    cfg.MaxResponseBodySizeMB * bytesPerMB,
+		maxDecoded: cfg.MaxDecodedResponseBodySizeMB * bytesPerMB,
+		bufferFor:  cfg.RequestTimeout,
+		tracer:     otel.Tracer(InstrumentationName),
+		metrics:    m,
+	}, nil
+}
+
+// trust is the customer's: UPSTREAM_TLS_VERIFY, and UPSTREAM_TLS_CA_BASE64 or
+// UPSTREAM_TLS_CA_FILE beside the system roots.
+func trust(cfg *config.Config) (*tls.Config, error) {
+	tlsCfg := &tls.Config{InsecureSkipVerify: !cfg.UpstreamTLSVerify} //nolint:gosec // opt-in
+	if cfg.UpstreamTLSCA != nil && *cfg.UpstreamTLSCA != "" {
+		pool, err := systemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to load system certificate pool for upstream TLS: %w",
+				err,
+			)
+		}
+		if !pool.AppendCertsFromPEM([]byte(*cfg.UpstreamTLSCA)) {
+			return nil, errors.New("failed to parse upstream CA certificate")
+		}
+		tlsCfg.RootCAs = pool
+	}
+	return tlsCfg, nil
+}
+
+// transport dials only through dial, which owns the egress proxy and the
+// address checks, so it has no Proxy of its own: HTTP(S)_PROXY would skip
+// the dial policy.
+func transport(tlsCfg *tls.Config, dial Dialer, http1, http2, h2c bool) *http.Transport {
+	var protocols http.Protocols
+	protocols.SetHTTP1(http1)
+	protocols.SetHTTP2(http2)
+	protocols.SetUnencryptedHTTP2(h2c)
+	return &http.Transport{
+		Protocols:       &protocols,
+		TLSClientConfig: tlsCfg.Clone(),
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			host, p, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			port, err := strconv.ParseUint(p, 10, 16)
+			if err != nil {
+				return nil, err
+			}
+			conn, _, err := dial(ctx, host, uint16(port))
+			return conn, err
+		},
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	}
+}
+
+// Forward sends r to target, its pipe's destination, and streams the answer
+// to w. A request to a host the customer's rules cover whose response could
+// not be redacted (gRPC, an upgrade) is refused before it is sent, so it has
+// no effect upstream.
+func (c *Client) Forward(w http.ResponseWriter, r *http.Request, target *url.URL) {
+	host := target.Hostname()
+	ctx, span := c.tracer.Start(r.Context(), telemetry.SpanExecutorUpstreamHTTP,
+		trace.WithAttributes(attribute.String(connector.AttrTargetHost, target.Host),
+			attribute.String(connector.AttrMethod, r.Method)))
+	defer span.End()
+	r = r.WithContext(ctx)
+	if c.maxRequest > 0 && r.Body != nil {
+		if r.ContentLength > c.maxRequest {
+			http.Error(w, fmt.Sprintf("request body exceeds %d bytes", c.maxRequest),
+				http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, c.maxRequest)
+	}
+	start := time.Now()
+	covered := c.redactor.HasRulesForHost(host)
+	if covered {
+		if why := unredactableRequest(r); why != "" {
+			c.fail(w, r, c.refuse(ctx, target.Host, refusalUnredactable, errors.New(why)))
+			return
+		}
+	}
+	t := c.auto
+	switch {
+	case r.Header.Get("Upgrade") != "":
+		t = c.http1
+	case target.Scheme == "http" && isGRPC(r.Header.Get(headerContentType)):
+		t = c.h2c
+	}
+	(&httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
+			pr.Out.Host = pr.In.Host
+		},
+		Transport:     t,
+		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			c.metrics.requested(ctx, target.Host, connector.StatusSuccess, start)
+			span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
+			return c.respond(ctx, resp, target.Host, host, covered)
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if !errors.Is(err, errRefused) {
+				c.metrics.requested(ctx, target.Host, connector.StatusError, start)
+			}
+			_ = telemetry.RecordError(span, err)
+			c.fail(w, r, err)
+		},
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
+	}).ServeHTTP(w, r)
+}
+
+// fail answers r with err's reason: a dial refusal's, redaction_unsupported,
+// or upstream_failed for any other failure.
+func (c *Client) fail(w http.ResponseWriter, r *http.Request, err error) {
+	if r.Context().Err() != nil {
+		return // the caller is gone
+	}
+	reason := rawpipe.ReasonOf(err, rawpipe.UpstreamFailed)
+	safe := telemetry.SanitizeError(err)
+	slog.InfoContext(r.Context(), "upstream request failed", "reason", reason, "err", safe)
+	Refuse(w, reason, safe.Error())
+}
+
+// Refuse answers a request with reason in HeaderReason.
+func Refuse(w http.ResponseWriter, reason rawpipe.Reason, msg string) {
+	w.Header().Set(rawpipe.HeaderReason, string(reason))
+	http.Error(w, msg, reason.Status())
+}
+
+var errRefused = errors.New("refused")
+
+// refuse counts a response dropped because it could not be redacted, and is
+// the error that answers it.
+func (c *Client) refuse(ctx context.Context, target, label string, err error) error {
+	c.metrics.refusals.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(connector.AttrTargetHost, target),
+		attribute.String(attrRefusalReason, label)))
+	slog.WarnContext(ctx, "upstream response dropped: it cannot be redacted",
+		"target_host", target, "reason", label, "error", telemetry.SanitizeError(err))
+	return fmt.Errorf("%w: %w", errRefused,
+		rawpipe.Errorf(rawpipe.RedactionUnsupported, "%s", err.Error()))
+}

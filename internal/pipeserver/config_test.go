@@ -22,6 +22,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
 const org = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d"
@@ -70,6 +71,7 @@ func TestNew(t *testing.T) {
 			"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443",
 			"TRAVERSAL_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true",
 			"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
+			"TRAVERSAL_PIPES_MAX_STREAMS":     "50", "TRAVERSAL_PIPES_STREAM_WINDOW_KB": "64",
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
@@ -109,7 +111,6 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.ConnectorID = strings.ToUpper(c.ConnectorID) }, wantErr: "lower-case UUID"},
 		{name: "http controller", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
-		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_REFUSE_TCP": "true"}},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
 		{name: "connect-to port not a number", spiffeID: orgScoped,
@@ -136,7 +137,7 @@ func TestNew(t *testing.T) {
 			if c.mutate != nil {
 				c.mutate(cfg)
 			}
-			tunnels, err := New(cfg, nil)
+			tunnels, err := New(cfg, redact.NewRedactor())
 			switch {
 			case c.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -144,12 +145,11 @@ func TestNew(t *testing.T) {
 				t.Fatalf("error %v, want one containing %q", err, c.wantErr)
 			case c.wantErr == "" && c.name == "every setting" &&
 				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
-					tunnels.Server.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour):
+					tunnels.Server.Inner.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour ||
+					tunnels.Server.Inner.MaxStreams != 50 || tunnels.Server.Inner.StreamWindow != 64<<10):
 				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
-			case c.name == "every setting" && forbidden(tunnels, "10.9.1.1") != rawpipe.ForbiddenAddress:
+			case c.name == "every setting" && forbidden(t, "10.9.1.1") != rawpipe.ForbiddenAddress:
 				t.Fatal("TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied")
-			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
-				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
 				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200 ||
 					!slices.Equal(tunnels.Kids, []string{"k1"}) || len(tunnels.Roots) != 0):
@@ -170,7 +170,7 @@ func TestTunnelTLS(t *testing.T) {
 	cfg.TLSCA = &ca
 	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
 	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
-	tunnels, err := New(cfg, nil)
+	tunnels, err := New(cfg, redact.NewRedactor())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +186,16 @@ func TestTunnelTLS(t *testing.T) {
 
 // forbidden is the reason tunnels' dial policy refuses host, or "" if it
 // allows it. Policies refuse before dialing, so nothing is dialed.
-func forbidden(tunnels *Tunnels, host string) rawpipe.Reason {
+// forbidden is whether the dial policy built from the environment refuses
+// host.
+func forbidden(t *testing.T, host string) rawpipe.Reason {
+	policy, err := newPolicy(&envReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // an allowed host fails to dial at once
-	conn, _, err := tunnels.Server.Policy.Dial(ctx, host, 443)
+	conn, _, err := policy.Dial(ctx, host, 443)
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -216,7 +222,8 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", "")
 	root := testRoot(t)
 	t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(root))
-	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"), nil)
+	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"),
+		redact.NewRedactor())
 	if err != nil {
 		t.Fatal(err)
 	}
