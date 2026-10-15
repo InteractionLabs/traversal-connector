@@ -80,7 +80,9 @@ pipes:
   # host:port to dial instead of <controller host>:443, such as a PrivateLink
   # endpoint; SNI and certificate checks still use the controller's host.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
-  # An http:// forward proxy pipes reach their destinations through.
+  # An http:// forward proxy pipes reach their destinations through. Unset,
+  # HTTPS_PROXY/HTTP_PROXY and NO_PROXY in the pod are used instead, for
+  # backwards compatibility with #67; this is the documented setting.
   egressProxy: ""          # TRAVERSAL_PIPES_EGRESS_PROXY
   # Send hostnames to egressProxy, which resolves them. Off, only IP
   # literals go through it. Turn on only if the proxy refuses loopback,

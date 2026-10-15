@@ -343,9 +343,11 @@ addresses, and any CIDR you add. Private ranges are allowed.
 | `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` | `false` | Send hostnames to that proxy, which resolves them; off, only IP literals go through it. Turn on only if the proxy refuses loopback, link-local and metadata addresses. |
 | `TRAVERSAL_PIPES_FORBIDDEN_CIDRS` | (none) | Comma-separated CIDRs never to reach, beside the built-in list. |
 
-`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are not used for requests to
-destinations: they would bypass the dial policy. The connector logs a warning
-at startup when they are set; use `TRAVERSAL_PIPES_EGRESS_PROXY`.
+`TRAVERSAL_PIPES_EGRESS_PROXY` is the documented setting. For backwards
+compatibility with #67, when it is unset `HTTPS_PROXY` (or else `HTTP_PROXY`)
+is used the same way, and `NO_PROXY` hosts are dialed directly; the dial policy
+applies either way. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
+and the connector logs that the environment proxy is ignored.
 
 ### Redaction
 
