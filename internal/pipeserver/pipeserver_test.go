@@ -93,10 +93,10 @@ func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, roots, kids, err := rawpipe.ReadPreface(bufio.NewReader(c))
-		if err != nil || id != connector || !slices.Equal(roots, tunnels.Roots) ||
-			!slices.Equal(kids, tunnels.Kids) {
-			t.Fatalf("preface %q %v %v: %v", id, roots, kids, err)
+		h, err := rawpipe.ReadPreface(bufio.NewReader(c))
+		if err != nil || h.ConnectorID != connector || !slices.Equal(h.Roots, tunnels.Roots) ||
+			!slices.Equal(h.Kids, tunnels.Kids) {
+			t.Fatalf("preface %+v: %v", h, err)
 		}
 		cc, err := (&http2.Transport{}).NewClientConn(c)
 		if err != nil {
