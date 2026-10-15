@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/logging"
@@ -203,6 +204,16 @@ func startRedaction(ctx context.Context, cfg *config.Config) (*redact.Redactor, 
 			redactor,
 			cfg.ConfigRefreshInterval,
 		)
+		if raw := os.Getenv("TRAVERSAL_CONFIG_KEYS"); err == nil && raw != "" {
+			// Installed keys: only configs Traversal signed for this
+			// connector apply. A bundle that does not parse refuses to start,
+			// rather than running with unsigned configs.
+			keys, keysErr := capability.ParseKeys([]byte(config.DecodePEM(raw)))
+			if keysErr != nil {
+				return nil, fmt.Errorf("TRAVERSAL_CONFIG_KEYS: %w", keysErr)
+			}
+			loader.RequireSignature(cfg.ConnectorID, keys)
+		}
 		if err == nil {
 			err = loader.LoadInitial(ctx)
 		}
