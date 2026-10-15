@@ -37,10 +37,6 @@ connectorID: ""
 # All values left blank fall back to connector built-in defaults.
 envLevel: ""               # ENV_LEVEL: production | development
 proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
-maxTunnelsAllowed: ""      # MAX_TUNNELS_ALLOWED (default 2)
-maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 10)
-reconnectInterval: ""      # RECONNECT_INTERVAL (default 5s)
-maxBackoffDelay: ""        # MAX_BACKOFF_DELAY (default 60s)
 requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
 maxRequestBodySizeMB: ""   # MAX_REQUEST_BODY_SIZE_MB (default 32)
 # Ceilings on an upstream response, both enforced so redaction always scans the
@@ -51,14 +47,13 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
-# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
-# Lets Traversal reach databases, kubectl exec, git and other non-HTTP
-# destinations through this connector, over tunnels to the controller's host
-# on port 443 (TLS ALPN x-traversal-tunnel; a TLS-intercepting proxy breaks
-# them). Each pipe carries a Traversal-signed capability the connector checks
-# before it dials. Needs controllerTLS and a lower-case UUID connectorID.
+# ─── Tunnels and pipes ───────────────────────────────────────────────────────
+# The connector holds tunnels to the controller's host on port 443 (TLS ALPN
+# x-traversal-tunnel; a TLS-intercepting proxy breaks them). Traversal opens a
+# pipe on a tunnel for each destination, carrying a Traversal-signed capability
+# the connector checks before it dials. Needs controllerTLS and a lower-case
+# UUID connectorID, and capability trust: trustedRoots, or capabilityKeys.
 pipes:
-  enabled: false           # TRAVERSAL_PIPES
   # Traversal's capability root certificates (PEM), the current root and,
   # during a root rotation, the next. Rendered together as
   # TRAVERSAL_CAPABILITY_ROOTS. With roots the connector trusts every

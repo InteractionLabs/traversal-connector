@@ -29,8 +29,7 @@ type Tunnels struct {
 	Roots, Kids []string
 
 	up       atomic.Int64
-	downAt   atomic.Int64 // when the last tunnel went down, Unix nanos
-	everUp   atomic.Bool  // a tunnel has been up since start
+	everUp   atomic.Bool // a tunnel has been up since start
 	stopping atomic.Bool
 }
 
@@ -55,8 +54,6 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 	// rather than reset.
 	tunnelCtx, closeTunnels := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
-	// Before any goroutine: Ready reads it from the moment Start returns.
-	t.downAt.Store(time.Now().UnixNano())
 	for range t.Count {
 		go t.hold(tunnelCtx)
 	}
@@ -72,17 +69,16 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 	return done
 }
 
-// Ready reports whether the connector should take pipes. It holds a new
-// connector unready until its first tunnel is up, for at most a minute after
-// start, so a network that blocks tunnels never blocks the legacy transport.
-// Later, tunnels flapping (a controller rollout, a lossy proxy) never make it
-// unready: that shows in connector.raw_tunnels_up instead.
+// Up is how many tunnels are up.
+func (t *Tunnels) Up() int { return int(t.up.Load()) }
+
+// Ready reports whether the connector should take pipes: from its first
+// tunnel on. Later, tunnels flapping (a controller rollout, a lossy proxy)
+// never make it unready, which would restart every replica at once; that
+// shows in connector.raw_tunnels_up instead.
 func (t *Tunnels) Ready(context.Context) (bool, string) {
 	if t.up.Load() > 0 || t.everUp.Load() {
 		return true, ""
-	}
-	if time.Since(time.Unix(0, t.downAt.Load())) > time.Minute {
-		return true, "no tunnel; serving the legacy transport only"
 	}
 	return false, "no tunnel"
 }
@@ -167,7 +163,5 @@ func (t *Tunnels) tracked(delta int64) {
 	if delta > 0 {
 		t.everUp.Store(true)
 	}
-	if t.up.Add(delta) == 0 {
-		t.downAt.Store(time.Now().UnixNano())
-	}
+	t.up.Add(delta)
 }

@@ -469,33 +469,11 @@ func TestTunnelServerLimits(t *testing.T) {
 // controller rollout) does not make the connector unready.
 func TestReadyAfterFirstTunnel(t *testing.T) {
 	tunnels := &Tunnels{}
-	tunnels.downAt.Store(time.Now().UnixNano())
 	if ok, _ := tunnels.Ready(t.Context()); ok {
 		t.Error("ready before any tunnel")
 	}
 	tunnels.everUp.Store(true)
 	if ok, _ := tunnels.Ready(t.Context()); !ok {
 		t.Error("unready after tunnels flapped")
-	}
-}
-
-// TestNotReadyAtStart: a connector is unready from the moment Start returns
-// until a tunnel is up, even before any dial has run.
-func TestNotReadyAtStart(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	unreachable := ln.Addr().String()
-	_ = ln.Close()
-	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Addr: unreachable, TLS: &tls.Config{},
-		Server: &Server{ConnectorID: connector, metrics: testMetrics(t)}}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := tunnels.Start(ctx)
-	ready, _ := tunnels.Ready(ctx)
-	cancel()
-	<-done
-	if ready {
-		t.Fatal("ready with no tunnel, right after Start")
 	}
 }
