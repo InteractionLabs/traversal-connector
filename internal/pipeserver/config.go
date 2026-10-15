@@ -208,6 +208,8 @@ func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
 
 // checkIdentity refuses a certificate the edge controller would refuse, so
 // such a connector keeps to the legacy transport and says why.
+// It applies rawpipe.CheckIdentity, the edge controller's rule, naming the
+// setting and certificate it read.
 func checkIdentity(cert *x509.Certificate, connectorID string) error {
 	if !rawpipe.IsConnectorID(connectorID) {
 		return fmt.Errorf("TRAVERSAL_CONNECTOR_ID %q is not a lower-case UUID", connectorID)
@@ -215,12 +217,8 @@ func checkIdentity(cert *x509.Certificate, connectorID string) error {
 	if cert == nil || len(cert.URIs) != 1 {
 		return errors.New("the client certificate needs exactly one Traversal tenant SPIFFE ID")
 	}
-	_, scoped, ok := rawpipe.TenantID(cert.URIs[0].String())
-	switch {
-	case !ok:
-		return errors.New("the client certificate has no Traversal tenant SPIFFE ID")
-	case scoped != "" && scoped != connectorID:
-		return fmt.Errorf("the client certificate is for connector %s, not %s", scoped, connectorID)
+	if err := rawpipe.CheckIdentity(cert.URIs[0].String(), connectorID); err != nil {
+		return fmt.Errorf("the client certificate: %w", err)
 	}
 	return nil
 }

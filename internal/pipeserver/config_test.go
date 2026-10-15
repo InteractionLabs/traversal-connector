@@ -49,12 +49,10 @@ func connectorConfig(t *testing.T, spiffeID string) *config.Config {
 	}
 }
 
-func keysPEM(t *testing.T) string {
-	t.Helper()
-	der, _ := x509.MarshalPKIXPublicKey(&capabilitytest.Key("config").PublicKey)
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY",
-		Headers: map[string]string{"Key-ID": "k1"}, Bytes: der}))
-}
+// keysPEM pins capabilitytest.Key("config") as k1.
+var keysPEM = string(capabilitytest.KeysPEM(map[string]*ecdsa.PublicKey{
+	"k1": &capabilitytest.Key("config").PublicKey,
+}))
 
 func TestNew(t *testing.T) {
 	orgScoped := "spiffe://traversal.com/tenant/" + org + "/acme"
@@ -106,7 +104,7 @@ func TestNew(t *testing.T) {
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
 			wantErr: "is for connector"},
 		{name: "not a tenant certificate", spiffeID: "spiffe://traversal.com/processor/x",
-			wantErr: "no Traversal tenant SPIFFE ID"},
+			wantErr: "is not a tenant SPIFFE ID"},
 		{name: "upper-case connector ID", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { c.ConnectorID = strings.ToUpper(c.ConnectorID) }, wantErr: "lower-case UUID"},
 		{name: "http controller", spiffeID: orgScoped,
@@ -122,11 +120,11 @@ func TestNew(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
-			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
+			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
 			for k, v := range c.env {
 				switch v {
 				case "b64":
-					v = base64Of(keysPEM(t))
+					v = base64Of(keysPEM)
 				case "roots":
 					v = rootPEM(testRoot(t))
 				case "b64 roots":
@@ -171,7 +169,7 @@ func TestTunnelTLS(t *testing.T) {
 	cfg := connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme")
 	cfg.TLSCA = &ca
 	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
-	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
+	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
 	tunnels, err := New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -201,24 +199,14 @@ func forbidden(tunnels *Tunnels, host string) rawpipe.Reason {
 	return ""
 }
 
-var (
-	rootKey = capabilitytest.Key("config root")
-	envKey  = capabilitytest.Key("config environment")
-)
+var envKey = capabilitytest.Key("config environment")
 
 func testRoot(t *testing.T) *capabilitytest.Root {
 	t.Helper()
-	now := time.Now()
-	root, err := capabilitytest.NewRoot(rootKey, now.Add(-time.Hour), now.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
+	return capabilitytest.ValidRoot(t, "config root")
 }
 
-func rootPEM(root *capabilitytest.Root) string {
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.DER}))
-}
+func rootPEM(root *capabilitytest.Root) string { return string(capabilitytest.RootsPEM(root)) }
 
 // TestRootsVerifyForTheControllerHost: with TRAVERSAL_CAPABILITY_ROOTS alone,
 // the connector trusts a capability whose environment certificate names the
@@ -237,20 +225,9 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 		t.Fatalf("reported trust: roots %v kids %v", tunnels.Roots, tunnels.Kids)
 	}
 	for host, want := range map[string]bool{"edge.example.com": true, "edge.other.com": false} {
-		cert, err := root.Issue(capabilitytest.EnvironmentCert{
-			Key: &envKey.PublicKey, Issuer: capability.IssuerURIPrefix + "test",
-			Hosts: []string{host}, NotBefore: time.Now().Add(-time.Minute),
-			NotAfter: time.Now().Add(time.Hour),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
 		claims := capabilitytest.Claims(capability.IssuerPrefix+"test", connector,
 			"db.internal", 5432)
-		token, err := capability.SignChained(envKey, "env", [][]byte{cert}, claims)
-		if err != nil {
-			t.Fatal(err)
-		}
+		token := capabilitytest.Chained(t, root, envKey, "env", host, claims)
 		_, err = tunnels.Server.Verifier.Verify(token, connector, "db.internal", 5432)
 		if (err == nil) != want {
 			t.Errorf("certificate for %s: %v, want accepted %v", host, err, want)
@@ -269,7 +246,7 @@ func TestNewVerifierBundleErrors(t *testing.T) {
 	} {
 		t.Run(setting, func(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
-			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM(t))
+			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
 			t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(testRoot(t)))
 			t.Setenv(setting, base64Of("junk"))
 			_, _, err := newVerifier("https://edge.example.com")

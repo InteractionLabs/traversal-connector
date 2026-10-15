@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,7 +48,9 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	// Before any goroutine: Ready reads it from the moment Start returns.
 	t.downAt.Store(time.Now().UnixNano())
-	go t.run(transport)
+	for range t.Count {
+		go t.hold(transport)
+	}
 	go func() {
 		defer close(done)
 		<-ctx.Done()
@@ -60,14 +61,6 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 		closeTunnels()
 	}()
 	return done
-}
-
-func (t *Tunnels) run(ctx context.Context) {
-	var wg sync.WaitGroup
-	for range t.Count {
-		wg.Go(func() { t.hold(ctx) })
-	}
-	wg.Wait()
 }
 
 // Ready reports whether the connector should take pipes. It holds a new
@@ -156,7 +149,7 @@ func (t *Tunnels) serveOne(ctx context.Context) error {
 }
 
 func (t *Tunnels) tracked(delta int64) {
-	t.Server.metrics.tunnel(delta)
+	t.Server.metrics.tunnelsUp.Add(context.Background(), delta)
 	if delta > 0 {
 		t.everUp.Store(true)
 	}
