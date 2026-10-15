@@ -233,6 +233,13 @@ const (
 	HeaderNodeID = "X-Node-Id"
 )
 
+// HeaderUpstreamScheme is the scheme, http or https, of an HTTP/2 request the
+// Integration Proxy sends inside a pipe. HTTP/2's :scheme is not visible to a
+// net/http handler, and the pipe's own TLS says nothing about the
+// destination's, so the proxy sets this on every HTTP/2 request; the
+// connector treats it as https when absent and does not forward it.
+const HeaderUpstreamScheme = "X-Traversal-Upstream-Scheme"
+
 // HeaderPeerURISAN is the URI SAN of the connector certificate the edge
 // gateway verified (Envoy's %DOWNSTREAM_PEER_URI_SAN%), on the CONNECT stream
 // that carries a tunnel from the gateway to the edge controller.
