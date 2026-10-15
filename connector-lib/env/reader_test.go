@@ -48,16 +48,14 @@ func TestReader(t *testing.T) {
 			}
 		}
 	}
-}
-
-func TestReaderCollects(t *testing.T) {
-	t.Setenv("R_A", "x")
-	t.Setenv("R_B", "maybe")
-	var r env.Reader
-	r.Int("R_A", 1, 2)
-	r.Bool("R_B", false)
-	if err := r.Err(); !strings.Contains(err.Error(), "R_A") ||
-		!strings.Contains(err.Error(), "R_B") {
+	// Every invalid setting is reported at once, not only the first.
+	t.Setenv("R_INT", "x")
+	t.Setenv("R_BOOL", "maybe")
+	var all env.Reader
+	all.Int("R_INT", 1, 2)
+	all.Bool("R_BOOL", false)
+	if err := all.Err(); err == nil || !strings.Contains(err.Error(), "R_INT") ||
+		!strings.Contains(err.Error(), "R_BOOL") {
 		t.Fatalf("Err = %v, want both", err)
 	}
 }
