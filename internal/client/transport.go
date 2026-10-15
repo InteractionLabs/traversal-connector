@@ -88,6 +88,9 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
 		HTTP2:           h2Config(),
+		// Config fetches are short requests: a controller that accepts the
+		// request but never answers fails well inside the client's 15s Timeout.
+		ResponseHeaderTimeout: 10 * time.Second,
 	}
 	transport.Protocols = new(http.Protocols)
 	transport.Protocols.SetHTTP1(true)
