@@ -94,6 +94,9 @@ func TestConfigHTTPClientMTLSAndRouting(t *testing.T) {
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
+			if resp.ProtoMajor != 2 {
+				t.Fatalf("controller connection is %s, want HTTP/2", resp.Proto)
+			}
 			if resp.StatusCode != 200 || !sawClient.Load() ||
 				(mode == "proxy" && !sawProxy.Load()) {
 				t.Fatal("config fetch did not use the expected mTLS/proxy transport")

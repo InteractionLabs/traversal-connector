@@ -20,7 +20,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace/noop"
-	"golang.org/x/net/http2"
 
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1/connectorconnect"
@@ -188,9 +187,7 @@ func TestNewTransport_NoProxy(t *testing.T) {
 		t.Fatalf("newTransport() error: %v", err)
 	}
 
-	if _, ok := transport.(*http2.Transport); !ok {
-		t.Errorf("expected *http2.Transport for no proxy, got %T", transport)
-	}
+	assertH2C(t, transport)
 }
 
 func TestNewClient_H2COverridePreservesLogicalAuthorityAndPath(t *testing.T) {
@@ -332,9 +329,7 @@ func TestNewTransport_InvalidProxyURL(t *testing.T) {
 	}
 
 	// http URL → h2c regardless of proxy validity.
-	if _, ok := transport.(*http2.Transport); !ok {
-		t.Errorf("expected *http2.Transport for http URL, got %T", transport)
-	}
+	assertH2C(t, transport)
 }
 
 type fixedBodyController struct {
@@ -616,5 +611,18 @@ func TestHandleMessage_UnknownMessage_ReturnsErrorResponse(t *testing.T) {
 	}
 	if errResp.Code == "" {
 		t.Error("expected non-empty error code")
+	}
+}
+
+// assertH2C checks transport speaks only HTTP/2 cleartext, the http:// controller
+// transport.
+func assertH2C(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	tr, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", transport)
+	}
+	if p := tr.Protocols; p == nil || !p.UnencryptedHTTP2() || p.HTTP1() || p.HTTP2() {
+		t.Errorf("protocols %v, want only unencrypted HTTP/2", p)
 	}
 }
