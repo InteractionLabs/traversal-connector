@@ -124,7 +124,9 @@ func (t *Tunnels) serveOne(ctx context.Context) error {
 		_ = c.Close()
 		return fmt.Errorf("%s did not accept the tunnel protocol", t.Addr)
 	}
-	if err := rawpipe.WritePreface(c, t.ConnectorID, t.Roots, t.Kids); err != nil {
+	if err := rawpipe.WritePreface(c, rawpipe.Hello{
+		ConnectorID: t.ConnectorID, Roots: t.Roots, Kids: t.Kids,
+	}); err != nil {
 		_ = c.Close()
 		return err
 	}
