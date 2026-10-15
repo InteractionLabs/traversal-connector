@@ -99,6 +99,13 @@ type Refusal struct {
 
 func (r *Refusal) Error() string { return fmt.Sprintf("refused: %d %s", r.Status, r.Reason) }
 
+// IsNoTunnel reports whether r is an edge controller replica's answer that it
+// holds no tunnel for the connector: 503 with no reason, which a caller
+// answers by trying another replica.
+func IsNoTunnel(r *Refusal) bool {
+	return r != nil && r.Reason == "" && r.Status == http.StatusServiceUnavailable
+}
+
 // Connect sends CONNECT authority through rt to addr. The open is bounded by
 // timeout; the stream it returns lives until Close or Abort. Any answer but
 // 200 is a *Refusal.
@@ -122,10 +129,10 @@ func Connect(ctx context.Context, rt http.RoundTripper, addr, authority string, 
 	case resp.StatusCode != http.StatusOK:
 		_ = resp.Body.Close()
 		// An unknown reason from the peer becomes Other, keeping label sets
-		// and switches closed.
+		// and switches closed; none at all is IsNoTunnel's answer.
 		reason := Reason(resp.Header.Get(HeaderReason))
-		if reason != "" && !reason.Known() {
-			reason = Other
+		if reason != "" {
+			reason = reason.Label()
 		}
 		err = &Refusal{resp.StatusCode, reason}
 	default:

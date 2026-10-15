@@ -4,6 +4,7 @@
 package rawpipe
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -108,6 +109,31 @@ func ParsePreface(line string) (connectorID string, roots, kids []string, ok boo
 	return fields[1], roots, kids, true
 }
 
+// ErrPreface is a preface line ReadPreface refused: over MaxPrefaceLen, or
+// one ParsePreface does not read. Its other errors are the reader's.
+var ErrPreface = errors.New("rawpipe: bad preface")
+
+// ReadPreface reads a preface line from r a byte at a time, so a peer that
+// sends more than MaxPrefaceLen bytes, its newline included, is refused before
+// the line is buffered, and leaves what follows it in r.
+func ReadPreface(r *bufio.Reader) (connectorID string, roots, kids []string, err error) {
+	var line []byte
+	for len(line) < MaxPrefaceLen {
+		b, err := r.ReadByte()
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if line = append(line, b); b == '\n' {
+			connectorID, roots, kids, ok := ParsePreface(string(line))
+			if !ok {
+				return "", nil, nil, fmt.Errorf("%w: %q", ErrPreface, line)
+			}
+			return connectorID, roots, kids, nil
+		}
+	}
+	return "", nil, nil, fmt.Errorf("%w: longer than %d bytes", ErrPreface, MaxPrefaceLen)
+}
+
 // prefaceValue reports whether v can stand in a preface list: printable
 // ASCII, neither a space nor a comma.
 func prefaceValue(v string) bool {
@@ -154,6 +180,15 @@ func (r Reason) Known() bool {
 		return true
 	}
 	return false
+}
+
+// Label is r for a known reason, else Other: the value metrics and the proxy
+// report, so a peer's answer never widens a closed set.
+func (r Reason) Label() Reason {
+	if r.Known() {
+		return r
+	}
+	return Other
 }
 
 // Headers on a CONNECT between Traversal and the connector.
@@ -235,4 +270,21 @@ func TenantID(uri string) (org, connector string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], connector, true
+}
+
+// CheckIdentity reports whether a connector certificate whose URI SAN is
+// uriSAN may hold tunnels for connectorID: the SAN is a tenant SPIFFE ID
+// (TenantID), and a connector-scoped one names connectorID.
+func CheckIdentity(uriSAN, connectorID string) error {
+	if !IsConnectorID(connectorID) {
+		return fmt.Errorf("rawpipe: %q is not a connector ID", connectorID)
+	}
+	_, scoped, ok := TenantID(uriSAN)
+	switch {
+	case !ok:
+		return fmt.Errorf("rawpipe: %q is not a tenant SPIFFE ID", uriSAN)
+	case scoped != "" && scoped != connectorID:
+		return fmt.Errorf("rawpipe: the identity is for connector %s, not %s", scoped, connectorID)
+	}
+	return nil
 }

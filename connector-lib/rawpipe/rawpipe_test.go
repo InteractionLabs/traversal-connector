@@ -1,7 +1,10 @@
 package rawpipe_test
 
 import (
+	"bufio"
+	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -95,6 +98,89 @@ func TestPreface(t *testing.T) {
 	} {
 		if _, _, _, ok := rawpipe.ParsePreface(line); ok {
 			t.Errorf("ParsePreface(%q) accepted", line)
+		}
+	}
+}
+
+// TestReadPreface: a line at the cap, its newline included, is read and
+// what follows it left; one byte more, or a line ParsePreface refuses, is
+// ErrPreface; a reader that fails first is not.
+func TestReadPreface(t *testing.T) {
+	const conn = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
+	line := rawpipe.Preface + " " + conn + " kids=k1\n"
+	r := bufio.NewReader(strings.NewReader(line + "rest"))
+	if id, _, kids, err := rawpipe.ReadPreface(r); err != nil || id != conn ||
+		strings.Join(kids, ",") != "k1" {
+		t.Fatalf("ReadPreface = %q %v %v", id, kids, err)
+	}
+	if rest, _ := io.ReadAll(r); string(rest) != "rest" {
+		t.Fatalf("left %q, want the bytes after the preface", rest)
+	}
+	// An unknown field pads the line to exactly the cap.
+	prefix := rawpipe.Preface + " " + conn + " pad="
+	pad := func(n int) string { return prefix + strings.Repeat("x", n-len(prefix)-1) + "\n" }
+	exact := pad(rawpipe.MaxPrefaceLen)
+	if _, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(exact))); err != nil {
+		t.Fatalf("at the cap: %v", err)
+	}
+	for name, in := range map[string]string{
+		"over the cap": pad(rawpipe.MaxPrefaceLen + 1),
+		"bad preface":  rawpipe.Preface + " not-a-connector\n",
+	} {
+		_, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(in)))
+		if !errors.Is(err, rawpipe.ErrPreface) {
+			t.Errorf("%s: %v, want ErrPreface", name, err)
+		}
+	}
+	_, _, _, err := rawpipe.ReadPreface(bufio.NewReader(strings.NewReader(rawpipe.Preface)))
+	if !errors.Is(err, io.EOF) || errors.Is(err, rawpipe.ErrPreface) {
+		t.Errorf("cut short: %v, want EOF", err)
+	}
+}
+
+func TestCheckIdentity(t *testing.T) {
+	const org, conn = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d", "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
+	other := strings.Replace(conn, "6", "7", 1)
+	tenant := "spiffe://traversal.com/tenant/" + org + "/acme"
+	for san, id := range map[string]string{tenant: conn, tenant + "/connector/" + conn: conn} {
+		if err := rawpipe.CheckIdentity(san, id); err != nil {
+			t.Errorf("CheckIdentity(%q, %q): %v", san, id, err)
+		}
+	}
+	for name, c := range map[string][2]string{
+		"another connector's":   {tenant + "/connector/" + other, conn},
+		"not a tenant":          {"spiffe://traversal.com/processor/x", conn},
+		"no SAN":                {"", conn},
+		"upper-case connector":  {tenant, strings.ToUpper(conn)},
+		"connector ID not UUID": {tenant, "c1"},
+	} {
+		if err := rawpipe.CheckIdentity(c[0], c[1]); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestLabel(t *testing.T) {
+	for r, want := range map[rawpipe.Reason]rawpipe.Reason{
+		rawpipe.DialFailed: rawpipe.DialFailed, "made_up": rawpipe.Other, "": rawpipe.Other,
+		rawpipe.Other: rawpipe.Other,
+	} {
+		if got := r.Label(); got != want {
+			t.Errorf("%q.Label() = %q, want %q", r, got, want)
+		}
+	}
+}
+
+func TestIsNoTunnel(t *testing.T) {
+	for r, want := range map[*rawpipe.Refusal]bool{
+		{Status: http.StatusServiceUnavailable}:                           true,
+		{Status: http.StatusServiceUnavailable, Reason: rawpipe.NoTunnel}: false,
+		{Status: http.StatusServiceUnavailable, Reason: rawpipe.Capacity}: false,
+		{Status: http.StatusBadGateway}:                                   false,
+		nil:                                                               false,
+	} {
+		if got := rawpipe.IsNoTunnel(r); got != want {
+			t.Errorf("IsNoTunnel(%+v) = %v", r, got)
 		}
 	}
 }
