@@ -3,14 +3,19 @@
 package capabilitytest
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
+	"maps"
 	"math/big"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,4 +124,63 @@ func (r *Root) Issue(spec EnvironmentCert) ([]byte, error) {
 		tmpl.URIs = []*url.URL{u}
 	}
 	return x509.CreateCertificate(rand.Reader, tmpl, r.Certificate, spec.Key, r.key)
+}
+
+// KeysPEM is keys as the bundle capability.ParseKeys reads: one PUBLIC KEY
+// block per kid, in kid order.
+func KeysPEM(keys map[string]*ecdsa.PublicKey) []byte {
+	var b bytes.Buffer
+	for _, kid := range slices.Sorted(maps.Keys(keys)) {
+		der, err := x509.MarshalPKIXPublicKey(keys[kid])
+		if err != nil {
+			panic(err)
+		}
+		_ = pem.Encode(&b, &pem.Block{
+			Type: "PUBLIC KEY", Headers: map[string]string{"Key-ID": kid}, Bytes: der,
+		})
+	}
+	return b.Bytes()
+}
+
+// RootsPEM is roots as the bundle capability.ParseRootsPEM reads, in order.
+func RootsPEM(roots ...*Root) []byte {
+	var b bytes.Buffer
+	for _, r := range roots {
+		_ = pem.Encode(&b, &pem.Block{Type: "CERTIFICATE", Bytes: r.DER})
+	}
+	return b.Bytes()
+}
+
+// ValidRoot is a root for Key(seed), valid from an hour ago for a day.
+func ValidRoot(tb testing.TB, seed string) *Root {
+	tb.Helper()
+	now := time.Now()
+	root, err := NewRoot(Key(seed), now.Add(-time.Hour), now.Add(24*time.Hour))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return root
+}
+
+// Chained is c signed by key under kid, chained to an environment
+// certificate from root for key. The certificate names host and the issuer
+// URI SAN of c's environment, and is valid for the hour around now.
+func Chained(
+	tb testing.TB, root *Root, key *ecdsa.PrivateKey, kid, host string, c capability.Claims,
+) string {
+	tb.Helper()
+	now := time.Now()
+	der, err := root.Issue(EnvironmentCert{
+		Key:    &key.PublicKey,
+		Issuer: capability.IssuerURIPrefix + strings.TrimPrefix(c.Issuer, capability.IssuerPrefix),
+		Hosts:  []string{host}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+	})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	token, err := capability.SignChained(key, kid, [][]byte{der}, c)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return token
 }
