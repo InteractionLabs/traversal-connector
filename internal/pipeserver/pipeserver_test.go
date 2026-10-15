@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
@@ -71,7 +69,7 @@ func testMetrics(t *testing.T) *metrics {
 // controller listens for a tunnel and points tunnels at itself. accept takes
 // the tunnel, checks its preface reports the tunnels' connector and trust,
 // and returns an HTTP/2 client on it, as the edge controller does.
-func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn) {
+func controller(t *testing.T, tunnels *Tunnels) (accept func() *http.ClientConn) {
 	srv := httptest.NewTLSServer(nil)
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
@@ -88,7 +86,7 @@ func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn
 		ServerName: "example.com",
 		NextProtos: []string{rawpipe.ALPN},
 	}
-	return func() *http2.ClientConn {
+	return func() *http.ClientConn {
 		c, err := ln.Accept()
 		if err != nil {
 			t.Fatal(err)
@@ -98,12 +96,23 @@ func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn
 			!slices.Equal(h.Kids, tunnels.Kids) {
 			t.Fatalf("preface %+v: %v", h, err)
 		}
-		cc, err := (&http2.Transport{}).NewClientConn(c)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return cc
+		return h2Client(t, c)
 	}
+}
+
+// h2Client is an HTTP/2 client with prior knowledge on c, as the edge
+// controller speaks on a tunnel.
+func h2Client(t *testing.T, c net.Conn) *http.ClientConn {
+	t.Helper()
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{Protocols: protocols,
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return c, nil }}
+	cc, err := tr.NewClientConn(t.Context(), "http", "tunnel:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cc
 }
 
 // open opens a pipe, sending body and then closing the caller's end once
@@ -111,7 +120,7 @@ func controller(t *testing.T, tunnels *Tunnels) (accept func() *http2.ClientConn
 // destination's bytes.
 func open(
 	t *testing.T,
-	cc *http2.ClientConn,
+	cc *http.ClientConn,
 	token, body string,
 	hold <-chan struct{},
 ) (int, string, io.ReadCloser) {
@@ -214,9 +223,9 @@ func TestRedial(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	tunnels.Start(ctx)
-	next := func(within time.Duration) *http2.ClientConn {
+	next := func(within time.Duration) *http.ClientConn {
 		t.Helper()
-		got := make(chan *http2.ClientConn, 1)
+		got := make(chan *http.ClientConn, 1)
 		go func() { got <- accept() }()
 		select {
 		case cc := <-got:
@@ -237,7 +246,7 @@ func TestRedial(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	next(500 * time.Millisecond) // the replacement comes without backoff
-	if !second.CanTakeNewRequest() {
+	if second.Available() == 0 {
 		t.Error("the replaced tunnel closed before the edge controller closed it")
 	}
 }
@@ -267,11 +276,11 @@ func TestTunnelServerLimits(t *testing.T) {
 	if h.MaxConcurrentStreams < 2000 || h.MaxConcurrentStreams > 2100 {
 		t.Errorf("MaxConcurrentStreams = %d for 4000 pipes over 2 tunnels", h.MaxConcurrentStreams)
 	}
-	if h.ReadIdleTimeout == 0 || h.PingTimeout == 0 {
+	if h.SendPingTimeout == 0 || h.PingTimeout == 0 {
 		t.Error("no read-idle ping: a tunnel to a dead controller would be held forever")
 	}
-	if h.MaxUploadBufferPerStream > 1<<20 {
-		t.Errorf("per-stream window %d: a stalled pipe holds too much", h.MaxUploadBufferPerStream)
+	if h.MaxReceiveBufferPerStream > 1<<20 {
+		t.Errorf("per-stream window %d: a stalled pipe holds too much", h.MaxReceiveBufferPerStream)
 	}
 }
 

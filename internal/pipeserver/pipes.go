@@ -12,8 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
@@ -31,28 +29,59 @@ const (
 	// the connector then redials instead of holding a tunnel to nowhere.
 	pingAfter   = 45 * time.Second
 	pingTimeout = 15 * time.Second
+	// prefaceTimeout bounds the wait for the edge controller's HTTP/2 preface
+	// on a new tunnel; net/http clears the deadline once HTTP/2 starts.
+	prefaceTimeout = 15 * time.Second
 )
 
-// h2 is the tunnel's HTTP/2 server. Its stream limit is the connector's pipe
-// limit per tunnel, so a pipe over it is refused as capacity rather than
-// queued into open_timeout.
-func (s *Server) h2(tunnels int) *http2.Server {
-	perTunnel := max(1, (s.MaxPipes+int64(tunnels)-1)/int64(tunnels))
-	return &http2.Server{
+// h2 is the tunnel's HTTP/2 configuration. Its stream limit is the
+// connector's pipe limit per tunnel, so a pipe over it is refused as capacity
+// rather than queued into open_timeout.
+func (s *Server) h2(tunnels int) *http.HTTP2Config {
+	perTunnel := max(1, (int(s.MaxPipes)+tunnels-1)/tunnels)
+	return &http.HTTP2Config{
 		// Headroom for drain requests and refusals.
-		MaxConcurrentStreams:         clamp32[uint32](perTunnel+16, 1<<20),
-		MaxUploadBufferPerStream:     streamWindow,
-		MaxUploadBufferPerConnection: clamp32[int32](perTunnel*streamWindow, 1<<30),
-		MaxReadFrameSize:             256 << 10,
-		ReadIdleTimeout:              pingAfter,
-		PingTimeout:                  pingTimeout,
+		MaxConcurrentStreams:          min(perTunnel+16, 1<<20),
+		MaxReceiveBufferPerStream:     streamWindow,
+		MaxReceiveBufferPerConnection: min(perTunnel*streamWindow, 1<<30),
+		MaxReadFrameSize:              256 << 10,
+		SendPingTimeout:               pingAfter,
+		PingTimeout:                   pingTimeout,
 	}
 }
 
-// clamp32 is n capped at limit, converted to a 32-bit type limit fits.
-func clamp32[T int32 | uint32](n, limit int64) T {
-	return T(min(max(n, 0), limit)) //nolint:gosec // limit fits T at every call
+// serveOn serves srv on c alone until c closes: net/http serves only
+// connections a Listener accepts, and the connector dials its tunnels.
+func serveOn(srv *http.Server, c net.Conn) {
+	closed := make(chan struct{})
+	var once sync.Once
+	srv.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed || state == http.StateHijacked {
+			once.Do(func() { close(closed) })
+		}
+	}
+	_ = srv.Serve(&oneConn{conn: c, done: closed})
 }
+
+// oneConn is a Listener that accepts conn once, then blocks until done.
+type oneConn struct {
+	conn net.Conn
+	done <-chan struct{}
+	once sync.Once
+}
+
+func (l *oneConn) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() { c = l.conn })
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+func (l *oneConn) Close() error   { return nil }
+func (l *oneConn) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Server serves pipes on tunnels.
 type Server struct {
@@ -81,19 +110,25 @@ type Server struct {
 }
 
 // ServeConn serves pipes on one tunnel until it closes. drained runs once if
-// the edge controller asks for a replacement tunnel. It is x/net/http2's
-// ServeConn because net/http serves only connections a Listener accepts, and
-// the connector dials its tunnels.
+// the edge controller asks for a replacement tunnel. The tunnel is HTTP/2
+// with prior knowledge inside TLS whose ALPN is rawpipe.ALPN, not h2; net/http
+// would serve a *tls.Conn by its ALPN, so it gets nc without its TLS state.
 func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	var once sync.Once
-	s.h2(max(1, s.Tunnels)).ServeConn(nc, &http2.ServeConnOpts{Handler: http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	serveOn(&http.Server{
+		Protocols:         protocols,
+		HTTP2:             s.h2(max(1, s.Tunnels)),
+		ReadHeaderTimeout: prefaceTimeout,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == rawpipe.DrainMethod {
 				once.Do(drained)
 				return
 			}
 			s.serve(w, r)
-		})})
+		}),
+	}, struct{ net.Conn }{nc})
 }
 
 // Drain refuses new pipes with connector_draining and waits, until ctx is
