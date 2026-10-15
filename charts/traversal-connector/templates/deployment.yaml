@@ -253,6 +253,10 @@ spec:
               value: "true"
             - name: TRAVERSAL_CONFIG_REFRESH_INTERVAL
               value: {{ $.Values.configUpdates.refreshInterval | quote }}
+            {{- with .Values.configUpdates.signingKeys }}
+            - name: TRAVERSAL_CONFIG_KEYS
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if $redactionEnabled }}
             - name: REDACTION_RULES_FILE

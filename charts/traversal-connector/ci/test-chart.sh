@@ -223,6 +223,13 @@ render raw-roots-rotation "$fixtures/direct-export-values.yaml" \
 [[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
 
+# Config signing keys reach the connector only with OTA on.
+render config-signed "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true \
+  --set-string configUpdates.signingKeys=a2V5cw==
+assert_contains "$tmp_dir/config-signed.yaml" "$(printf '            - name: TRAVERSAL_CONFIG_KEYS\n              value: "a2V5cw=="')"
+render config-unsigned "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true
+assert_not_contains "$tmp_dir/config-unsigned.yaml" 'TRAVERSAL_CONFIG_KEYS'
+
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'
