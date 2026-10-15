@@ -18,8 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
@@ -59,11 +57,6 @@ func (s *Server) h2() *http.HTTP2Config {
 		SendPingTimeout:               pingAfter,
 		PingTimeout:                   pingTimeout,
 	}
-}
-
-// clamp32 is n capped at limit, converted to a 32-bit type limit fits.
-func clamp32[T int32 | uint32](n, limit int64) T {
-	return T(min(max(n, 0), limit)) //nolint:gosec // limit fits T at every call
 }
 
 // Inner bounds the HTTP/2 inside one pipe. It nests in the tunnel stream's
@@ -203,29 +196,28 @@ func (s *Server) intercept(ctx context.Context, conn *halfconn.StreamConn, targe
 		slog.Info("pipe TLS failed", "error", err)
 		return "", halfconn.CallerAborted
 	}
-	// Neither server ends its connection when its context does.
+	// The server does not end its connection when its context does.
 	defer context.AfterFunc(ctx, func() { _ = tc.Close() })()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.request(w, r, target)
-	})
-	proto := tc.ConnectionState().NegotiatedProtocol
-	switch proto {
-	case rawpipe.ALPNH2:
-		(&http2.Server{
-			MaxConcurrentStreams:         clamp32[uint32](int64(s.Inner.MaxStreams), 1<<20),
-			MaxUploadBufferPerStream:     clamp32[int32](int64(s.Inner.StreamWindow), 1<<30),
-			MaxUploadBufferPerConnection: clamp32[int32](int64(s.Inner.ConnectionWindow), 1<<30),
-			IdleTimeout:                  s.Inner.IdleTimeout,
-		}).ServeConn(tc, &http2.ServeConnOpts{Context: ctx, Handler: handler})
-	default:
-		srv := &http.Server{
-			Handler:           handler,
-			ReadHeaderTimeout: handshakeTimeout,
-			IdleTimeout:       s.Inner.IdleTimeout,
-			BaseContext:       func(net.Listener) context.Context { return ctx },
-		}
-		_ = srv.Serve(&oneConn{conn: tc, done: conn.Closed()})
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.request(w, r, target)
+		}),
+		Protocols: protocols,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams:          min(s.Inner.MaxStreams, 1<<20),
+			MaxReceiveBufferPerStream:     min(s.Inner.StreamWindow, 1<<30),
+			MaxReceiveBufferPerConnection: min(s.Inner.ConnectionWindow, 1<<30),
+		},
+		ReadHeaderTimeout: handshakeTimeout,
+		IdleTimeout:       s.Inner.IdleTimeout,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
+	// net/http serves HTTP/2 or HTTP/1.1 by the ALPN the handshake chose.
+	_ = srv.Serve(&oneConn{conn: tc, done: conn.Closed()})
+	proto := tc.ConnectionState().NegotiatedProtocol
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return proto, halfconn.Limit
 	}
@@ -240,12 +232,12 @@ func (s *Server) request(w http.ResponseWriter, r *http.Request, pipe *url.URL) 
 		upstream.Refuse(w, rawpipe.ProtocolError, "CONNECT is not carried inside a pipe")
 		return
 	}
-	scheme, authority, ok := requestTarget(r)
-	if !ok {
-		upstream.Refuse(w, rawpipe.ProtocolError,
-			"HTTP/1.1 requests in a pipe are in absolute form (GET https://host/path)")
+	scheme, authority, err := requestTarget(r)
+	if err != nil {
+		upstream.Refuse(w, rawpipe.ProtocolError, err.Error())
 		return
 	}
+	r.Header.Del(rawpipe.HeaderUpstreamScheme)
 	if authority != pipe.Host {
 		upstream.Refuse(
 			w,
@@ -265,20 +257,11 @@ func (s *Server) request(w http.ResponseWriter, r *http.Request, pipe *url.URL) 
 	s.Upstream.Forward(w, r, &url.URL{Scheme: scheme, Host: pipe.Host})
 }
 
-// requestTarget is r's scheme and canonical host:port. On h2 the scheme is
-// :scheme, which net/http keeps only as whether r.TLS is set. On HTTP/1.1 it
-// is the absolute-form target's, and net/http takes r.Host from it; origin
-// form names no scheme, so it is refused rather than guessed.
-func requestTarget(r *http.Request) (scheme, authority string, ok bool) {
-	switch {
-	case r.ProtoMajor == 2 && r.TLS != nil:
-		scheme = "https"
-	case r.ProtoMajor == 2:
-		scheme = "http"
-	case r.URL.Scheme == "http" || r.URL.Scheme == "https":
-		scheme = r.URL.Scheme
-	default:
-		return "", "", false
+// requestTarget is r's scheme and canonical host:port.
+func requestTarget(r *http.Request) (scheme, authority string, err error) {
+	scheme, err = requestScheme(r)
+	if err != nil {
+		return "", "", err
 	}
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
@@ -290,7 +273,29 @@ func requestTarget(r *http.Request) (scheme, authority string, ok bool) {
 	if c, ok := capability.Canonical(host); ok {
 		host = c
 	}
-	return scheme, net.JoinHostPort(host, port), true
+	return scheme, net.JoinHostPort(host, port), nil
+}
+
+// requestScheme is the destination's scheme for r. On HTTP/2 it is
+// rawpipe.HeaderUpstreamScheme, https when absent: net/http does not show a
+// handler :scheme, and r.TLS is the pipe's own TLS, not the destination's.
+// On HTTP/1.1 it is the absolute-form target's; origin form names no scheme,
+// so it is refused rather than guessed.
+func requestScheme(r *http.Request) (string, error) {
+	if r.ProtoMajor == 2 {
+		switch v := r.Header.Get(rawpipe.HeaderUpstreamScheme); v {
+		case "":
+			return "https", nil
+		case "http", "https":
+			return v, nil
+		}
+		return "", errors.New(rawpipe.HeaderUpstreamScheme + " is http or https")
+	}
+	if r.URL.Scheme == "http" || r.URL.Scheme == "https" {
+		return r.URL.Scheme, nil
+	}
+	return "", errors.New(
+		"HTTP/1.1 requests in a pipe are in absolute form (GET https://host/path)")
 }
 
 // oneConn is a Listener that accepts conn once, then blocks until done, so

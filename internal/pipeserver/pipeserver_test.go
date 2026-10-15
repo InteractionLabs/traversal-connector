@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
@@ -131,26 +130,47 @@ func (h *harness) open(authority string, tlsCfg *tls.Config) (*tls.Conn, error) 
 }
 
 // client is an HTTP client whose every connection is a new pipe to
-// authority: h2 with :scheme from the URL, or HTTP/1.1 in absolute form, as
-// a forward proxy client sends it.
+// authority: h2 naming the URL's scheme in rawpipe.HeaderUpstreamScheme, or
+// HTTP/1.1 in absolute form, as a forward proxy client sends it.
 func (h *harness) client(authority string, http1 bool) *http.Client {
-	open := func(context.Context, string, string) (net.Conn, error) {
-		cfg := rawpipe.PipeClientTLS(h.tenant.Pool(), org, connector)
-		if http1 {
-			cfg.NextProtos = []string{rawpipe.ALPNHTTP1}
-		}
-		return h.open(authority, cfg)
-	}
 	if http1 {
 		return &http.Client{Transport: &http.Transport{
-			Proxy:       http.ProxyURL(&url.URL{Scheme: "http", Host: "pipe"}),
-			DialContext: open,
+			Proxy: http.ProxyURL(&url.URL{Scheme: "http", Host: "pipe"}),
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				cfg := rawpipe.PipeClientTLS(h.tenant.Pool(), org, connector)
+				cfg.NextProtos = []string{rawpipe.ALPNHTTP1}
+				return h.open(authority, cfg)
+			},
 		}}
 	}
-	return &http.Client{Transport: &http2.Transport{AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, n, a string, _ *tls.Config) (net.Conn, error) {
-			return open(ctx, n, a)
-		}}}
+	return &http.Client{Transport: upstreamScheme{h.h2(authority)}}
+}
+
+// h2 is an HTTP/2 transport whose every connection is a new pipe to
+// authority, for http:// and https:// URLs alike: the URL's scheme is the
+// destination's, and the pipe's TLS is the same either way.
+func (h *harness) h2(authority string) *http.Transport {
+	open := func(context.Context, string, string) (net.Conn, error) {
+		tc, err := h.open(authority, nil)
+		if err != nil {
+			return nil, err
+		}
+		// Prior knowledge for http:// URLs: the pipe's TLS chose h2.
+		return struct{ net.Conn }{tc}, nil
+	}
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Transport{Protocols: protocols, DialContext: open, DialTLSContext: open}
+}
+
+// upstreamScheme sets rawpipe.HeaderUpstreamScheme to each request's URL
+// scheme, as the Integration Proxy does.
+type upstreamScheme struct{ http.RoundTripper }
+
+func (u upstreamScheme) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(rawpipe.HeaderUpstreamScheme, r.URL.Scheme)
+	return u.RoundTripper.RoundTrip(r)
 }
 
 // controller listens for a tunnel and points tunnels at itself. accept takes
@@ -299,6 +319,46 @@ func TestRequestRouting(t *testing.T) {
 	}
 }
 
+// TestUpstreamSchemeHeader: an HTTP/2 request's destination scheme is
+// rawpipe.HeaderUpstreamScheme, https when absent (so port 443), anything
+// but http or https is refused, and the header is not forwarded.
+func TestUpstreamSchemeHeader(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get(rawpipe.HeaderUpstreamScheme); v != "" {
+			t.Errorf("the destination got %s: %q", rawpipe.HeaderUpstreamScheme, v)
+		}
+		_, _ = io.WriteString(w, "plain")
+	}))
+	t.Cleanup(plain.Close)
+	h := newHarness(t, nil, nil, plain.Listener.Addr().String())
+	for _, c := range []struct {
+		name, scheme string
+		status       int
+		reason       rawpipe.Reason
+	}{
+		{"http", "http", 200, ""},
+		{"absent is https, so port 443", "", 403, rawpipe.WrongDestination},
+		{"neither http nor https", "ftp", 400, rawpipe.ProtocolError},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, "http://api.internal/x", http.NoBody)
+			if c.scheme != "" {
+				req.Header.Set(rawpipe.HeaderUpstreamScheme, c.scheme)
+			}
+			resp, err := h.h2("api.internal:80").RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != c.status ||
+				resp.Header.Get(rawpipe.HeaderReason) != string(c.reason) {
+				t.Fatalf("%d %q, want %d %q", resp.StatusCode,
+					resp.Header.Get(rawpipe.HeaderReason), c.status, c.reason)
+			}
+		})
+	}
+}
+
 // TestNoConnectInPipe: a pipe is HTTP to its destination; CONNECT inside it
 // would make it a byte pipe again, past redaction.
 func TestNoConnectInPipe(t *testing.T) {
@@ -311,10 +371,7 @@ func TestNoConnectInPipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cc, err := (&http2.Transport{}).NewClientConn(conn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cc := h2Client(t, conn)
 	req, _ := http.NewRequest(http.MethodConnect, "https://db.internal:5432", http.NoBody)
 	req.Host = "db.internal:5432"
 	resp, err := cc.RoundTrip(req)
@@ -517,7 +574,10 @@ func TestGRPCBidi(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cc.Close() })
-	stream, err := testpb.NewTestServiceClient(cc).FullDuplexCall(t.Context())
+	// The destination is plaintext gRPC; the proxy names the scheme.
+	ctx := metadata.AppendToOutgoingContext(t.Context(),
+		strings.ToLower(rawpipe.HeaderUpstreamScheme), "http")
+	stream, err := testpb.NewTestServiceClient(cc).FullDuplexCall(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
