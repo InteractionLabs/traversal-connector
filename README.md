@@ -340,13 +340,14 @@ addresses, and any CIDR you add. Private ranges are allowed.
 | `TRAVERSAL_PIPES_MAX_STREAMS` | `100` | Concurrent requests in one HTTP/2 pipe. |
 | `TRAVERSAL_PIPES_STREAM_WINDOW_KB` / `TRAVERSAL_PIPES_CONNECTION_WINDOW_KB` | `256` / `1024` | HTTP/2 flow-control windows per request and per pipe. |
 | `TRAVERSAL_PIPES_EGRESS_PROXY` | (none) | `http://` forward proxy every request reaches its destination through (CONNECT). |
-| `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` | `false` | Send hostnames to that proxy, which resolves them; off, only IP literals go through it. Turn on only if the proxy refuses loopback, link-local and metadata addresses. |
+| `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` | `false` (`true` for `HTTPS_PROXY`/`HTTP_PROXY`) | Send hostnames to that proxy, which resolves them; off, only IP literals go through it. Turn on only if the proxy refuses loopback, link-local and metadata addresses. |
 | `TRAVERSAL_PIPES_FORBIDDEN_CIDRS` | (none) | Comma-separated CIDRs never to reach, beside the built-in list. |
 
 `TRAVERSAL_PIPES_EGRESS_PROXY` is the documented setting. For backwards
 compatibility with #67, when it is unset `HTTPS_PROXY` (or else `HTTP_PROXY`)
 is used the same way, and `NO_PROXY` hosts are dialed directly; the dial policy
-applies either way. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
+applies either way. As in #67, that proxy resolves hostnames unless
+`TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` is set. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
 and the connector logs that the environment proxy is ignored.
 
 ### Redaction

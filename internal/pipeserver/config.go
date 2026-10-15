@@ -99,9 +99,10 @@ func newPolicy(e *envReader) (upstream.Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
+	fromEnv := direct != nil // a proxy from HTTPS_PROXY or HTTP_PROXY, as in #67
 	cfg := dialpolicy.Config{
 		Proxy:          proxy,
-		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES"),
+		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", fromEnv),
 		ExtraForbidden: forbidden,
 	}
 	proxied, err := dialpolicy.New(cfg)
@@ -142,8 +143,8 @@ func egressProxy() (*url.URL, func(host string, port uint16) bool, error) {
 		return nil, nil, nil
 	}
 	// Backwards compatibility with #67, which honoured HTTP(S)_PROXY and
-	// NO_PROXY for destinations; TRAVERSAL_PIPES_EGRESS_PROXY is the
-	// documented setting.
+	// NO_PROXY for destinations and sent hostnames to the proxy unresolved;
+	// TRAVERSAL_PIPES_EGRESS_PROXY is the documented setting.
 	if !strings.Contains(raw, "://") {
 		raw = "http://" + raw // as net/http reads a bare host:port
 	}
@@ -258,15 +259,17 @@ func (e *envReader) duration(key string, def time.Duration) time.Duration {
 	return d
 }
 
-func (e *envReader) bool(key string) bool {
+func (e *envReader) bool(key string, def bool) bool {
 	switch v := os.Getenv(key); v {
-	case "", "false":
+	case "":
+		return def
+	case "false":
 		return false
 	case "true":
 		return true
 	default:
 		e.errs = append(e.errs, fmt.Errorf("%s must be true or false, got %q", key, v))
-		return false
+		return def
 	}
 }
 
