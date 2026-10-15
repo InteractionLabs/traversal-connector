@@ -1,6 +1,8 @@
 package pipeserver
 
 import (
+	"cmp"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -16,10 +18,12 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/upstream"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // New builds the pipe side from the environment, or says why the connector
@@ -30,11 +34,11 @@ func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 	if err != nil {
 		return nil, err
 	}
-	policy, err := newPolicy(&e)
+	dial, err := newPolicy(&e)
 	if err != nil {
 		return nil, err
 	}
-	up, err := upstream.New(cfg, r, policy.Dial)
+	up, err := upstream.New(cfg, r, dial)
 	if err != nil {
 		return nil, err
 	}
@@ -83,33 +87,85 @@ func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 	return t, errors.Join(e.errs...)
 }
 
-// newPolicy is the dial policy every request a pipe carries goes through.
-func newPolicy(e *envReader) (*dialpolicy.Policy, error) {
-	var proxy *url.URL
-	if raw := os.Getenv("TRAVERSAL_PIPES_EGRESS_PROXY"); raw != "" {
-		var err error
-		if proxy, err = url.Parse(raw); err != nil || proxy.Scheme != "http" || proxy.Host == "" {
-			return nil, errors.New("TRAVERSAL_PIPES_EGRESS_PROXY must be an http:// URL")
-		}
+// newPolicy is how every request a pipe carries reaches its destination:
+// through the dial policy, and the egress proxy unless NO_PROXY exempts the
+// destination.
+func newPolicy(e *envReader) (upstream.Dialer, error) {
+	proxy, direct, err := egressProxy()
+	if err != nil {
+		return nil, err
 	}
 	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_PIPES_FORBIDDEN_CIDRS"))
 	if err != nil {
 		return nil, err
 	}
-	if proxy == nil {
-		for _, v := range []string{"HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"} {
-			if os.Getenv(v) != "" {
-				slog.Warn(v + " is ignored: requests to destinations go through the dial " +
-					"policy only; set TRAVERSAL_PIPES_EGRESS_PROXY to use a forward proxy")
-				break
-			}
-		}
-	}
-	return dialpolicy.New(dialpolicy.Config{
+	cfg := dialpolicy.Config{
 		Proxy:          proxy,
 		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES"),
 		ExtraForbidden: forbidden,
-	})
+	}
+	proxied, err := dialpolicy.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if direct == nil {
+		return proxied.Dial, nil
+	}
+	cfg.Proxy = nil
+	unproxied, err := dialpolicy.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error) {
+		if direct(host, port) {
+			return unproxied.Dial(ctx, host, port)
+		}
+		return proxied.Dial(ctx, host, port)
+	}, nil
+}
+
+// egressProxy is the forward proxy destinations are reached through, if any,
+// and, for one from HTTPS_PROXY or HTTP_PROXY, whether NO_PROXY sends a
+// destination direct instead.
+func egressProxy() (*url.URL, func(host string, port uint16) bool, error) {
+	ambient := httpproxy.FromEnvironment()
+	raw := cmp.Or(ambient.HTTPSProxy, ambient.HTTPProxy)
+	if setting := os.Getenv("TRAVERSAL_PIPES_EGRESS_PROXY"); setting != "" {
+		if raw != "" {
+			slog.Info("HTTPS_PROXY, HTTP_PROXY and NO_PROXY are ignored for destinations: " +
+				"TRAVERSAL_PIPES_EGRESS_PROXY is set")
+		}
+		proxy, err := parseProxy("TRAVERSAL_PIPES_EGRESS_PROXY", setting)
+		return proxy, nil, err
+	}
+	if raw == "" {
+		return nil, nil, nil
+	}
+	// Backwards compatibility with #67, which honoured HTTP(S)_PROXY and
+	// NO_PROXY for destinations; TRAVERSAL_PIPES_EGRESS_PROXY is the
+	// documented setting.
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw // as net/http reads a bare host:port
+	}
+	proxy, err := parseProxy("HTTPS_PROXY or HTTP_PROXY", raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	match := (&httpproxy.Config{HTTPSProxy: raw, NoProxy: ambient.NoProxy}).ProxyFunc()
+	return proxy, func(host string, port uint16) bool {
+		dest := &url.URL{Scheme: "https", Host: net.JoinHostPort(host, strconv.Itoa(int(port)))}
+		u, err := match(dest)
+		return err == nil && u == nil
+	}, nil
+}
+
+// parseProxy is the http:// proxy URL raw, from setting name.
+func parseProxy(name, raw string) (*url.URL, error) {
+	proxy, err := url.Parse(raw)
+	if err != nil || proxy.Scheme != "http" || proxy.Host == "" {
+		return nil, errors.New(name + " must be an http:// URL")
+	}
+	return proxy, nil
 }
 
 // bundleEnv is the setting each capability trust bundle comes from.

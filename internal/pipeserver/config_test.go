@@ -1,6 +1,7 @@
 package pipeserver
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,12 +10,15 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,13 +193,13 @@ func TestTunnelTLS(t *testing.T) {
 // forbidden is whether the dial policy built from the environment refuses
 // host.
 func forbidden(t *testing.T, host string) rawpipe.Reason {
-	policy, err := newPolicy(&envReader{})
+	dial, err := newPolicy(&envReader{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // an allowed host fails to dial at once
-	conn, _, err := policy.Dial(ctx, host, 443)
+	conn, _, err := dial(ctx, host, 443)
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -261,5 +265,98 @@ func TestNewVerifierBundleErrors(t *testing.T) {
 				t.Fatalf("error %v, want one starting %q", err, want)
 			}
 		})
+	}
+}
+
+// TestEgressProxyFromEnvironment: with TRAVERSAL_PIPES_EGRESS_PROXY unset,
+// HTTPS_PROXY is the egress proxy and NO_PROXY hosts are dialed direct, both
+// through the dial policy; the setting, when set, wins.
+func TestEgressProxyFromEnvironment(t *testing.T) {
+	const dest = "192.0.2.10" // TEST-NET-1: allowed, and never answers
+	for _, c := range []struct {
+		name string
+		env  map[string]string // "{proxy}" is the recording proxy's URL
+		host string
+		via  string // "proxy", "direct" or "forbidden"
+	}{
+		{name: "HTTPS_PROXY when the setting is unset", host: dest, via: "proxy",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
+		{name: "HTTP_PROXY without HTTPS_PROXY", host: dest, via: "proxy",
+			env: map[string]string{"HTTP_PROXY": "{proxy}"}},
+		{name: "NO_PROXY host dialed direct", host: dest, via: "direct",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}", "NO_PROXY": "192.0.2.0/24"}},
+		{name: "setting wins over HTTPS_PROXY and NO_PROXY", host: dest, via: "proxy",
+			env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "{proxy}",
+				"HTTPS_PROXY": "http://unused.invalid:3128", "NO_PROXY": dest}},
+		{name: "forbidden address through HTTPS_PROXY", host: "169.254.169.254", via: "forbidden",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
+		{name: "forbidden address in NO_PROXY", host: "169.254.169.254", via: "forbidden",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}", "NO_PROXY": "169.254.0.0/16"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			proxyURL, connects := recordingProxy(t)
+			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY", "HTTPS_PROXY",
+				"https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+				t.Setenv(k, strings.ReplaceAll(c.env[k], "{proxy}", proxyURL))
+			}
+			dial, err := newPolicy(&envReader{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			conn, _, err := dial(ctx, c.host, 443)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			var got string
+			switch reason := rawpipe.ReasonOf(err, ""); {
+			case reason == rawpipe.ForbiddenAddress:
+				got = "forbidden"
+			case err == nil && slices.Equal(connects(), []string{c.host + ":443"}):
+				got = "proxy"
+			case reason == rawpipe.DialFailed && len(connects()) == 0:
+				got = "direct"
+			default:
+				t.Fatalf("dial: %v, proxy saw %v", err, connects())
+			}
+			if got != c.via || c.via == "forbidden" && len(connects()) != 0 {
+				t.Fatalf("went %s, want %s (proxy saw %v)", got, c.via, connects())
+			}
+		})
+	}
+}
+
+// recordingProxy is an http:// proxy URL that accepts every CONNECT, and the
+// authorities it has been asked for.
+func recordingProxy(t *testing.T) (string, func() []string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var seen []string
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			if req, err := http.ReadRequest(bufio.NewReader(c)); err == nil &&
+				req.Method == http.MethodConnect {
+				mu.Lock()
+				seen = append(seen, req.Host)
+				mu.Unlock()
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
+			}
+			_ = c.Close()
+		}
+	}()
+	return "http://" + ln.Addr().String(), func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
 	}
 }
