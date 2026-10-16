@@ -230,7 +230,7 @@ func main() {
 		if tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection); err != nil {
 			// Raw pipes never stop the legacy transport.
 			slog.ErrorContext(ctx, "raw pipes cannot start; serving the legacy transport only",
-				"err", err)
+				"error", err)
 		} else {
 			rawTunnels = tunnels
 			done := tunnels.Start(ctx)

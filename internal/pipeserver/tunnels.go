@@ -104,7 +104,7 @@ func (t *Tunnels) hold(ctx context.Context) {
 		if err == nil {
 			wait = 0 // the edge controller asked for a replacement
 		}
-		slog.InfoContext(ctx, "tunnel down; redialing", "err", err, "in", wait)
+		slog.InfoContext(ctx, "tunnel down; redialing", "error", err, "in", wait)
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():

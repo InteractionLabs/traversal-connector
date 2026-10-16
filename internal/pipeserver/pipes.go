@@ -108,17 +108,17 @@ func (s *Server) ServeConn(nc net.Conn, drained func()) {
 func (s *Server) Drain(ctx context.Context) {
 	s.pipes.Drain()
 	if err := s.pipes.Wait(ctx); err != nil {
-		slog.Warn("drain timed out; ending open pipes", "err", err)
+		slog.Warn("drain timed out; ending open pipes", "error", err)
 	}
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	log := slog.With("authority", r.Host)
+	log := slog.With("target", r.Host)
 	conn, upstream, err := s.open(r)
 	if err != nil {
 		reason := rawpipe.ReasonOf(err, rawpipe.DialFailed)
 		s.metrics.opened(reason)
-		log.Info("pipe refused", "reason", reason, "err", err)
+		log.Info("pipe refused", "reason", reason, "error", err)
 		rawpipe.Refuse(w, reason, string(reason))
 		return
 	}
@@ -161,7 +161,7 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	}
 	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
 		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
-		"session_id", claims.SessionID, "authority", r.Host)
+		"session_id", claims.SessionID, "target", r.Host)
 	if !s.pipes.Add(s.MaxPipes) {
 		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
