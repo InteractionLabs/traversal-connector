@@ -28,7 +28,6 @@ func TestStreamConn(t *testing.T) {
 	}
 	_, _ = c.Write([]byte("bye"))
 	_ = c.Close()
-	<-c.Closed()
 	if b, err := io.ReadAll(peer); string(b) != "bye" || err != nil {
 		t.Fatalf("peer read %q %v, want a clean end", b, err)
 	}

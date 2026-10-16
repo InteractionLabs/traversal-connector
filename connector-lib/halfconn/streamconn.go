@@ -14,16 +14,14 @@ import (
 // Closing the conn ends e cleanly (CloseWrite); e's end ends the conn.
 type StreamConn struct {
 	net.Conn
-	closeOnce sync.Once
-	closed    chan struct{}
-	copies    sync.WaitGroup
-	in, out   int64
+	copies  sync.WaitGroup
+	in, out int64
 }
 
 // NewStreamConn starts copying between e and the returned conn.
 func NewStreamConn(e End) *StreamConn {
 	near, far := net.Pipe()
-	c := &StreamConn{Conn: near, closed: make(chan struct{})}
+	c := &StreamConn{Conn: near}
 	c.copies.Go(func() {
 		c.in, _ = io.Copy(far, e)
 		_ = far.Close()
@@ -34,16 +32,6 @@ func NewStreamConn(e End) *StreamConn {
 	})
 	return c
 }
-
-// Close closes the conn; Closed then reports it.
-func (c *StreamConn) Close() error {
-	err := c.Conn.Close()
-	c.closeOnce.Do(func() { close(c.closed) })
-	return err
-}
-
-// Closed is closed once Close has run.
-func (c *StreamConn) Closed() <-chan struct{} { return c.closed }
 
 // Wait returns once both copies with e have stopped, by e's peer ending,
 // CloseWrite on a ServerStream, or Abort, with the bytes read from e and
