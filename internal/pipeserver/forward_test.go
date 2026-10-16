@@ -28,112 +28,92 @@ import (
 
 // TestRequestRouting: a request inside a pipe goes only to the pipe's
 // destination, with TLS by its scheme, and probes are answered without a
-// dial.
+// dial. On h2 the scheme is rawpipe.HeaderUpstreamScheme, https when absent,
+// and is not forwarded; CONNECT inside a pipe, which would make it a byte
+// pipe again past redaction, is refused.
 func TestRequestRouting(t *testing.T) {
 	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			t.Error("CONNECT reached the destination")
+		}
 		w.Header().Set("Content-Type", "text/plain")
 		// The body is text/plain, so the host and path in it are no XSS.
-		_, _ = fmt.Fprintf(w, "plain %s%s", r.Host, r.URL.Path) //nolint:gosec // text/plain
+		_, _ = fmt.Fprintf(w, "plain %s%s %s", r.Host, r.URL.Path, //nolint:gosec // text/plain
+			r.Header.Get(rawpipe.HeaderUpstreamScheme))
 	}))
 	t.Cleanup(plain.Close)
 	h := newHarness(t, nil, nil, plain.Listener.Addr().String())
+	// get is a GET of url through a pipe to authority: h2 naming scheme in
+	// rawpipe.HeaderUpstreamScheme ("-" for none), or HTTP/1.1 in absolute
+	// form.
+	get := func(authority, url, scheme string, http1 bool) (*http.Response, error) {
+		req, _ := http.NewRequest(http.MethodGet, url, http.NoBody)
+		switch {
+		case http1:
+			return h.client(authority, true).Do(req)
+		case scheme != "-":
+			req.Header.Set(rawpipe.HeaderUpstreamScheme, scheme)
+		}
+		return h.h2(authority).RoundTrip(req)
+	}
+	connect := func(authority string) (*http.Response, error) {
+		conn, err := h.open(authority, nil)
+		if err != nil {
+			return nil, err
+		}
+		req, _ := http.NewRequest(http.MethodConnect, "https://"+authority, http.NoBody)
+		req.Host = authority
+		return h2Client(t, conn).RoundTrip(req)
+	}
 	for _, c := range []struct {
-		name, authority, url string
-		http1                bool
-		status               int
-		body                 string
+		name string
+		send func() (*http.Response, error)
+		// status and reason are the answer; body, if set, the destination's.
+		status int
+		reason rawpipe.Reason
+		body   string
 	}{
-		{"h2, http scheme", "api.internal:80", "http://api.internal/x", false, 200, "plain api.internal/x"},
-		{"HTTP/1.1, absolute form", "api.internal:80", "http://api.internal/x", true, 200,
-			"plain api.internal/x"},
-		{"another host", "api.internal:80", "http://other.internal/x", false, 403, ""},
-		{"another port", "api.internal:80", "http://api.internal:81/x", true, 403, ""},
-		{"probe", rawpipe.ProbeAuthority, "https://" + rawpipe.ProbeHost + rawpipe.ProbePath, false,
-			200, `{"status":"ready"}`},
-		{"probe, another path", rawpipe.ProbeAuthority, "https://" + rawpipe.ProbeHost + "/x", false,
-			404, ""},
+		{"h2, http scheme", func() (*http.Response, error) {
+			return get("api.internal:80", "http://api.internal/x", "http", false)
+		}, 200, "", "plain api.internal/x "},
+		{"HTTP/1.1, absolute form", func() (*http.Response, error) {
+			return get("api.internal:80", "http://api.internal/x", "", true)
+		}, 200, "", "plain api.internal/x "},
+		{"another host", func() (*http.Response, error) {
+			return get("api.internal:80", "http://other.internal/x", "http", false)
+		}, 403, rawpipe.WrongDestination, ""},
+		{"another port", func() (*http.Response, error) {
+			return get("api.internal:80", "http://api.internal:81/x", "", true)
+		}, 403, rawpipe.WrongDestination, ""},
+		{"no scheme header is https, so port 443", func() (*http.Response, error) {
+			return get("api.internal:80", "http://api.internal/x", "-", false)
+		}, 403, rawpipe.WrongDestination, ""},
+		{"scheme neither http nor https", func() (*http.Response, error) {
+			return get("api.internal:80", "http://api.internal/x", "ftp", false)
+		}, 400, rawpipe.ProtocolError, ""},
+		{"CONNECT inside a pipe", func() (*http.Response, error) {
+			return connect("db.internal:5432")
+		}, 400, rawpipe.ProtocolError, ""},
+		{"probe", func() (*http.Response, error) {
+			return get(rawpipe.ProbeAuthority, "https://"+rawpipe.ProbeHost+rawpipe.ProbePath, "-", false)
+		}, 200, "", `{"status":"ready"}`},
+		{"probe, another path", func() (*http.Response, error) {
+			return get(rawpipe.ProbeAuthority, "https://"+rawpipe.ProbeHost+"/x", "-", false)
+		}, 404, "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			resp, err := h.client(c.authority, c.http1).Get(c.url)
+			resp, err := c.send()
 			if err != nil {
 				t.Fatal(err)
 			}
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if resp.StatusCode != c.status || c.body != "" && string(body) != c.body {
-				t.Fatalf("%d %q, want %d %q", resp.StatusCode, body, c.status, c.body)
-			}
-			if c.status == 403 &&
-				resp.Header.Get(rawpipe.HeaderReason) != string(rawpipe.WrongDestination) {
-				t.Fatalf("reason %q", resp.Header.Get(rawpipe.HeaderReason))
-			}
-		})
-	}
-}
-
-// TestUpstreamSchemeHeader: an HTTP/2 request's destination scheme is
-// rawpipe.HeaderUpstreamScheme, https when absent (so port 443), anything
-// but http or https is refused, and the header is not forwarded.
-func TestUpstreamSchemeHeader(t *testing.T) {
-	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v := r.Header.Get(rawpipe.HeaderUpstreamScheme); v != "" {
-			t.Errorf("the destination got %s: %q", rawpipe.HeaderUpstreamScheme, v)
-		}
-		_, _ = io.WriteString(w, "plain")
-	}))
-	t.Cleanup(plain.Close)
-	h := newHarness(t, nil, nil, plain.Listener.Addr().String())
-	for _, c := range []struct {
-		name, scheme string
-		status       int
-		reason       rawpipe.Reason
-	}{
-		{"http", "http", 200, ""},
-		{"absent is https, so port 443", "", 403, rawpipe.WrongDestination},
-		{"neither http nor https", "ftp", 400, rawpipe.ProtocolError},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			req, _ := http.NewRequest(http.MethodGet, "http://api.internal/x", http.NoBody)
-			if c.scheme != "" {
-				req.Header.Set(rawpipe.HeaderUpstreamScheme, c.scheme)
-			}
-			resp, err := h.h2("api.internal:80").RoundTrip(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = resp.Body.Close()
-			if resp.StatusCode != c.status ||
+			if resp.StatusCode != c.status || c.body != "" && string(body) != c.body ||
 				resp.Header.Get(rawpipe.HeaderReason) != string(c.reason) {
-				t.Fatalf("%d %q, want %d %q", resp.StatusCode,
-					resp.Header.Get(rawpipe.HeaderReason), c.status, c.reason)
+				t.Fatalf("%d %q %q, want %d %q %q", resp.StatusCode,
+					resp.Header.Get(rawpipe.HeaderReason), body, c.status, c.reason, c.body)
 			}
 		})
-	}
-}
-
-// TestNoConnectInPipe: a pipe is HTTP to its destination; CONNECT inside it
-// would make it a byte pipe again, past redaction.
-func TestNoConnectInPipe(t *testing.T) {
-	dest := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("CONNECT reached the destination")
-	}))
-	t.Cleanup(dest.Close)
-	h := newHarness(t, nil, nil, dest.Listener.Addr().String())
-	conn, err := h.open("db.internal:5432", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cc := h2Client(t, conn)
-	req, _ := http.NewRequest(http.MethodConnect, "https://db.internal:5432", http.NoBody)
-	req.Host = "db.internal:5432"
-	resp, err := cc.RoundTrip(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest ||
-		resp.Header.Get(rawpipe.HeaderReason) != string(rawpipe.ProtocolError) {
-		t.Fatalf("%d %q", resp.StatusCode, resp.Header.Get(rawpipe.HeaderReason))
 	}
 }
 
