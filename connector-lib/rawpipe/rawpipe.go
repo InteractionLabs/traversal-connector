@@ -210,9 +210,6 @@ func (r Reason) Label() Reason {
 const (
 	HeaderCapability = "X-Capability"
 	HeaderReason     = "X-Traversal-Reason"
-	// HeaderNodeID names the connector a pipe is for: the controller picks
-	// that connector's tunnel and verifies the capability against it.
-	HeaderNodeID = "X-Node-Id"
 )
 
 // HeaderUpstreamScheme is the scheme, http or https, of an HTTP/2 request the

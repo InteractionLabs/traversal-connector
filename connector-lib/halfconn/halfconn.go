@@ -69,11 +69,11 @@ func Buffered(c Conn, r *bufio.Reader) Conn {
 	return Prefixed(c, io.LimitReader(r, int64(r.Buffered())))
 }
 
-// Hijack takes over the HTTP/1 connection under w, for a CONNECT the handler
-// answers itself (it writes the 200). Bytes the client sent after its
-// request, such as a TLS ClientHello in the same packet, stay readable. A
-// connection that cannot half-close is closed and refused: a pipe end must.
-func Hijack(w http.ResponseWriter) (Conn, error) {
+// hijack takes over the HTTP/1 connection under w. Bytes the client sent
+// after its request, such as a TLS ClientHello in the same packet, stay
+// readable. A connection that cannot half-close is closed and refused: a pipe
+// end must.
+func hijack(w http.ResponseWriter) (Conn, error) {
 	c, rw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		return nil, err
@@ -86,11 +86,12 @@ func Hijack(w http.ResponseWriter) (Conn, error) {
 	return Buffered(hc, rw.Reader), nil
 }
 
-// Established is Hijack that also accepts the CONNECT: it writes the 200,
-// after which the connection is the tunnel. On error the connection is
-// closed.
+// Established takes over the HTTP/1 connection under w and accepts the
+// CONNECT on it: it writes the 200, after which the connection is the tunnel.
+// Bytes the client sent after its request stay readable. On error the
+// connection is closed.
 func Established(w http.ResponseWriter) (Conn, error) {
-	c, err := Hijack(w)
+	c, err := hijack(w)
 	if err != nil {
 		return nil, err
 	}
