@@ -37,10 +37,6 @@ connectorID: ""
 # All values left blank fall back to connector built-in defaults.
 envLevel: ""               # ENV_LEVEL: production | development
 proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
-maxTunnelsAllowed: ""      # MAX_TUNNELS_ALLOWED (default 2)
-maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 10)
-reconnectInterval: ""      # RECONNECT_INTERVAL (default 5s)
-maxBackoffDelay: ""        # MAX_BACKOFF_DELAY (default 60s)
 requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
 maxRequestBodySizeMB: ""   # MAX_REQUEST_BODY_SIZE_MB (default 32)
 # Ceilings on an upstream response, both enforced so redaction always scans the
@@ -51,14 +47,13 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
-# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
-# Lets Traversal reach databases, kubectl exec, git and other non-HTTP
-# destinations through this connector, over tunnels to the controller's host
-# on port 443 (TLS ALPN x-traversal-tunnel; a TLS-intercepting proxy breaks
-# them). Each pipe carries a Traversal-signed capability the connector checks
-# before it dials. Needs controllerTLS and a lower-case UUID connectorID.
+# ─── Tunnels and pipes ───────────────────────────────────────────────────────
+# The connector holds tunnels to the controller's host on port 443 (TLS ALPN
+# x-traversal-tunnel; a TLS-intercepting proxy breaks them). Traversal opens a
+# pipe on a tunnel for each destination, carrying a Traversal-signed capability
+# the connector checks before it dials. Needs controllerTLS and a lower-case
+# UUID connectorID, and capability trust: trustedRoots, or capabilityKeys.
 pipes:
-  enabled: false           # TRAVERSAL_PIPES
   # Traversal's capability root certificates (PEM), the current root and,
   # during a root rotation, the next. Rendered together as
   # TRAVERSAL_CAPABILITY_ROOTS. With roots the connector trusts every
@@ -76,11 +71,19 @@ pipes:
   maxPipes: ""             # TRAVERSAL_PIPES_MAX (default 200)
   maxLifetime: ""          # TRAVERSAL_PIPES_MAX_LIFETIME (default 4h)
   idleTimeout: ""          # TRAVERSAL_PIPES_IDLE_TIMEOUT (default 15m)
+  # HTTP/2 inside one pipe: concurrent requests, and the flow-control windows
+  # per request and per pipe (KiB). They nest inside the tunnel's own.
+  pipeMaxStreams: ""       # TRAVERSAL_PIPES_MAX_STREAMS (default 100)
+  pipeStreamWindowKB: ""   # TRAVERSAL_PIPES_STREAM_WINDOW_KB (default 256)
+  pipeConnectionWindowKB: ""  # TRAVERSAL_PIPES_CONNECTION_WINDOW_KB (default 1024)
   tunnelCount: ""          # TRAVERSAL_TUNNELS_COUNT (default 2, at most 8)
   # host:port to dial instead of <controller host>:443, such as a PrivateLink
   # endpoint; SNI and certificate checks still use the controller's host.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
-  # An http:// forward proxy pipes reach their destinations through.
+  # An http:// forward proxy pipes reach their destinations through. Unset,
+  # HTTPS_PROXY/HTTP_PROXY and NO_PROXY in the pod are used instead, for
+  # backwards compatibility with #67, and that proxy resolves hostnames unless
+  # egressProxyResolves is set; this is the documented setting.
   egressProxy: ""          # TRAVERSAL_PIPES_EGRESS_PROXY
   # Send hostnames to egressProxy, which resolves them. Off, only IP
   # literals go through it. Turn on only if the proxy refuses loopback,
@@ -88,11 +91,8 @@ pipes:
   egressProxyResolves: ""  # TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES
   # Comma-separated CIDRs pipes may never reach, beside the built-in list
   # (loopback, link-local, metadata and the connector's own addresses), which
-  # cannot be removed. An entry that does not parse stops raw pipes starting.
+  # cannot be removed. An entry that does not parse stops the connector starting.
   forbiddenCIDRs: ""       # TRAVERSAL_PIPES_FORBIDDEN_CIDRS
-  # Refuse every raw TCP pipe while keeping tunnels (redacted HTTP still
-  # flows). For a connector that must never carry raw TCP.
-  refuseTCP: ""            # TRAVERSAL_PIPES_REFUSE_TCP
 
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
 # Either provide PEM strings inline (chart will render a Secret) or reference

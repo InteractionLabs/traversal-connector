@@ -2,19 +2,22 @@
 
 The Traversal Connector runs inside a private network and exposes its internal
 data sources to the Traversal control plane *without* opening any inbound
-firewall holes. It dials out to the control plane over gRPC, multiplexes one
-or more bidirectional tunnels, and executes HTTP requests it receives on those
-tunnels against upstream services on the local network.
+firewall holes. It holds outbound tunnels to the controller's host on port 443
+(mutual TLS, ALPN `x-traversal-tunnel`). Traversal opens a pipe on a tunnel per
+destination, carrying a signed capability for one host:port; the connector
+checks it, applies its dial policy, and serves the pipe as an HTTP/2 or
+HTTP/1.1 forward proxy inside TLS of its own, redacting responses from hosts
+its rules cover.
 
 ```
-   ┌────────────────────┐  outbound gRPC tunnels   ┌────────────────────┐  HTTP   ┌──────────────────┐
-   │  Traversal control │ ◄──────────────────────► │ Traversal Connector│ ──────► │ upstream services│
-   │       plane        │      (h2c or mTLS)       │  (this binary)     │         │ (Prometheus, …)  │
-   └────────────────────┘                          └────────────────────┘         └──────────────────┘
+   ┌────────────────────┐  outbound tunnels (mTLS)  ┌────────────────────┐  HTTP(S)  ┌──────────────────┐
+   │  Traversal control │ ◄───────────────────────► │ Traversal Connector│ ────────► │ upstream services│
+   │       plane        │   pipes: TLS, then HTTP   │  (this binary)     │           │ (Prometheus, …)  │
+   └────────────────────┘                           └────────────────────┘           └──────────────────┘
 ```
 
-The wire protocol is defined in
-[`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
+The tunnel and pipe protocol is defined in
+[`connector-lib/rawpipe`](connector-lib/rawpipe).
 
 ## Setup
 
@@ -265,17 +268,13 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | URL of the Traversal control plane; tunnels go to its host on port 443. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
 | `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
-| `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
-| `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
-| `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
-| `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
-| `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
-| `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
-| `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |
+| `REQUEST_TIMEOUT` | `60s` | How long a response from a host your redaction rules cover may take to end; one that takes longer is a stream, which cannot be redacted, and is refused. Other responses stream for as long as they run. |
+| `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of a request body sent to a destination. Bodies stream, so a larger one is cut off with an error once it passes the limit. |
+| `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from a response from a host your redaction rules cover, which is buffered to be redacted. A larger response is refused. Other responses stream and have no limit. |
 | `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
-| `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
+| `TRAVERSAL_CONNECTOR_ID` | **required** | This connector's ID, a lower-case UUID provided by Traversal. It names the connector's tunnels and must match its certificate's SPIFFE ID if that is connector-scoped. Startup fails if unset. |
 | `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
 
 ### mTLS to the control plane
@@ -323,27 +322,33 @@ UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_FILE=/etc/traversal/upstream-ca/ca.crt
 ```
 
-### Upstream forward proxy
+### Tunnels, pipes and the dial policy
 
-Requests to upstream services honor the standard proxy environment variables
-(via Go's `http.ProxyFromEnvironment`), evaluated per request against the target
-URL. They are read once at startup, so changes require a restart:
+Every request reaches its destination through the connector's dial policy,
+which refuses loopback, link-local, cloud metadata and the connector's own
+addresses, and any CIDR you add. Private ranges are allowed.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HTTPS_PROXY` | (none) | Forward proxy for `https://` upstream targets. |
-| `HTTP_PROXY` | (none) | Forward proxy for `http://` upstream targets. |
-| `NO_PROXY` | (none) | Comma-separated hosts that are dialed directly. `.example.com` (or `example.com`) matches the domain and all subdomains; `host:port` matches one port; CIDRs match only targets addressed by IP, since hostnames are not resolved before matching. Loopback targets always bypass the proxy. |
+| `TRAVERSAL_CAPABILITY_ROOTS` | (none) | Traversal's capability root certificates (PEM, raw or base64). Required unless `TRAVERSAL_CAPABILITY_KEYS` is set. |
+| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_ISSUER` | (none) | Pinned capability keys and their issuer, beside or instead of roots. |
+| `TRAVERSAL_TUNNELS_COUNT` | `2` | Tunnels held, at most 8. |
+| `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` to dial instead of the controller host on 443; SNI and certificate checks are unchanged. |
+| `TRAVERSAL_PIPES_MAX` | `200` | Pipes open at once. |
+| `TRAVERSAL_PIPES_MAX_LIFETIME` | `4h` | A pipe this old is closed; the proxy opens another. |
+| `TRAVERSAL_PIPES_IDLE_TIMEOUT` | `15m` | A pipe that carries no request for this long is closed. |
+| `TRAVERSAL_PIPES_MAX_STREAMS` | `100` | Concurrent requests in one HTTP/2 pipe. |
+| `TRAVERSAL_PIPES_STREAM_WINDOW_KB` / `TRAVERSAL_PIPES_CONNECTION_WINDOW_KB` | `256` / `1024` | HTTP/2 flow-control windows per request and per pipe. |
+| `TRAVERSAL_PIPES_EGRESS_PROXY` | (none) | `http://` forward proxy every request reaches its destination through (CONNECT). |
+| `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` | `false` (`true` for `HTTPS_PROXY`/`HTTP_PROXY`) | Send hostnames to that proxy, which resolves them; off, only IP literals go through it. Turn on only if the proxy refuses loopback, link-local and metadata addresses. |
+| `TRAVERSAL_PIPES_FORBIDDEN_CIDRS` | (none) | Comma-separated CIDRs never to reach, beside the built-in list. |
 
-These apply only to upstream requests. The controller tunnel and OTLP export use
-`EGRESS_PROXY_URL` and ignore these variables.
-
-```sh
-# Internet-hosted integrations via the corporate proxy; internal services direct.
-HTTPS_PROXY=http://proxy.corp.example.com:3128
-HTTP_PROXY=http://proxy.corp.example.com:3128
-NO_PROXY=.corp.example.com,10.0.0.0/8
-```
+`TRAVERSAL_PIPES_EGRESS_PROXY` is the documented setting. For backwards
+compatibility with #67, when it is unset `HTTPS_PROXY` (or else `HTTP_PROXY`)
+is used the same way, and `NO_PROXY` hosts are dialed directly; the dial policy
+applies either way. As in #67, that proxy resolves hostnames unless
+`TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` is set. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
+and the connector logs that the environment proxy is ignored.
 
 ### Redaction
 

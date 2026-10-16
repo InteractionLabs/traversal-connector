@@ -17,18 +17,6 @@ import (
 // and keeps text that could not be understood from passing through intact.
 const unknownTarget = "unknown"
 
-// HostFromURL reduces a raw URL to the "host" or "host:port" naming the
-// destination. Only the authority describes where a request went; everything
-// after it is supplied by the caller, so the authority is the whole of what
-// telemetry may attribute a request to.
-func HostFromURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.Host == "" {
-		return unknownTarget
-	}
-	return parsed.Host
-}
-
 // SanitizeError returns a copy of err whose message carries only the origin of
 // any request URL it embeds, making it fit to attach to a span or a log record.
 //

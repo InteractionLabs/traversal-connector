@@ -151,22 +151,6 @@ spec:
             - name: HTTP_PORT
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.maxTunnelsAllowed }}
-            - name: MAX_TUNNELS_ALLOWED
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.maxConcurrentRequests }}
-            - name: MAX_CONCURRENT_REQUESTS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.reconnectInterval }}
-            - name: RECONNECT_INTERVAL
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.maxBackoffDelay }}
-            - name: MAX_BACKOFF_DELAY
-              value: {{ . | quote }}
-            {{- end }}
             {{- with .Values.requestTimeout }}
             - name: REQUEST_TIMEOUT
               value: {{ . | quote }}
@@ -183,13 +167,7 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
-            {{- if not (kindIs "bool" .Values.pipes.enabled) }}
-            {{- fail (printf "pipes.enabled must be a boolean (true or false), got %q." (toString .Values.pipes.enabled)) }}
-            {{- end }}
-            {{- if .Values.pipes.enabled }}
-            - name: TRAVERSAL_PIPES
-              value: "enabled"
-            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "refuseTCP" "TRAVERSAL_PIPES_REFUSE_TCP" }}
+            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "pipeMaxStreams" "TRAVERSAL_PIPES_MAX_STREAMS" "pipeStreamWindowKB" "TRAVERSAL_PIPES_STREAM_WINDOW_KB" "pipeConnectionWindowKB" "TRAVERSAL_PIPES_CONNECTION_WINDOW_KB" }}
             {{- with get $.Values.pipes $key }}
             - name: {{ $name }}
               value: {{ . | toString | quote }}
@@ -199,7 +177,6 @@ spec:
             {{- with compact (list ($roots.current | default "" | trim) ($roots.next | default "" | trim)) }}
             - name: TRAVERSAL_CAPABILITY_ROOTS
               value: {{ printf "%s\n" (join "\n" .) | b64enc | quote }}
-            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY

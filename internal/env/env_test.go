@@ -31,31 +31,6 @@ func TestGetEnvString(t *testing.T) {
 	}
 }
 
-func TestGetEnvInt(t *testing.T) {
-	tests := []struct {
-		name       string
-		key        string
-		value      string
-		defaultVal int
-		expected   int
-	}{
-		{"valid int", "TEST_INT", "42", 10, 42},
-		{"empty value", "TEST_INT", "", 10, 10},
-		{"invalid int", "TEST_INT", "not-a-number", 10, 10},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(tt.key, tt.value)
-
-			got := GetEnvInt(tt.key, tt.defaultVal)
-			if diff := cmp.Diff(tt.expected, got); diff != "" {
-				t.Errorf("GetEnvInt() mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
 func TestGetEnvInt64(t *testing.T) {
 	tests := []struct {
 		name       string

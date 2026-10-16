@@ -158,21 +158,18 @@ type Reason string
 
 // Refusal reasons.
 const (
-	InvalidCapability  Reason = "invalid_capability"
-	WrongConnector     Reason = "wrong_connector"
-	WrongDestination   Reason = "wrong_destination"
-	Exhausted          Reason = "capability_exhausted"
-	InspectionRequired Reason = "inspection_required"
-	ForbiddenAddress   Reason = "forbidden_address"
-	DNSFailed          Reason = "dns_failed"
-	DialFailed         Reason = "dial_failed"
-	Capacity           Reason = "capacity"
-	Draining           Reason = "connector_draining"
-	ProtocolError      Reason = "protocol_error"
-	NoTunnel           Reason = "no_raw_tunnel"
-	OpenTimeout        Reason = "open_timeout"
-	// TCPRefused is a connector whose operator turned raw TCP pipes off.
-	TCPRefused Reason = "raw_tcp_refused"
+	InvalidCapability Reason = "invalid_capability"
+	WrongConnector    Reason = "wrong_connector"
+	WrongDestination  Reason = "wrong_destination"
+	Exhausted         Reason = "capability_exhausted"
+	ForbiddenAddress  Reason = "forbidden_address"
+	DNSFailed         Reason = "dns_failed"
+	DialFailed        Reason = "dial_failed"
+	Capacity          Reason = "capacity"
+	Draining          Reason = "connector_draining"
+	ProtocolError     Reason = "protocol_error"
+	NoTunnel          Reason = "no_raw_tunnel"
+	OpenTimeout       Reason = "open_timeout"
 	// RedactionUnsupported is a request to a host redaction rules cover
 	// whose body cannot be redacted: gRPC, binary, an upgrade, a stream with
 	// no end, or one over the limits. It is refused, never sent unredacted.
@@ -189,9 +186,9 @@ const (
 // Other, which keeps label sets closed whatever a peer sends.
 func (r Reason) Known() bool {
 	switch r {
-	case InvalidCapability, WrongConnector, WrongDestination, Exhausted, InspectionRequired,
-		ForbiddenAddress, DNSFailed, DialFailed, Capacity, Draining, ProtocolError, NoTunnel,
-		OpenTimeout, TCPRefused, RedactionUnsupported, UpstreamFailed:
+	case InvalidCapability, WrongConnector, WrongDestination, Exhausted, ForbiddenAddress,
+		DNSFailed, DialFailed, Capacity, Draining, ProtocolError, NoTunnel, OpenTimeout,
+		RedactionUnsupported, UpstreamFailed:
 		return true
 	}
 	return false

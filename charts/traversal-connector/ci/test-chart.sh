@@ -174,25 +174,36 @@ assert_render_fails both-sources 'mutually exclusive' \
   "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
-# Raw pipes: off by default; on, each set value becomes its setting.
+# Tunnels: each set pipes value becomes its setting; unset, none renders.
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_PIPES'
-render raw "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+assert_not_contains "$tmp_dir/direct.yaml" 'MAX_TUNNELS_ALLOWED'
+render raw "$fixtures/direct-export-values.yaml" \
   --set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci \
   --set-string pipes.capabilityKeys=a2V5cw== \
   --set pipes.tunnelCount=4 --set pipes.egressProxyResolves=true \
-  --set pipes.refuseTCP=true \
+  --set pipes.pipeMaxStreams=50 \
   --set-string 'pipes.forbiddenCIDRs=10.9.0.0/16\,fd00:1::/32'
-for want in 'TRAVERSAL_PIPES\n              value: "enabled"' \
-  'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
+for want in 'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
   'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
   'TRAVERSAL_TUNNELS_COUNT\n              value: "4"' \
+  'TRAVERSAL_PIPES_MAX_STREAMS\n              value: "50"' \
   'TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"' \
-  'TRAVERSAL_PIPES_REFUSE_TCP\n              value: "true"' \
   'TRAVERSAL_PIPES_FORBIDDEN_CIDRS\n              value: "10.9.0.0/16,fd00:1::/32"'; do
   assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
 done
-assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_PIPES_MAX'
-assert_render_fails raw-boolean 'pipes.enabled must be a boolean' "${common[@]}" --set-string pipes.enabled=false
+# maxPipes unset renders no TRAVERSAL_PIPES_MAX (TRAVERSAL_PIPES_MAX_STREAMS is set).
+if grep -qx -- '            - name: TRAVERSAL_PIPES_MAX' "$tmp_dir/raw.yaml"; then
+  fail "did not expect TRAVERSAL_PIPES_MAX in $tmp_dir/raw.yaml"
+fi
+# Values from before the raw tunnel was the only one still upgrade: they are
+# ignored, not refused.
+render legacy-values "$fixtures/direct-export-values.yaml" --set pipes.enabled=false \
+  --set-string maxTunnelsAllowed=4 \
+  --set-string maxConcurrentRequests=4 --set-string reconnectInterval=1s --set-string maxBackoffDelay=1s
+for legacy in TRAVERSAL_PIPES MAX_TUNNELS_ALLOWED MAX_CONCURRENT_REQUESTS RECONNECT_INTERVAL \
+  MAX_BACKOFF_DELAY; do
+  assert_not_contains "$tmp_dir/legacy-values.yaml" "$legacy"
+done
 
 # Capability roots: current, then next, as one PEM bundle; none, no setting.
 assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
@@ -201,12 +212,12 @@ next_root=$'-----BEGIN CERTIFICATE-----\nbmV4dA==\n-----END CERTIFICATE-----\n'
 capability_roots() {
   awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
 }
-render raw-roots "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+render raw-roots "$fixtures/direct-export-values.yaml" \
   --set-string pipes.trustedRoots.current="$current_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots.yaml")" == "${current_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root"
 assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
-render raw-roots-rotation "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+render raw-roots-rotation "$fixtures/direct-export-values.yaml" \
   --set-string pipes.trustedRoots.current="$current_root" \
   --set-string pipes.trustedRoots.next="$next_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
