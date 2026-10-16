@@ -22,7 +22,7 @@ func (r *Reader) Int(key string, def, maxVal int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 || n > maxVal {
-		r.errs = append(r.errs, fmt.Errorf("%s must be 1 to %d, got %q", key, maxVal, v))
+		r.errs = append(r.errs, fmt.Errorf("%s: must be 1 to %d, got %q", key, maxVal, v))
 	}
 	return n
 }
@@ -35,7 +35,7 @@ func (r *Reader) Duration(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
-		r.errs = append(r.errs, fmt.Errorf("%s must be a duration such as 15m, got %q", key, v))
+		r.errs = append(r.errs, fmt.Errorf("%s: must be a duration such as 15m, got %q", key, v))
 	}
 	return d
 }
@@ -50,7 +50,7 @@ func (r *Reader) Bool(key string, def bool) bool {
 	case "true":
 		return true
 	default:
-		r.errs = append(r.errs, fmt.Errorf("%s must be true or false, got %q", key, v))
+		r.errs = append(r.errs, fmt.Errorf("%s: must be true or false, got %q", key, v))
 		return def
 	}
 }
