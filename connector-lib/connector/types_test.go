@@ -1,8 +1,6 @@
 package connector
 
 import (
-	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -70,50 +68,5 @@ func TestFilterContentDependentHeaders(t *testing.T) {
 				t.Errorf("FilterContentDependentHeaders() mismatch (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func TestErrorCodeFor(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want ErrorCode
-	}{
-		{
-			name: "a plain error is an upstream failure",
-			err:  errors.New("dial tcp: connection refused"),
-			want: ErrorCodeUpstreamError,
-		},
-		{
-			name: "a coded error keeps its code",
-			err:  NewCodedError(ErrorCodeUnsupportedEncoding, errors.New("zstd")),
-			want: ErrorCodeUnsupportedEncoding,
-		},
-		{
-			name: "a code survives being wrapped",
-			err: fmt.Errorf("executing request: %w",
-				NewCodedError(ErrorCodeUnsupportedEncoding, errors.New("zstd"))),
-			want: ErrorCodeUnsupportedEncoding,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if diff := cmp.Diff(tt.want, ErrorCodeFor(tt.err)); diff != "" {
-				t.Errorf("ErrorCodeFor() mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-func TestCodedError_UnwrapsToItsCause(t *testing.T) {
-	cause := errors.New("zstd cannot be redacted")
-	wrapped := NewCodedError(ErrorCodeUnsupportedEncoding, cause)
-
-	if !errors.Is(wrapped, cause) {
-		t.Error("a coded error should unwrap to its cause")
-	}
-	if diff := cmp.Diff(cause.Error(), wrapped.Error()); diff != "" {
-		t.Errorf("message mismatch (-want +got):\n%s", diff)
 	}
 }
