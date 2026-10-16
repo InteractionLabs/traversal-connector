@@ -1,5 +1,7 @@
 // The HTTP/2 CONNECT streams a tunnel carries pipes on, as halfconn.End
-// values for halfconn.Splice. Go's HTTP/2 server ends a stream only when its
+// values: the edge controller splices them (halfconn.Splice), and the
+// connector and the Integration Proxy speak TLS over them
+// (halfconn.NewStreamConn). Go's HTTP/2 server ends a stream only when its
 // handler returns, hence ServerStream's Finish.
 
 package rawpipe

@@ -1,8 +1,9 @@
-// Package halfconn is connections that can half-close, and the copy that
-// joins two of them. The connector, the edge controller, the Integration
-// Proxy and the egress proxy all carry byte streams whose ends must stay
-// distinct: a peer that is done sending (CloseWrite, a FIN) is not a peer
-// that failed (a reset).
+// Package halfconn is connections that can half-close: the copy that joins
+// two of them (Splice), and a pipe stream as a net.Conn (StreamConn). The
+// edge controller and the egress proxy splice byte streams whose ends must
+// stay distinct: a peer that is done sending (CloseWrite, a FIN) is not a
+// peer that failed (a reset). The connector and the Integration Proxy run
+// TLS over a pipe stream.
 //
 // net.Conn alone cannot say that: its only end is Close, which ends both
 // directions, so a copy that sees EOF one way would cut off the other. Conn

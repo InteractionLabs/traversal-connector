@@ -1,9 +1,9 @@
-// Splice is the pipe copy the connector, the edge controller and the
-// Integration Proxy share. It is not io.Copy or httputil.ReverseProxy because
-// those cannot tell a clean end from a failure: here a clean end on one side
-// becomes a half-close (CloseWrite) on the other, and a failure a reset
-// (Abort). Splice also enforces idle and lifetime limits and counts bytes for
-// the audit log.
+// Splice is the byte copy the edge controller (between a pipe and its tunnel
+// stream) and the egress proxy (between a CONNECT and its destination) share.
+// It is not io.Copy or httputil.ReverseProxy because those cannot tell a
+// clean end from a failure: here a clean end on one side becomes a half-close
+// (CloseWrite) on the other, and a failure a reset (Abort). Splice also
+// enforces idle and lifetime limits and counts bytes for the audit log.
 
 package halfconn
 
