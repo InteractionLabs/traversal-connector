@@ -29,18 +29,18 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		return nil, err
 	}
 	var proxy *url.URL
-	if raw := os.Getenv("TRAVERSAL_RAW_PIPES_EGRESS_PROXY"); raw != "" {
+	if raw := os.Getenv("TRAVERSAL_PIPES_EGRESS_PROXY"); raw != "" {
 		if proxy, err = url.Parse(raw); err != nil || proxy.Scheme != "http" || proxy.Host == "" {
-			return nil, errors.New("TRAVERSAL_RAW_PIPES_EGRESS_PROXY must be an http:// URL")
+			return nil, errors.New("TRAVERSAL_PIPES_EGRESS_PROXY must be an http:// URL")
 		}
 	}
-	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS"))
+	forbidden, err := forbiddenCIDRs(os.Getenv("TRAVERSAL_PIPES_FORBIDDEN_CIDRS"))
 	if err != nil {
 		return nil, err
 	}
 	policy, err := dialpolicy.New(dialpolicy.Config{
 		Proxy:          proxy,
-		ProxyResolves:  e.bool("TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES"),
+		ProxyResolves:  e.bool("TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES"),
 		ExtraForbidden: forbidden,
 	})
 	if err != nil {
@@ -58,15 +58,15 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		ConnectorID:        cfg.ConnectorID,
 		Verifier:           verifier,
 		Policy:             policy,
-		MaxPipes:           e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096),
+		MaxPipes:           e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
 		RequiresInspection: requiresInspection,
-		RefuseTCP:          e.bool("TRAVERSAL_RAW_PIPES_REFUSE_TCP"),
-		MaxLifetime:        e.duration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 4*time.Hour),
-		IdleTimeout:        e.duration("TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT", 15*time.Minute),
+		RefuseTCP:          e.bool("TRAVERSAL_PIPES_REFUSE_TCP"),
+		MaxLifetime:        e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
+		IdleTimeout:        e.duration("TRAVERSAL_PIPES_IDLE_TIMEOUT", 15*time.Minute),
 	}
 	t := &Tunnels{
 		ConnectorID: cfg.ConnectorID,
-		Count:       e.int("TRAVERSAL_TUNNEL_COUNT", 2, 8),
+		Count:       e.int("TRAVERSAL_TUNNELS_COUNT", 2, 8),
 		Server:      server,
 		Roots:       trust.Roots,
 		Kids:        trust.Kids,
@@ -189,7 +189,7 @@ func (e *envReader) bool(key string) bool {
 	}
 }
 
-// forbiddenCIDRs parses TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS, comma-separated
+// forbiddenCIDRs parses TRAVERSAL_PIPES_FORBIDDEN_CIDRS, comma-separated
 // CIDRs the connector refuses beside its built-in list.
 func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
 	if v == "" {
@@ -199,7 +199,7 @@ func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
 	for cidr := range strings.SplitSeq(v, ",") {
 		p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
 		if err != nil {
-			return nil, fmt.Errorf("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS: %q is not a CIDR", cidr)
+			return nil, fmt.Errorf("TRAVERSAL_PIPES_FORBIDDEN_CIDRS: %q is not a CIDR", cidr)
 		}
 		prefixes = append(prefixes, p)
 	}
