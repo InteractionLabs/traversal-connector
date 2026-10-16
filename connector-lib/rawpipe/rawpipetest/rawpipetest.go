@@ -1,17 +1,26 @@
-// Package rawpipetest makes tenant CAs and the certificates they issue, for
-// tests of a pipe's TLS.
+// Package rawpipetest makes tenant CAs and the certificates they issue, and
+// a connector's pipe side, for tests of a pipe's peers.
 package rawpipetest
 
 import (
+	"cmp"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"math/big"
+	"net"
+	"net/http"
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpserve"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
 // CA is a certificate authority, such as a tenant CA.
@@ -80,4 +89,56 @@ func (ca *CA) issue(tb testing.TB, tmpl *x509.Certificate) tls.Certificate {
 func serial() *big.Int {
 	n, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
 	return n
+}
+
+// PipeServer is a connector's pipe side, for tests of its peer. It verifies
+// a CONNECT's capability with v for the connector cert names (its
+// connector-scoped SPIFFE ID), accepts it, serves PipeServerTLS with cert,
+// then serves h inside, h2 or http/1.1 by ALPN. A request reaches h with
+// r.URL.Scheme its destination's: on h2, rawpipe.HeaderUpstreamScheme (https
+// when absent); on HTTP/1.1, the absolute-form target's.
+func PipeServer(tb testing.TB, v *capability.Verifier, cert tls.Certificate, h http.Handler,
+) http.HandlerFunc {
+	tb.Helper()
+	var connectorID string
+	if cert.Leaf != nil && len(cert.Leaf.URIs) == 1 {
+		_, connectorID, _ = rawpipe.TenantID(cert.Leaf.URIs[0].String())
+	}
+	if connectorID == "" {
+		tb.Fatal("rawpipetest: PipeServer needs a connector-scoped certificate")
+	}
+	scheme := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 {
+			r.URL.Scheme = cmp.Or(r.Header.Get(rawpipe.HeaderUpstreamScheme), "https")
+		}
+		h.ServeHTTP(w, r)
+	})
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, port, ok := capability.SplitAuthority(r.Host)
+		if r.Method != http.MethodConnect || !ok {
+			rawpipe.Refuse(w, rawpipe.ProtocolError, "expected CONNECT to a canonical host:port")
+			return
+		}
+		_, err := v.Verify(r.Header.Get(rawpipe.HeaderCapability), connectorID, host, port)
+		if err != nil {
+			rawpipe.Refuse(w, rawpipe.ReasonOf(err, rawpipe.InvalidCapability), err.Error())
+			return
+		}
+		stream, err := rawpipe.Accept(w, r)
+		if err != nil {
+			return
+		}
+		conn := halfconn.NewStreamConn(stream)
+		tc := tls.Server(conn, rawpipe.PipeServerTLS(cert))
+		if tc.HandshakeContext(r.Context()) == nil {
+			_ = httpserve.ServeConn(&http.Server{
+				Handler:           scheme,
+				ReadHeaderTimeout: 10 * time.Second,
+				BaseContext:       func(net.Listener) context.Context { return r.Context() },
+			}, tc)
+		}
+		_ = conn.Close()
+		conn.Wait() // the stream's CloseWrite must run before the handler returns
+		stream.Finish()
+	}
 }
