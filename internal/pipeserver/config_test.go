@@ -79,9 +79,9 @@ func TestNew(t *testing.T) {
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
-			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required"},
+			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS: one is required"},
 		{name: "keys without issuer", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_ISSUER": ""},
-			wantErr: "TRAVERSAL_CAPABILITY_ISSUER is required"},
+			wantErr: "TRAVERSAL_CAPABILITY_ISSUER: required"},
 		{name: "roots alone", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
 			"TRAVERSAL_CAPABILITY_ISSUER": "", "TRAVERSAL_CAPABILITY_ROOTS": "roots"}},
 		{name: "base64 roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
@@ -97,7 +97,7 @@ func TestNew(t *testing.T) {
 			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
 			wantErr: `TRAVERSAL_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
 		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "https://p:3128"},
-			wantErr: "must be an http:// URL"},
+			wantErr: "TRAVERSAL_PIPES_EGRESS_PROXY: must be an http:// URL"},
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
 			wantErr: "is for connector"},
 		{name: "not a tenant certificate", spiffeID: "spiffe://traversal.com/processor/x",
@@ -109,7 +109,7 @@ func TestNew(t *testing.T) {
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
 		{name: "legacy egress proxy", spiffeID: orgScoped,
-			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL"},
+			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL: "},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
@@ -129,7 +129,7 @@ func TestNew(t *testing.T) {
 			if c.mutate != nil {
 				c.mutate(cfg)
 			}
-			tunnels, err := New(cfg, redact.NewRedactor())
+			tunnels, err := New(cfg, redact.NewRedactor(), http.NotFoundHandler())
 			switch {
 			case c.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -162,7 +162,7 @@ func TestTunnelTLS(t *testing.T) {
 	cfg.TLSCA = &ca
 	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
 	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
-	tunnels, err := New(cfg, redact.NewRedactor())
+	tunnels, err := New(cfg, redact.NewRedactor(), http.NotFoundHandler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 	root := testRoot(t)
 	t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(root))
 	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"),
-		redact.NewRedactor())
+		redact.NewRedactor(), http.NotFoundHandler())
 	if err != nil {
 		t.Fatal(err)
 	}

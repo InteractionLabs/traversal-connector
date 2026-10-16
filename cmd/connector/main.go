@@ -219,12 +219,17 @@ func main() {
 		go loader.Run(ctx)
 	}
 
-	tunnels, err := pipeserver.New(&cfg, redactor)
+	// Probes answer with the tunnels' readiness, so the handler reads them
+	// once New has returned.
+	var tunnels *pipeserver.Tunnels
+	tunnels, err = pipeserver.New(&cfg, redactor,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			router.Readiness(tunnels).ServeHTTP(w, r)
+		}))
 	if err != nil {
 		slog.ErrorContext(ctx, "tunnels cannot start", "err", err)
 		os.Exit(1)
 	}
-	tunnels.Server.Ready = router.Readiness(tunnels)
 	done := tunnels.Start(ctx)
 
 	slog.InfoContext(ctx, "traversal connector service starting",

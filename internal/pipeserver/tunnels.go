@@ -3,6 +3,7 @@ package pipeserver
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -72,15 +73,18 @@ func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 // Up is how many tunnels are up.
 func (t *Tunnels) Up() int { return int(t.up.Load()) }
 
-// Ready reports whether the connector should take pipes: from its first
-// tunnel on. Later, tunnels flapping (a controller rollout, a lossy proxy)
-// never make it unready, which would restart every replica at once; that
-// shows in connector.raw_tunnels_up instead.
-func (t *Tunnels) Ready(context.Context) (bool, string) {
+// errNoTunnel is a connector that has not yet held a tunnel.
+var errNoTunnel = errors.New("no tunnel")
+
+// Ready is nil once the connector should take pipes: from its first tunnel
+// on. Later, tunnels flapping (a controller rollout, a lossy proxy) never
+// make it unready, which would restart every replica at once; that shows in
+// connector.raw_tunnels_up instead.
+func (t *Tunnels) Ready(context.Context) error {
 	if t.up.Load() > 0 || t.everUp.Load() {
-		return true, ""
+		return nil
 	}
-	return false, "no tunnel"
+	return errNoTunnel
 }
 
 // redialBackoff spaces redials after a failed tunnel: 0.5-1 s, doubling to

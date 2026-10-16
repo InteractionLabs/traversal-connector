@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -27,8 +28,9 @@ import (
 )
 
 // New builds the pipe side from the environment, or says why the connector
-// cannot run it. Responses from hosts r's rules cover are redacted.
-func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
+// cannot run it. Responses from hosts r's rules cover are redacted; ready
+// answers probes (rawpipe.ProbeAuthority).
+func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, error) {
 	e := envReader{}
 	verifier, trust, err := newVerifier(cfg.TraversalControllerURL)
 	if err != nil {
@@ -54,6 +56,7 @@ func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 		ConnectorID: cfg.ConnectorID,
 		Verifier:    verifier,
 		Upstream:    up,
+		Ready:       ready,
 		MaxPipes:    e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
 		MaxLifetime: e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
 		PipeLimits: PipeLimits{
@@ -82,7 +85,7 @@ func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 		t.Addr = connectTo
 	}
 	if cfg.EgressProxyURL != nil {
-		return nil, errors.New("tunnels through EGRESS_PROXY_URL are not supported yet")
+		return nil, errors.New("EGRESS_PROXY_URL: tunnels through it are not supported yet")
 	}
 	return t, errors.Join(e.errs...)
 }
@@ -164,7 +167,7 @@ func egressProxy() (*url.URL, func(host string, port uint16) bool, error) {
 func parseProxy(name, raw string) (*url.URL, error) {
 	proxy, err := url.Parse(raw)
 	if err != nil || proxy.Scheme != "http" || proxy.Host == "" {
-		return nil, errors.New(name + " must be an http:// URL")
+		return nil, errors.New(name + ": must be an http:// URL")
 	}
 	return proxy, nil
 }
@@ -186,10 +189,10 @@ func newVerifier(controllerURL string) (*capability.Verifier, capability.Loaded,
 	switch {
 	case keys == "" && roots == "":
 		return nil, capability.Loaded{}, errors.New(
-			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required")
+			"TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS: one is required")
 	case keys != "" && issuer == "":
 		return nil, capability.Loaded{}, errors.New(
-			"TRAVERSAL_CAPABILITY_ISSUER is required with TRAVERSAL_CAPABILITY_KEYS")
+			"TRAVERSAL_CAPABILITY_ISSUER: required with TRAVERSAL_CAPABILITY_KEYS")
 	case roots != "":
 		u, err := url.Parse(controllerURL)
 		ok := false
@@ -198,7 +201,7 @@ func newVerifier(controllerURL string) (*capability.Verifier, capability.Loaded,
 		}
 		if !ok {
 			return nil, capability.Loaded{}, errors.New(
-				"TRAVERSAL_CAPABILITY_ROOTS needs a controller URL with a host name")
+				"TRAVERSAL_CAPABILITY_ROOTS: needs a controller URL with a host name")
 		}
 	}
 	v, loaded, err := capability.ParseTrust(
@@ -210,7 +213,8 @@ func newVerifier(controllerURL string) (*capability.Verifier, capability.Loaded,
 }
 
 // tunnelTLS is mutual TLS 1.3 to the controller host, with the connector's
-// own certificate and the roots its legacy tunnels trust.
+// own certificate and the controller CA (or the system roots) that
+// config.BuildClientTLSConfig trusts.
 func tunnelTLS(cfg *config.Config) (*tls.Config, string, error) {
 	u, err := url.Parse(cfg.TraversalControllerURL)
 	if err != nil || u.Scheme != "https" || cfg.TLSCert == nil || cfg.TLSKey == nil {
@@ -242,7 +246,7 @@ func (e *envReader) int(key string, def, maxVal int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 1 || n > maxVal {
-		e.errs = append(e.errs, fmt.Errorf("%s must be 1 to %d, got %q", key, maxVal, v))
+		e.errs = append(e.errs, fmt.Errorf("%s: must be 1 to %d, got %q", key, maxVal, v))
 	}
 	return n
 }
@@ -254,7 +258,7 @@ func (e *envReader) duration(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
-		e.errs = append(e.errs, fmt.Errorf("%s must be a duration such as 15m, got %q", key, v))
+		e.errs = append(e.errs, fmt.Errorf("%s: must be a duration such as 15m, got %q", key, v))
 	}
 	return d
 }
@@ -268,7 +272,7 @@ func (e *envReader) bool(key string, def bool) bool {
 	case "true":
 		return true
 	default:
-		e.errs = append(e.errs, fmt.Errorf("%s must be true or false, got %q", key, v))
+		e.errs = append(e.errs, fmt.Errorf("%s: must be true or false, got %q", key, v))
 		return def
 	}
 }
@@ -290,13 +294,12 @@ func forbiddenCIDRs(v string) ([]netip.Prefix, error) {
 	return prefixes, nil
 }
 
-// checkIdentity refuses a certificate the edge controller would refuse, so
-// such a connector keeps to the legacy transport and says why.
-// It applies rawpipe.CheckIdentity, the edge controller's rule, naming the
-// setting and certificate it read.
+// checkIdentity refuses, at start, a certificate the edge controller would
+// refuse at every tunnel: rawpipe.CheckIdentity, the edge controller's rule,
+// naming the setting and certificate it read.
 func checkIdentity(cert *x509.Certificate, connectorID string) error {
 	if !rawpipe.IsConnectorID(connectorID) {
-		return fmt.Errorf("TRAVERSAL_CONNECTOR_ID %q is not a lower-case UUID", connectorID)
+		return fmt.Errorf("TRAVERSAL_CONNECTOR_ID: %q is not a lower-case UUID", connectorID)
 	}
 	if cert == nil || len(cert.URIs) != 1 {
 		return errors.New("the client certificate needs exactly one Traversal tenant SPIFFE ID")
