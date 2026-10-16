@@ -271,8 +271,8 @@ func TestRedialBackoff(t *testing.T) {
 // per tunnel (so opens past it are capacity refusals, not open timeouts),
 // and pings a quiet tunnel so a dead far end is found.
 func TestTunnelServerLimits(t *testing.T) {
-	s := &Server{MaxPipes: 4000}
-	h := s.h2(2)
+	s := &Server{MaxPipes: 4000, Tunnels: 2}
+	h := s.h2()
 	if h.MaxConcurrentStreams < 2000 || h.MaxConcurrentStreams > 2100 {
 		t.Errorf("MaxConcurrentStreams = %d for 4000 pipes over 2 tunnels", h.MaxConcurrentStreams)
 	}

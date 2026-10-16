@@ -58,7 +58,7 @@ func New(cfg *config.Config, requiresInspection func(string) bool) (*Tunnels, er
 		ConnectorID:        cfg.ConnectorID,
 		Verifier:           verifier,
 		Policy:             policy,
-		MaxPipes:           int64(e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096)),
+		MaxPipes:           e.int("TRAVERSAL_RAW_PIPES_MAX", 200, 4096),
 		RequiresInspection: requiresInspection,
 		RefuseTCP:          e.bool("TRAVERSAL_RAW_PIPES_REFUSE_TCP"),
 		MaxLifetime:        e.duration("TRAVERSAL_RAW_PIPES_MAX_LIFETIME", 4*time.Hour),
