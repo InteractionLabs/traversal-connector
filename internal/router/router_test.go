@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,8 +16,13 @@ type tunnels struct {
 	ready bool
 }
 
-func (t tunnels) Up() int                              { return t.up }
-func (t tunnels) Ready(context.Context) (bool, string) { return t.ready, "no tunnel" }
+func (t tunnels) Up() int { return t.up }
+func (t tunnels) Ready(context.Context) error {
+	if t.ready {
+		return nil
+	}
+	return errors.New("no tunnel")
+}
 
 // TestReadiness: readiness is the tunnels', and the body keeps the
 // active_tunnels field the API's status probe parses.

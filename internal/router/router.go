@@ -18,8 +18,8 @@ import (
 type Tunnels interface {
 	// Up is how many tunnels are up.
 	Up() int
-	// Ready reports whether the connector can take pipes, and if not, why.
-	Ready(ctx context.Context) (ready bool, reason string)
+	// Ready is nil if the connector can take pipes, and otherwise why not.
+	Ready(ctx context.Context) error
 }
 
 // NewRouter creates a gin HTTP engine for the traversal connector with health and
@@ -69,8 +69,8 @@ func Readiness(tunnels Tunnels) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := map[string]any{"status": "ready", "active_tunnels": tunnels.Up()}
 		status := http.StatusOK
-		if ready, reason := tunnels.Ready(r.Context()); !ready {
-			body["status"], body["reason"], status = "not ready", reason,
+		if err := tunnels.Ready(r.Context()); err != nil {
+			body["status"], body["reason"], status = "not ready", err.Error(),
 				http.StatusServiceUnavailable
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -729,11 +729,11 @@ func TestTunnelServerLimits(t *testing.T) {
 // controller rollout) does not make the connector unready.
 func TestReadyAfterFirstTunnel(t *testing.T) {
 	tunnels := &Tunnels{}
-	if ok, _ := tunnels.Ready(t.Context()); ok {
+	if tunnels.Ready(t.Context()) == nil {
 		t.Error("ready before any tunnel")
 	}
 	tunnels.everUp.Store(true)
-	if ok, _ := tunnels.Ready(t.Context()); !ok {
+	if err := tunnels.Ready(t.Context()); err != nil {
 		t.Error("unready after tunnels flapped")
 	}
 }
