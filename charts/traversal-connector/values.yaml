@@ -91,7 +91,7 @@ pipes:
   egressProxyResolves: ""  # TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES
   # Comma-separated CIDRs pipes may never reach, beside the built-in list
   # (loopback, link-local, metadata and the connector's own addresses), which
-  # cannot be removed. An entry that does not parse stops raw pipes starting.
+  # cannot be removed. An entry that does not parse stops the connector starting.
   forbiddenCIDRs: ""       # TRAVERSAL_PIPES_FORBIDDEN_CIDRS
 
 # ─── mTLS to the Traversal control plane (optional) ──────────────────────────
