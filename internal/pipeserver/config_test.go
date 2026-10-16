@@ -29,8 +29,6 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 )
 
-const org = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d"
-
 // connectorConfig is a connector config whose client certificate names
 // spiffeID.
 func connectorConfig(t *testing.T, spiffeID string) *config.Config {
