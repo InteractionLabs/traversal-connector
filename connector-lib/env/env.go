@@ -1,3 +1,6 @@
+// Package env reads settings from the environment, for the connector and
+// go-traversal's services (through pkg/config): the GetEnv functions, which
+// fall back to a default on any bad value, and Reader, which refuses one.
 package env
 
 import (

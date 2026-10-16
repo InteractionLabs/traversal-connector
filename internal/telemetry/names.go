@@ -1,3 +1,6 @@
+// Package telemetry is the connector's own telemetry: its span and metric
+// names and how errors are reduced before they reach a span. Exporter
+// setup is connector-lib/telemetry.
 package telemetry
 
 // Span names emitted by the traversal connector.
