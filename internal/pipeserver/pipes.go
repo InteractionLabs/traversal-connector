@@ -19,7 +19,8 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
-const dialTimeout = 10 * time.Second
+// destinationDialTimeout bounds a pipe's dial to its destination.
+const destinationDialTimeout = 10 * time.Second
 
 const (
 	// streamWindow carries one pipe at full speed at WAN latency and bounds
@@ -38,8 +39,9 @@ const (
 // h2 is the tunnel's HTTP/2 configuration. Its stream limit is the
 // connector's pipe limit per tunnel, so a pipe over it is refused as capacity
 // rather than queued into open_timeout.
-func (s *Server) h2(tunnels int) *http.HTTP2Config {
-	perTunnel := max(1, (int(s.MaxPipes)+tunnels-1)/tunnels)
+func (s *Server) h2() *http.HTTP2Config {
+	tunnels := max(1, s.Tunnels)
+	perTunnel := max(1, (s.MaxPipes+tunnels-1)/tunnels)
 	return &http.HTTP2Config{
 		// Headroom for drain requests and refusals.
 		MaxConcurrentStreams:          min(perTunnel+16, 1<<20),
@@ -59,7 +61,7 @@ type Server struct {
 		Dial(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error)
 	}
 	// MaxPipes caps the pipes open at once; zero is no cap.
-	MaxPipes int64
+	MaxPipes int
 	// RequiresInspection reports hosts redaction rules cover; a raw pipe to
 	// one is refused (inspection_required). Nil covers none.
 	RequiresInspection func(host string) bool
@@ -87,7 +89,7 @@ func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	protocols.SetUnencryptedHTTP2(true)
 	_ = httpserve.ServeConn(&http.Server{
 		Protocols:         protocols,
-		HTTP2:             s.h2(max(1, s.Tunnels)),
+		HTTP2:             s.h2(),
 		ReadHeaderTimeout: prefaceTimeout,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == rawpipe.DrainMethod {
@@ -160,14 +162,14 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
 	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
 		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
 		"session_id", claims.SessionID, "authority", r.Host)
-	if !s.pipes.Add(int(s.MaxPipes)) {
+	if !s.pipes.Add(s.MaxPipes) {
 		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
 	if s.RequiresInspection != nil && s.RequiresInspection(host) {
 		s.pipes.Done()
 		return nil, "", rawpipe.Errorf(rawpipe.InspectionRequired, "redaction rules cover the host")
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), dialTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), destinationDialTimeout)
 	defer cancel()
 	conn, upstream, err := s.Policy.Dial(ctx, host, port)
 	if err != nil {

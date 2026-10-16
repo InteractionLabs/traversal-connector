@@ -34,9 +34,16 @@ type Tunnels struct {
 	stopping atomic.Bool
 }
 
-// drainGrace is how long a stopping connector lets open pipes finish; it
-// stays under the pod's 30 s termination grace period.
-const drainGrace = 20 * time.Second
+const (
+	// drainGrace is how long a stopping connector lets open pipes finish; it
+	// stays under the pod's 30 s termination grace period.
+	drainGrace = 20 * time.Second
+	// dialTimeout bounds a tunnel's dial and TLS handshake.
+	dialTimeout = 15 * time.Second
+	// stableAfter is how long a tunnel must last for the redial backoff to
+	// start over: one that drops sooner is still failing.
+	stableAfter = 30 * time.Second
+)
 
 // Start holds the tunnels until ctx is done, then drains: no more redials,
 // new pipes refused with connector_draining, open ones given drainGrace. The
@@ -44,18 +51,18 @@ const drainGrace = 20 * time.Second
 func (t *Tunnels) Start(ctx context.Context) <-chan struct{} {
 	// The tunnels outlive ctx so pipes already on their way are refused
 	// rather than reset.
-	transport, closeTunnels := context.WithCancel(context.WithoutCancel(ctx))
+	tunnelCtx, closeTunnels := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
 	// Before any goroutine: Ready reads it from the moment Start returns.
 	t.downAt.Store(time.Now().UnixNano())
 	for range t.Count {
-		go t.hold(transport)
+		go t.hold(tunnelCtx)
 	}
 	go func() {
 		defer close(done)
 		<-ctx.Done()
 		t.stopping.Store(true)
-		grace, cancel := context.WithTimeout(transport, drainGrace)
+		grace, cancel := context.WithTimeout(tunnelCtx, drainGrace)
 		t.Server.Drain(grace)
 		cancel()
 		closeTunnels()
@@ -90,7 +97,7 @@ func (t *Tunnels) hold(ctx context.Context) {
 	for ctx.Err() == nil && !t.stopping.Load() {
 		start := time.Now()
 		err := t.serveOne(ctx)
-		if time.Since(start) > 30*time.Second {
+		if time.Since(start) > stableAfter {
 			retry.Reset()
 		}
 		wait := retry.NextBackOff()
@@ -110,7 +117,7 @@ func (t *Tunnels) hold(ctx context.Context) {
 // edge controller asks for a replacement, leaving the old tunnel serving
 // until the edge controller closes it, or the tunnel's error when it closes.
 func (t *Tunnels) serveOne(ctx context.Context) error {
-	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	c, err := (&tls.Dialer{Config: t.TLS}).DialContext(dctx, "tcp", t.Addr)
 	if err != nil {
