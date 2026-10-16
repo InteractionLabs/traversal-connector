@@ -1,0 +1,47 @@
+package capability
+
+import (
+	"net"
+	"net/netip"
+	"strconv"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/internal/hostname"
+)
+
+// Canonical returns the one spelling of host that capabilities carry: an IP
+// literal in its shortest form, or a lowercase ASCII name without a trailing
+// dot. It refuses names a resolver could read as an address ("127.1").
+//
+// It is not golang.org/x/net/idna: idna maps Unicode and full-width names
+// onto ASCII, so many spellings would reach one host, and refuses the
+// underscores real internal names use. A capability names its host once.
+func Canonical(host string) (string, bool) { return hostname.Canonical(host) }
+
+// IsCanonical reports whether host is already canonical.
+func IsCanonical(host string) bool {
+	c, ok := Canonical(host)
+	return ok && c == host
+}
+
+// SplitAuthority parses a canonical host:port.
+func SplitAuthority(authority string) (string, uint16, bool) {
+	host, p, err := net.SplitHostPort(authority)
+	if err != nil || !IsCanonical(host) {
+		return "", 0, false
+	}
+	port, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || port == 0 || strconv.FormatUint(port, 10) != p ||
+		net.JoinHostPort(host, p) != authority {
+		return "", 0, false
+	}
+	return host, uint16(port), true
+}
+
+// Absolute is host as a resolver must get it: names gain a trailing dot so a
+// search list cannot rewrite them.
+func Absolute(host string) string {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return host
+	}
+	return host + "."
+}

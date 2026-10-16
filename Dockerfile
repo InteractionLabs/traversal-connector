@@ -1,5 +1,5 @@
-# golang:1.27.1 — multi-architecture manifest pinned for reproducible builds.
-ARG GO_IMAGE=golang:1.27.1@sha256:e0174e51e81218523251d85d248a90d24c3d5e81543b4f07a5d66229397db190
+# golang:1.27.2 — multi-architecture manifest pinned for reproducible builds.
+ARG GO_IMAGE=golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8
 
 # --- Builder stage ---
 FROM ${GO_IMAGE} AS builder

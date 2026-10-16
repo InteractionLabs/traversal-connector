@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/net/http2"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
@@ -195,7 +193,11 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
+		HTTP2:           h2Config(),
 	}
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetHTTP1(true)
+	transport.Protocols.SetHTTP2(true)
 	if cfg.TraversalControllerConnectTo != "" {
 		transport.Proxy = nil
 		transport.DialContext = fixedTargetDialer(cfg.TraversalControllerConnectTo)
@@ -204,39 +206,26 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 		transport.Proxy = http.ProxyURL(egressProxyURL)
 	}
 
-	h2Transport, h2Err := http2.ConfigureTransports(transport)
-	if h2Err != nil {
-		slog.Error("failed to configure HTTP/2 transport, keepalives disabled",
-			"error", h2Err)
-	} else {
-		h2Transport.ReadIdleTimeout = h2ReadIdleTimeout
-		h2Transport.PingTimeout = h2PingTimeout
-	}
-
 	return transport, nil
+}
+
+// h2Config is the controller connection's HTTP/2 keepalive: a PING after
+// h2ReadIdleTimeout of silence, and the connection closed if it goes
+// unanswered for h2PingTimeout.
+func h2Config() *http.HTTP2Config {
+	return &http.HTTP2Config{
+		SendPingTimeout: h2ReadIdleTimeout,
+		PingTimeout:     h2PingTimeout,
+	}
 }
 
 // newH2CTransport creates an HTTP/2 cleartext transport for direct connections
 // without a proxy. Used for local development.
-func newH2CTransport(connectTo string) *http2.Transport {
-	transport := &http2.Transport{
-		AllowHTTP:       true,
-		ReadIdleTimeout: h2ReadIdleTimeout,
-		PingTimeout:     h2PingTimeout,
-		DialTLSContext: func(
-			ctx context.Context,
-			network, addr string,
-			_ *tls.Config,
-		) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
-	}
+func newH2CTransport(connectTo string) *http.Transport {
+	transport := &http.Transport{HTTP2: h2Config(), Protocols: new(http.Protocols)}
+	transport.Protocols.SetUnencryptedHTTP2(true)
 	if connectTo != "" {
-		transport.DialTLSContext = func(
-			ctx context.Context, network, _ string, _ *tls.Config,
-		) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, connectTo)
-		}
+		transport.DialContext = fixedTargetDialer(connectTo)
 	}
 	return transport
 }
