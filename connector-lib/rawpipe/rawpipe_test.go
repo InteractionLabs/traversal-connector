@@ -48,8 +48,8 @@ func TestPreface(t *testing.T) {
 	}{
 		{rawpipe.Hello{ConnectorID: conn}, rawpipe.Preface + " " + conn + "\n"},
 		{rawpipe.Hello{ConnectorID: conn, Roots: []string{root, "0123456789abcdef"},
-			Kids: []string{"k1", "k2"}, TLS: true}, rawpipe.Preface + " " + conn +
-			" roots=" + root + ",0123456789abcdef kids=k1,k2 tls=1\n"},
+			Kids: []string{"k1", "k2"}}, rawpipe.Preface + " " + conn +
+			" roots=" + root + ",0123456789abcdef kids=k1,k2\n"},
 	} {
 		var b strings.Builder
 		if err := rawpipe.WritePreface(&b, c.hello); err != nil || b.String() != c.want {
@@ -70,11 +70,12 @@ func TestPreface(t *testing.T) {
 		t.Error("WritePreface with an upper-case connector ID: accepted")
 	}
 
-	// Unknown fields are ignored, which is how a controller older than tls=1
-	// reads it; the tag, the connector ID and known fields are strict.
+	// Unknown fields are ignored, so a connector can report more without a
+	// controller release; the tag, the connector ID and known fields are
+	// strict.
 	if h, ok := rawpipe.ParsePreface(
 		rawpipe.Preface + " " + conn + " future=x kids=k1\n"); !ok || h.ConnectorID != conn ||
-		len(h.Kids) != 1 || h.TLS {
+		len(h.Kids) != 1 {
 		t.Errorf("unknown field: %+v %v", h, ok)
 	}
 	for _, line := range []string{
@@ -85,8 +86,6 @@ func TestPreface(t *testing.T) {
 		rawpipe.Preface + " " + conn + " bare\n",
 		rawpipe.Preface + " " + conn + " kids=a kids=b\n",
 		rawpipe.Preface + " " + conn + " =x\n",
-		rawpipe.Preface + " " + conn + " tls=0\n",
-		rawpipe.Preface + " " + conn + " tls=1 tls=1\n",
 	} {
 		if _, ok := rawpipe.ParsePreface(line); ok {
 			t.Errorf("ParsePreface(%q) accepted", line)
@@ -99,9 +98,9 @@ func TestPreface(t *testing.T) {
 // ErrPreface; a reader that fails first is not.
 func TestReadPreface(t *testing.T) {
 	const conn = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
-	line := rawpipe.Preface + " " + conn + " kids=k1 tls=1\n"
+	line := rawpipe.Preface + " " + conn + " kids=k1\n"
 	r := bufio.NewReader(strings.NewReader(line + "rest"))
-	if h, err := rawpipe.ReadPreface(r); err != nil || h.ConnectorID != conn || !h.TLS ||
+	if h, err := rawpipe.ReadPreface(r); err != nil || h.ConnectorID != conn ||
 		strings.Join(h.Kids, ",") != "k1" {
 		t.Fatalf("ReadPreface = %+v %v", h, err)
 	}

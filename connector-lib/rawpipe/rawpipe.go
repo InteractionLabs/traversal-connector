@@ -31,16 +31,13 @@ const (
 // A preface line is Preface, a space, the connector ID, then optional
 // space-separated key=value fields:
 //
-//	TRAVERSAL-TUNNEL/1 <connector-id> roots=<fingerprint>,... kids=<kid>,... tls=1
+//	TRAVERSAL-TUNNEL/1 <connector-id> roots=<fingerprint>,... kids=<kid>,...
 //
 // roots and kids name the capability trust the connector has loaded, each a
-// comma-separated list; a field whose list is empty is left out. tls=1 says
-// the connector serves TLS inside every pipe (PipeServerTLS); a connector
-// that does not leaves it out.
+// comma-separated list; a field whose list is empty is left out.
 const (
 	prefaceRoots = "roots"
 	prefaceKids  = "kids"
-	prefaceTLS   = "tls"
 )
 
 // Hello is what a preface line reports.
@@ -49,9 +46,6 @@ type Hello struct {
 	// Roots and Kids are the capability trust the connector has loaded: each
 	// root's RootFingerprint, and the pinned keys' IDs.
 	Roots, Kids []string
-	// TLS is a connector that serves TLS inside every pipe, so a caller must
-	// speak it (PipeClientTLS).
-	TLS bool
 }
 
 // RootFingerprint names a capability root in a preface: the first 16 hex
@@ -84,9 +78,6 @@ func WritePreface(w io.Writer, h Hello) error {
 		}
 		line += " " + f.key + "=" + strings.Join(f.values, ",")
 	}
-	if h.TLS {
-		line += " " + prefaceTLS + "=1"
-	}
 	if line += "\n"; len(line) > MaxPrefaceLen {
 		return fmt.Errorf("rawpipe: preface: %d bytes, over %d", len(line), MaxPrefaceLen)
 	}
@@ -97,10 +88,8 @@ func WritePreface(w io.Writer, h Hello) error {
 // ParsePreface reads a preface line, with or without its newline. It is
 // strict about the tag, the connector ID and the fields it knows, and
 // lenient about the rest: unknown key=value fields are ignored, so a
-// connector can report more without a controller release. That is how
-// controllers older than tls=1 read a line carrying it. A field that is not
-// key=value, a known key given twice, or tls with any value but 1 refuses
-// the line.
+// connector can report more without a controller release. A field that is
+// not key=value, or a known key given twice, refuses the line.
 func ParsePreface(line string) (Hello, bool) {
 	fields := strings.Split(strings.TrimSuffix(line, "\n"), " ")
 	if len(fields) < 2 || fields[0] != Preface || !IsConnectorID(fields[1]) {
@@ -123,13 +112,6 @@ func ParsePreface(line string) (Hello, bool) {
 			h.Roots = list
 		case prefaceKids:
 			h.Kids = list
-		case prefaceTLS:
-			// One version so far; a later one adds a field rather than a
-			// value, so this connector's line stays readable here.
-			if value != "1" {
-				return Hello{}, false
-			}
-			h.TLS = true
 		}
 	}
 	return h, true
