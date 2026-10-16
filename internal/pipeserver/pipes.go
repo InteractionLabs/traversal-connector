@@ -15,6 +15,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpserve"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -50,39 +51,6 @@ func (s *Server) h2(tunnels int) *http.HTTP2Config {
 	}
 }
 
-// serveOn serves srv on c alone until c closes: net/http serves only
-// connections a Listener accepts, and the connector dials its tunnels.
-func serveOn(srv *http.Server, c net.Conn) {
-	closed := make(chan struct{})
-	var once sync.Once
-	srv.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateClosed || state == http.StateHijacked {
-			once.Do(func() { close(closed) })
-		}
-	}
-	_ = srv.Serve(&oneConn{conn: c, done: closed})
-}
-
-// oneConn is a Listener that accepts conn once, then blocks until done.
-type oneConn struct {
-	conn net.Conn
-	done <-chan struct{}
-	once sync.Once
-}
-
-func (l *oneConn) Accept() (net.Conn, error) {
-	var c net.Conn
-	l.once.Do(func() { c = l.conn })
-	if c != nil {
-		return c, nil
-	}
-	<-l.done
-	return nil, net.ErrClosed
-}
-
-func (l *oneConn) Close() error   { return nil }
-func (l *oneConn) Addr() net.Addr { return l.conn.LocalAddr() }
-
 // Server serves pipes on tunnels.
 type Server struct {
 	ConnectorID string
@@ -117,7 +85,7 @@ func (s *Server) ServeConn(nc net.Conn, drained func()) {
 	var once sync.Once
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
-	serveOn(&http.Server{
+	_ = httpserve.ServeConn(&http.Server{
 		Protocols:         protocols,
 		HTTP2:             s.h2(max(1, s.Tunnels)),
 		ReadHeaderTimeout: prefaceTimeout,
@@ -149,8 +117,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		reason := rawpipe.ReasonOf(err, rawpipe.DialFailed)
 		s.metrics.opened(reason)
 		log.Info("pipe refused", "reason", reason, "err", err)
-		w.Header().Set(rawpipe.HeaderReason, string(reason))
-		w.WriteHeader(reason.Status())
+		rawpipe.Refuse(w, reason, string(reason))
 		return
 	}
 	defer s.pipes.Done()
