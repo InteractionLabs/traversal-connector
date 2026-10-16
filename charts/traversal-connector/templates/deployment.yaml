@@ -183,19 +183,19 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
-            {{- if not (kindIs "bool" .Values.rawPipes.enabled) }}
-            {{- fail (printf "rawPipes.enabled must be a boolean (true or false), got %q." (toString .Values.rawPipes.enabled)) }}
+            {{- if not (kindIs "bool" .Values.pipes.enabled) }}
+            {{- fail (printf "pipes.enabled must be a boolean (true or false), got %q." (toString .Values.pipes.enabled)) }}
             {{- end }}
-            {{- if .Values.rawPipes.enabled }}
-            - name: TRAVERSAL_RAW_PIPES
+            {{- if .Values.pipes.enabled }}
+            - name: TRAVERSAL_PIPES
               value: "enabled"
-            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_RAW_PIPES_MAX" "maxLifetime" "TRAVERSAL_RAW_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNEL_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS" "refuseTCP" "TRAVERSAL_RAW_PIPES_REFUSE_TCP" }}
-            {{- with get $.Values.rawPipes $key }}
+            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "refuseTCP" "TRAVERSAL_PIPES_REFUSE_TCP" }}
+            {{- with get $.Values.pipes $key }}
             - name: {{ $name }}
               value: {{ . | toString | quote }}
             {{- end }}
             {{- end }}
-            {{- $roots := .Values.rawPipes.trustedRoots | default dict }}
+            {{- $roots := .Values.pipes.trustedRoots | default dict }}
             {{- with compact (list ($roots.current | default "" | trim) ($roots.next | default "" | trim)) }}
             - name: TRAVERSAL_CAPABILITY_ROOTS
               value: {{ printf "%s\n" (join "\n" .) | b64enc | quote }}
