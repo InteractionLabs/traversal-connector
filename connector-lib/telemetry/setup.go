@@ -48,7 +48,7 @@ func Setup(ctx context.Context, cfg Config) (flush func(timeout time.Duration), 
 		for i := len(shutdowns) - 1; i >= 0; i-- {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			if err := shutdowns[i](ctx); err != nil {
-				slog.ErrorContext(ctx, "failed to flush telemetry", "err", err)
+				slog.ErrorContext(ctx, "failed to flush telemetry", "error", err)
 			}
 			cancel()
 		}
