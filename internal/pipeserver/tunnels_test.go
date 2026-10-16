@@ -46,9 +46,9 @@ func TestRedial(t *testing.T) {
 	}
 }
 
-// TestReadyAfterFirstTunnel: once a tunnel has been up, losing tunnels (a
-// controller rollout) does not make the connector unready.
-func TestReadyAfterFirstTunnel(t *testing.T) {
+// TestReady: a connector is unready until its first tunnel, and losing
+// tunnels after that (a controller rollout) does not make it unready.
+func TestReady(t *testing.T) {
 	tunnels := &Tunnels{}
 	if tunnels.Ready(t.Context()) == nil {
 		t.Error("ready before any tunnel")

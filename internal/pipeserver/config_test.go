@@ -64,8 +64,17 @@ func TestNew(t *testing.T) {
 		env            map[string]string
 		mutate         func(*config.Config)
 		wantErr        string // empty: valid
+		// check, if set, says what is wrong with a valid result, or "".
+		check func(*Tunnels) string
 	}{
-		{name: "defaults", spiffeID: orgScoped},
+		{name: "defaults", spiffeID: orgScoped, check: func(tunnels *Tunnels) string {
+			if tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" ||
+				tunnels.Server.MaxPipes != 200 || !slices.Equal(tunnels.Kids, []string{"k1"}) ||
+				len(tunnels.Roots) != 0 {
+				return "defaults not applied"
+			}
+			return ""
+		}},
 		{name: "connector-scoped certificate", spiffeID: orgScoped + "/connector/" + connector},
 		{name: "every setting", spiffeID: orgScoped, env: map[string]string{
 			"TRAVERSAL_PIPES_MAX": "10", "TRAVERSAL_TUNNELS_COUNT": "4",
@@ -74,6 +83,17 @@ func TestNew(t *testing.T) {
 			"TRAVERSAL_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true",
 			"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
 			"TRAVERSAL_PIPES_MAX_STREAMS":     "50", "TRAVERSAL_PIPES_STREAM_WINDOW_KB": "64",
+		}, check: func(tunnels *Tunnels) string {
+			s := tunnels.Server
+			switch {
+			case tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || s.MaxPipes != 10 ||
+				s.PipeLimits.IdleTimeout != 0 || s.MaxLifetime != time.Hour ||
+				s.PipeLimits.MaxStreams != 50 || s.PipeLimits.StreamWindow != 64<<10:
+				return "settings not applied"
+			case forbidden(t, "10.9.1.1") != rawpipe.ForbiddenAddress:
+				return "TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied"
+			}
+			return ""
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
@@ -133,17 +153,10 @@ func TestNew(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
 				t.Fatalf("error %v, want one containing %q", err, c.wantErr)
-			case c.wantErr == "" && c.name == "every setting" &&
-				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
-					tunnels.Server.PipeLimits.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour ||
-					tunnels.Server.PipeLimits.MaxStreams != 50 || tunnels.Server.PipeLimits.StreamWindow != 64<<10):
-				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
-			case c.name == "every setting" && forbidden(t, "10.9.1.1") != rawpipe.ForbiddenAddress:
-				t.Fatal("TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied")
-			case c.wantErr == "" && c.name == "defaults" &&
-				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200 ||
-					!slices.Equal(tunnels.Kids, []string{"k1"}) || len(tunnels.Roots) != 0):
-				t.Fatalf("defaults: %+v", tunnels)
+			case c.check != nil:
+				if why := c.check(tunnels); why != "" {
+					t.Fatal(why)
+				}
 			}
 		})
 	}

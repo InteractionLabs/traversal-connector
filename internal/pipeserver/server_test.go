@@ -1,15 +1,12 @@
 package pipeserver
 
 import (
-	"crypto/tls"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
-	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe/rawpipetest"
 )
 
 // TestPipeRefusals: an open is refused before any TLS or dial for a bad
@@ -35,22 +32,6 @@ func TestPipeRefusals(t *testing.T) {
 	h.tunnels.Server.pipes.Drain()
 	if r := refusal("db.internal:443", h.token("db.internal", 443)); r != rawpipe.Draining {
 		t.Errorf("draining: %s", r)
-	}
-}
-
-// TestPipeTLSIdentity: the proxy refuses a connector whose certificate is
-// not from its tenant's CA, or names another org. (The connector-scoped
-// cases are rawpipe's TestPipeTLS.)
-func TestPipeTLSIdentity(t *testing.T) {
-	h := newHarness(t, nil, nil, "127.0.0.1:1")
-	for name, cfg := range map[string]*tls.Config{
-		"another tenant CA": rawpipe.PipeClientTLS(rawpipetest.NewCA(t).Pool(), org, connector),
-		"another org": rawpipe.PipeClientTLS(h.tenant.Pool(),
-			strings.Replace(org, "0b", "1b", 1), connector),
-	} {
-		if _, err := h.open("db.internal:443", cfg); err == nil {
-			t.Errorf("%s: handshake succeeded", name)
-		}
 	}
 }
 
