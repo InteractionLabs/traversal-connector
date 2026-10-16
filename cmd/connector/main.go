@@ -92,7 +92,7 @@ func main() {
 		"tunnels", tunnels.Count,
 		"env", cfg.EnvName)
 
-	if err = client.TestConnectivity(&cfg); err != nil {
+	if err = client.CheckConnectivity(&cfg); err != nil {
 		slog.Error("connectivity test failed", "error", err)
 	}
 

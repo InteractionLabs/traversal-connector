@@ -18,7 +18,7 @@ import (
 
 const connectivityTestTimeout = 10 * time.Second
 
-// TestConnectivity runs a suite of connectivity tests against the Traversal control plane
+// CheckConnectivity runs a suite of connectivity tests against the Traversal control plane
 // controller and, when configured, the forward proxy. Every test logs
 // its result extensively regardless of success or failure.
 //
@@ -32,11 +32,11 @@ const connectivityTestTimeout = 10 * time.Second
 //  1. Proxy TCP reachability  — plain TCP dial to the proxy
 //  2. Manual HTTP CONNECT + TLS — hand-rolled CONNECT tunnel, then TLS
 //  3. Go http.Transport + Proxy — uses Go's built-in proxy support
-//     (same mechanism the production gRPC transport uses)
+//     (the mechanism the remote-config client uses)
 //
 // Only the insecure direct-TLS test is fatal (returns error). All other
 // failures are logged as warnings so the service can still attempt to start.
-func TestConnectivity(cfg *config.Config) error {
+func CheckConnectivity(cfg *config.Config) error {
 	addr, err := extractHostPort(cfg.TraversalControllerURL)
 	if err != nil {
 		return fmt.Errorf(
@@ -352,7 +352,7 @@ func testManualCONNECT(
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Go http.Transport with Proxy (same as production gRPC transport)
+// Test 3: Go http.Transport with Proxy (as the remote-config client uses)
 // ---------------------------------------------------------------------------
 
 func testHTTPTransportViaProxy(
