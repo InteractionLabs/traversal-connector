@@ -24,6 +24,7 @@ import (
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpserve"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -64,10 +65,15 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	var auto, h2c, http1 http.Protocols
+	auto.SetHTTP1(true)
+	auto.SetHTTP2(true)
+	h2c.SetUnencryptedHTTP2(true)
+	http1.SetHTTP1(true)
 	return &Client{
-		auto:       transport(tlsCfg, dial, true, true, false),
-		h2c:        transport(tlsCfg, dial, false, false, true),
-		http1:      transport(tlsCfg, dial, true, false, false),
+		auto:       transport(tlsCfg, dial, auto),
+		h2c:        transport(tlsCfg, dial, h2c),
+		http1:      transport(tlsCfg, dial, http1),
 		redactor:   r,
 		maxRequest: cfg.MaxRequestBodySizeMB * bytesPerMB,
 		maxBody:    cfg.MaxResponseBodySizeMB * bytesPerMB,
@@ -97,11 +103,7 @@ func trust(cfg *config.Config) (*tls.Config, error) {
 // transport dials only through dial, which owns the egress proxy and the
 // address checks, so it has no Proxy of its own: HTTP(S)_PROXY would skip
 // the dial policy.
-func transport(tlsCfg *tls.Config, dial Dialer, http1, http2, h2c bool) *http.Transport {
-	var protocols http.Protocols
-	protocols.SetHTTP1(http1)
-	protocols.SetHTTP2(http2)
-	protocols.SetUnencryptedHTTP2(h2c)
+func transport(tlsCfg *tls.Config, dial Dialer, protocols http.Protocols) *http.Transport {
 	return &http.Transport{
 		Protocols:       &protocols,
 		TLSClientConfig: tlsCfg.Clone(),
@@ -129,7 +131,7 @@ func transport(tlsCfg *tls.Config, dial Dialer, http1, http2, h2c bool) *http.Tr
 // no effect upstream.
 func (c *Client) Forward(w http.ResponseWriter, r *http.Request, target *url.URL) {
 	host := target.Hostname()
-	ctx, span := c.tracer.Start(r.Context(), telemetry.SpanExecutorUpstreamHTTP,
+	ctx, span := c.tracer.Start(r.Context(), telemetry.SpanUpstreamHTTP,
 		trace.WithAttributes(attribute.String(connector.AttrTargetHost, target.Host),
 			attribute.String(connector.AttrMethod, r.Method)))
 	defer span.End()
@@ -157,27 +159,26 @@ func (c *Client) Forward(w http.ResponseWriter, r *http.Request, target *url.URL
 	case target.Scheme == "http" && isGRPC(r.Header.Get(headerContentType)):
 		t = c.h2c
 	}
-	(&httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
+	rp := httpserve.ReverseProxy(
+		func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
 			pr.Out.Host = pr.In.Host
 		},
-		Transport:     t,
-		FlushInterval: -1,
-		ModifyResponse: func(resp *http.Response) error {
-			c.metrics.requested(ctx, target.Host, connector.StatusSuccess, start)
-			span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
-			return c.respond(ctx, resp, target.Host, host, covered)
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+		t,
+		func(w http.ResponseWriter, r *http.Request, err error) {
 			if !errors.Is(err, errRefused) {
 				c.metrics.requested(ctx, target.Host, connector.StatusError, start)
 			}
 			_ = telemetry.RecordError(span, err)
 			c.fail(w, r, err)
 		},
-		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
-	}).ServeHTTP(w, r)
+	)
+	rp.ModifyResponse = func(resp *http.Response) error {
+		c.metrics.requested(ctx, target.Host, connector.StatusSuccess, start)
+		span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
+		return c.respond(ctx, resp, target.Host, host, covered)
+	}
+	rp.ServeHTTP(w, r)
 }
 
 // fail answers r with err's reason: a dial refusal's, redaction_unsupported,
@@ -188,14 +189,8 @@ func (c *Client) fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	reason := rawpipe.ReasonOf(err, rawpipe.UpstreamFailed)
 	safe := telemetry.SanitizeError(err)
-	slog.InfoContext(r.Context(), "upstream request failed", "reason", reason, "err", safe)
-	Refuse(w, reason, safe.Error())
-}
-
-// Refuse answers a request with reason in HeaderReason.
-func Refuse(w http.ResponseWriter, reason rawpipe.Reason, msg string) {
-	w.Header().Set(rawpipe.HeaderReason, string(reason))
-	http.Error(w, msg, reason.Status())
+	slog.InfoContext(r.Context(), "upstream request failed", "reason", reason, "error", safe)
+	rawpipe.Refuse(w, reason, safe.Error())
 }
 
 var errRefused = errors.New("refused")
