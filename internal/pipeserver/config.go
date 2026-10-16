@@ -56,7 +56,7 @@ func New(cfg *config.Config, r *redact.Redactor) (*Tunnels, error) {
 		Upstream:    up,
 		MaxPipes:    e.int("TRAVERSAL_PIPES_MAX", 200, 4096),
 		MaxLifetime: e.duration("TRAVERSAL_PIPES_MAX_LIFETIME", 4*time.Hour),
-		Inner: Inner{
+		PipeLimits: PipeLimits{
 			MaxStreams:       e.int("TRAVERSAL_PIPES_MAX_STREAMS", 100, 1000),
 			StreamWindow:     e.int("TRAVERSAL_PIPES_STREAM_WINDOW_KB", 256, 16<<10) << 10,
 			ConnectionWindow: e.int("TRAVERSAL_PIPES_CONNECTION_WINDOW_KB", 1<<10, 64<<10) << 10,
