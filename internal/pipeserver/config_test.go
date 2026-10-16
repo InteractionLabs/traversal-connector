@@ -137,8 +137,8 @@ func TestNew(t *testing.T) {
 				t.Fatalf("error %v, want one containing %q", err, c.wantErr)
 			case c.wantErr == "" && c.name == "every setting" &&
 				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
-					tunnels.Server.Inner.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour ||
-					tunnels.Server.Inner.MaxStreams != 50 || tunnels.Server.Inner.StreamWindow != 64<<10):
+					tunnels.Server.PipeLimits.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour ||
+					tunnels.Server.PipeLimits.MaxStreams != 50 || tunnels.Server.PipeLimits.StreamWindow != 64<<10):
 				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
 			case c.name == "every setting" && forbidden(t, "10.9.1.1") != rawpipe.ForbiddenAddress:
 				t.Fatal("TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied")

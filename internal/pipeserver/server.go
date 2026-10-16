@@ -1,8 +1,8 @@
 // Package pipeserver is the connector's pipe side. It holds tunnels to
 // Traversal's edge controller (tunnels.go) and serves each pipe the edge
 // controller opens on them: verify the capability, then speak TLS with the
-// Integration Proxy and forward the HTTP inside it to the capability's
-// destination.
+// Integration Proxy (server.go) and forward the HTTP inside it to the
+// capability's destination (forward.go).
 package pipeserver
 
 import (
@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -59,9 +58,10 @@ func (s *Server) h2() *http.HTTP2Config {
 	}
 }
 
-// Inner bounds the HTTP/2 inside one pipe. It nests in the tunnel stream's
-// flow control (streamWindow), so a window past that only buffers more.
-type Inner struct {
+// PipeLimits bounds the HTTP/2 inside one pipe. It nests in the tunnel
+// stream's flow control (streamWindow), so a window past that only buffers
+// more.
+type PipeLimits struct {
 	MaxStreams                     int
 	StreamWindow, ConnectionWindow int
 	// IdleTimeout closes a pipe that has carried no request for that long.
@@ -78,8 +78,8 @@ type Server struct {
 	// Ready answers requests to rawpipe.ProbeAuthority.
 	Ready http.Handler
 	// MaxPipes caps the pipes open at once; zero is no cap.
-	MaxPipes int
-	Inner    Inner
+	MaxPipes   int
+	PipeLimits PipeLimits
 	// Tunnels is how many tunnels share MaxPipes; 0 means 1.
 	Tunnels     int
 	MaxLifetime time.Duration
@@ -140,7 +140,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.metrics.pipes.Add(context.Background(), 1)
 	start := time.Now()
 	conn := halfconn.NewStreamConn(stream)
-	proto, outcome := s.intercept(r.Context(), conn, target)
+	proto, outcome := s.servePipe(r.Context(), conn, target)
 	_ = conn.Close()
 	sent, received := conn.Wait()
 	s.metrics.pipes.Add(context.Background(), -1)
@@ -179,9 +179,9 @@ func (s *Server) open(r *http.Request) (*url.URL, error) {
 	return &url.URL{Host: authority}, nil
 }
 
-// intercept runs the pipe's TLS and serves the protocol it negotiated until
+// servePipe runs the pipe's TLS and serves the protocol it negotiated until
 // the Integration Proxy closes it, it idles out, or it reaches MaxLifetime.
-func (s *Server) intercept(ctx context.Context, conn *halfconn.StreamConn, target *url.URL,
+func (s *Server) servePipe(ctx context.Context, conn net.Conn, target *url.URL,
 ) (string, halfconn.Outcome) {
 	if s.MaxLifetime > 0 {
 		var cancel context.CancelFunc
@@ -201,120 +201,23 @@ func (s *Server) intercept(ctx context.Context, conn *halfconn.StreamConn, targe
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetHTTP2(true)
-	srv := &http.Server{
+	_ = httpserve.ServeConn(&http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.request(w, r, target)
+			s.forward(w, r, target)
 		}),
 		Protocols: protocols,
 		HTTP2: &http.HTTP2Config{
-			MaxConcurrentStreams:          min(s.Inner.MaxStreams, 1<<20),
-			MaxReceiveBufferPerStream:     min(s.Inner.StreamWindow, 1<<30),
-			MaxReceiveBufferPerConnection: min(s.Inner.ConnectionWindow, 1<<30),
+			MaxConcurrentStreams:          min(s.PipeLimits.MaxStreams, 1<<20),
+			MaxReceiveBufferPerStream:     min(s.PipeLimits.StreamWindow, 1<<30),
+			MaxReceiveBufferPerConnection: min(s.PipeLimits.ConnectionWindow, 1<<30),
 		},
 		ReadHeaderTimeout: handshakeTimeout,
-		IdleTimeout:       s.Inner.IdleTimeout,
+		IdleTimeout:       s.PipeLimits.IdleTimeout,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
-	}
-	// net/http serves HTTP/2 or HTTP/1.1 by the ALPN the handshake chose.
-	_ = srv.Serve(&oneConn{conn: tc, done: conn.Closed()})
+	}, tc)
 	proto := tc.ConnectionState().NegotiatedProtocol
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return proto, halfconn.Limit
 	}
 	return proto, halfconn.Completed
 }
-
-// request forwards one request from inside a pipe. Its authority, the port
-// defaulting from its scheme, must be the pipe's: the capability is for that
-// host:port only.
-func (s *Server) request(w http.ResponseWriter, r *http.Request, pipe *url.URL) {
-	if r.Method == http.MethodConnect {
-		upstream.Refuse(w, rawpipe.ProtocolError, "CONNECT is not carried inside a pipe")
-		return
-	}
-	scheme, authority, err := requestTarget(r)
-	if err != nil {
-		upstream.Refuse(w, rawpipe.ProtocolError, err.Error())
-		return
-	}
-	r.Header.Del(rawpipe.HeaderUpstreamScheme)
-	if authority != pipe.Host {
-		upstream.Refuse(
-			w,
-			rawpipe.WrongDestination,
-			"the request is not for this pipe's destination",
-		)
-		return
-	}
-	if pipe.Host == rawpipe.ProbeAuthority {
-		if r.URL.Path != rawpipe.ProbePath || r.Method != http.MethodGet {
-			http.NotFound(w, r)
-			return
-		}
-		s.Ready.ServeHTTP(w, r)
-		return
-	}
-	s.Upstream.Forward(w, r, &url.URL{Scheme: scheme, Host: pipe.Host})
-}
-
-// requestTarget is r's scheme and canonical host:port.
-func requestTarget(r *http.Request) (scheme, authority string, err error) {
-	scheme, err = requestScheme(r)
-	if err != nil {
-		return "", "", err
-	}
-	host, port, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		host, port = strings.Trim(r.Host, "[]"), "443"
-		if scheme == "http" {
-			port = "80"
-		}
-	}
-	if c, ok := capability.Canonical(host); ok {
-		host = c
-	}
-	return scheme, net.JoinHostPort(host, port), nil
-}
-
-// requestScheme is the destination's scheme for r. On HTTP/2 it is
-// rawpipe.HeaderUpstreamScheme, https when absent: net/http does not show a
-// handler :scheme, and r.TLS is the pipe's own TLS, not the destination's.
-// On HTTP/1.1 it is the absolute-form target's; origin form names no scheme,
-// so it is refused rather than guessed.
-func requestScheme(r *http.Request) (string, error) {
-	if r.ProtoMajor == 2 {
-		switch v := r.Header.Get(rawpipe.HeaderUpstreamScheme); v {
-		case "":
-			return "https", nil
-		case "http", "https":
-			return v, nil
-		}
-		return "", errors.New(rawpipe.HeaderUpstreamScheme + " is http or https")
-	}
-	if r.URL.Scheme == "http" || r.URL.Scheme == "https" {
-		return r.URL.Scheme, nil
-	}
-	return "", errors.New(
-		"HTTP/1.1 requests in a pipe are in absolute form (GET https://host/path)")
-}
-
-// oneConn is a Listener that accepts conn once, then blocks until done, so
-// http.Server serves exactly the pipe's connection.
-type oneConn struct {
-	conn net.Conn
-	done <-chan struct{}
-	once sync.Once
-}
-
-func (l *oneConn) Accept() (net.Conn, error) {
-	var c net.Conn
-	l.once.Do(func() { c = l.conn })
-	if c != nil {
-		return c, nil
-	}
-	<-l.done
-	return nil, net.ErrClosed
-}
-
-func (l *oneConn) Close() error   { return nil }
-func (l *oneConn) Addr() net.Addr { return l.conn.LocalAddr() }

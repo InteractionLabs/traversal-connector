@@ -78,7 +78,11 @@ func newHarness(t *testing.T, cfg *config.Config, r *redact.Redactor, dest strin
 	h.tunnels = &Tunnels{ConnectorID: connector, Count: 1, Kids: []string{"k"},
 		Server: &Server{ConnectorID: connector, Verifier: verifier, Upstream: up,
 			Certificate: cert, MaxPipes: 16, metrics: testMetrics(t),
-			Inner: Inner{MaxStreams: 100, StreamWindow: 256 << 10, ConnectionWindow: 1 << 20},
+			PipeLimits: PipeLimits{
+				MaxStreams:       100,
+				StreamWindow:     256 << 10,
+				ConnectionWindow: 1 << 20,
+			},
 			Ready: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = io.WriteString(w, `{"status":"ready"}`)
 			}),
