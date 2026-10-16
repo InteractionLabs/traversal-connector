@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/signedconfig"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
@@ -97,6 +99,24 @@ type RemoteLoader struct {
 	loaded   bool
 	status   atomic.Pointer[remoteStatus]
 	outcomes metric.Int64Counter
+	// verify, if set (RequireSignature), checks each fetched object's
+	// signature for this connector and returns its document and version.
+	verify  func([]byte) ([]byte, uint64, error)
+	version uint64 // of the config applied
+}
+
+// RequireSignature makes the loader accept only configs signed for
+// connector by one of keys (signedconfig), at a version no lower than the
+// one it holds. A config that fails counts as a failed fetch: the
+// last-known-good rules stay.
+func (l *RemoteLoader) RequireSignature(connector string, keys map[string]*ecdsa.PublicKey) {
+	l.verify = func(object []byte) ([]byte, uint64, error) {
+		document, c, err := signedconfig.Verify(object, connector, keys)
+		if err != nil {
+			return nil, 0, err
+		}
+		return document, c.Version, nil
+	}
 }
 
 func NewRemoteLoader(
@@ -191,7 +211,21 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			return errors.New("could not read config response")
 		}
 		hash := sha256.Sum256(data)
+		version := l.version
 		if !l.loaded || hash != l.hash {
+			if l.verify != nil {
+				var verifyErr error
+				if data, version, verifyErr = l.verify(data); verifyErr != nil {
+					outcome = "unsigned"
+					return verifyErr
+				}
+				if version < l.version {
+					outcome = "rolled_back"
+					return fmt.Errorf(
+						"config version %d is older than the applied %d; retaining it",
+						version, l.version)
+				}
+			}
 			rules, parseErr := ParseConfig(data)
 			if parseErr != nil {
 				return parseErr
@@ -215,7 +249,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			outcome = "unchanged"
 		}
 		// Only cache a version AFTER its rules were successfully compiled/applied.
-		l.hash, l.etag, l.loaded = hash, resp.Header.Get("ETag"), true
+		l.hash, l.etag, l.loaded, l.version = hash, resp.Header.Get("ETag"), true, version
 	default:
 		return fmt.Errorf("config endpoint returned HTTP %d", resp.StatusCode)
 	}

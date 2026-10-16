@@ -190,6 +190,10 @@ otel:
 configUpdates:
   enabled: false
   refreshInterval: "30s"
+  # Traversal's config signing keys, a Key-ID PEM bundle (the install command
+  # sets it). Set, only configs Traversal signed for this connector apply, and
+  # never one older than the config applied; empty, configs apply unsigned.
+  signingKeys: ""
 
 # ─── Local-file redaction (opt-in) ───────────────────────────────────────────
 # Set enabled: true and exactly one source. Cannot be combined with configUpdates.

@@ -2,6 +2,7 @@ package redact
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/signedconfig"
 )
 
 const remoteRules = `schema_version = 1
@@ -264,5 +268,65 @@ func TestRemoteRunAppliesRulesAfterExplicitEmptyStartup(t *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+// TestRemoteRequiresSignature: with config keys installed, only configs
+// signed for this connector apply, never at a lower version, and a refused
+// one keeps the last-known-good rules.
+func TestRemoteRequiresSignature(t *testing.T) {
+	const self = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
+	key := capabilitytest.Key("config")
+	keys := map[string]*ecdsa.PublicKey{"k": &key.PublicKey}
+	sign := func(connector string, version uint64, doc string) string {
+		b, err := signedconfig.Sign(key, "k", connector, version, []byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	var body atomic.Value
+	body.Store(sign(self, 5, remoteRules))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body.Load().(string))) //nolint:forcetypeassert // test
+	}))
+	defer server.Close()
+	redactor := NewRedactor()
+	loader, err := NewRemoteLoader(server.Client(), server.URL, redactor, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader.RequireSignature(self, keys)
+	ctx := context.Background()
+	if err := loader.LoadInitial(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accepted := redactor.rules.Load()
+	updated := strings.Replace(remoteRules, "[hidden]", "[updated]", 1)
+	for name, object := range map[string]string{
+		"unsigned":       updated,
+		"for a sibling":  sign("6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d01", 6, updated),
+		"an older one":   sign(self, 4, updated),
+		"tampered after": strings.Replace(sign(self, 6, updated), "[updated]", "[changed]", 1),
+	} {
+		body.Store(object)
+		if err := loader.refresh(ctx); err == nil {
+			t.Errorf("%s: applied", name)
+		}
+		if redactor.rules.Load() != accepted {
+			t.Fatalf("%s: changed the rules", name)
+		}
+	}
+	// The same version re-signed (a retry) and a newer one both apply.
+	for _, version := range []uint64{5, 6} {
+		body.Store(
+			sign(self, version, strings.Replace(updated, "[updated]", fmt.Sprint(version), 1)),
+		)
+		if err := loader.refresh(ctx); err != nil {
+			t.Fatalf("version %d: %v", version, err)
+		}
+	}
+	if got := string(applyBytes(redactor, "", []byte("secret"))); got != "6" {
+		t.Fatalf("newest config not applied: %q", got)
 	}
 }
