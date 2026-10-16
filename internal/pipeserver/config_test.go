@@ -65,11 +65,11 @@ func TestNew(t *testing.T) {
 		{name: "defaults", spiffeID: orgScoped},
 		{name: "connector-scoped certificate", spiffeID: orgScoped + "/connector/" + connector},
 		{name: "every setting", spiffeID: orgScoped, env: map[string]string{
-			"TRAVERSAL_RAW_PIPES_MAX": "10", "TRAVERSAL_TUNNEL_COUNT": "4",
-			"TRAVERSAL_RAW_PIPES_MAX_LIFETIME": "1h", "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "0s",
-			"TRAVERSAL_TUNNELS_CONNECT_TO":     "10.0.0.1:443",
-			"TRAVERSAL_RAW_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES": "true",
-			"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
+			"TRAVERSAL_PIPES_MAX": "10", "TRAVERSAL_TUNNELS_COUNT": "4",
+			"TRAVERSAL_PIPES_MAX_LIFETIME": "1h", "TRAVERSAL_PIPES_IDLE_TIMEOUT": "0s",
+			"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443",
+			"TRAVERSAL_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true",
+			"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
 		}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
@@ -87,19 +87,19 @@ func TestNew(t *testing.T) {
 			env:     map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "roots"},
 			mutate:  func(c *config.Config) { c.TraversalControllerURL = "https://10.0.0.1" },
 			wantErr: "canonical controller host name"},
-		{name: "bad count", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNEL_COUNT": "9"},
-			wantErr: "TRAVERSAL_TUNNEL_COUNT must be 1 to 8"},
-		{name: "bad duration", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT": "soon"},
-			wantErr: "TRAVERSAL_RAW_PIPES_IDLE_TIMEOUT"},
-		{name: "bad bool", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_EGRESS_PROXY_RESOLVES": "yes"},
+		{name: "bad count", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_COUNT": "9"},
+			wantErr: "TRAVERSAL_TUNNELS_COUNT must be 1 to 8"},
+		{name: "bad duration", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_IDLE_TIMEOUT": "soon"},
+			wantErr: "TRAVERSAL_PIPES_IDLE_TIMEOUT"},
+		{name: "bad bool", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "yes"},
 			wantErr: "must be true or false"},
 		{name: "bad forbidden CIDR", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
-			wantErr: `TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
+			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
+			wantErr: `TRAVERSAL_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
 		{name: "empty forbidden CIDR", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,"},
-			wantErr: "TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS"},
-		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_EGRESS_PROXY": "https://p:3128"},
+			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,"},
+			wantErr: "TRAVERSAL_PIPES_FORBIDDEN_CIDRS"},
+		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "https://p:3128"},
 			wantErr: "must be an http:// URL"},
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
 			wantErr: "is for connector"},
@@ -109,7 +109,7 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.ConnectorID = strings.ToUpper(c.ConnectorID) }, wantErr: "lower-case UUID"},
 		{name: "http controller", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
-		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_RAW_PIPES_REFUSE_TCP": "true"}},
+		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_REFUSE_TCP": "true"}},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
 		{name: "connect-to port not a number", spiffeID: orgScoped,
@@ -147,7 +147,7 @@ func TestNew(t *testing.T) {
 					tunnels.Server.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour):
 				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
 			case c.name == "every setting" && forbidden(tunnels, "10.9.1.1") != rawpipe.ForbiddenAddress:
-				t.Fatal("TRAVERSAL_RAW_PIPES_FORBIDDEN_CIDRS not applied")
+				t.Fatal("TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied")
 			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
 				t.Fatal("RefuseTCP not applied")
 			case c.wantErr == "" && c.name == "defaults" &&
