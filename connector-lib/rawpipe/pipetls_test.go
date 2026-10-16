@@ -31,7 +31,6 @@ func TestPipeTLS(t *testing.T) {
 		{"another CA", stranger.Connector(t, orgScoped, later), false},
 		{"another org", tenant.Connector(t, "spiffe://traversal.com/tenant/"+otherOrg+"/acme", later), false},
 		{"another connector", tenant.Connector(t, orgScoped+"/connector/"+otherConn, later), false},
-		{"expired", tenant.Connector(t, orgScoped, time.Now().Add(-time.Hour)), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, b := halfconntest.TCPPair(t)

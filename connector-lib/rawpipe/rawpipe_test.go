@@ -36,15 +36,6 @@ func TestTenantID(t *testing.T) {
 	}
 }
 
-func TestKnown(t *testing.T) {
-	known := map[rawpipe.Reason]bool{rawpipe.DialFailed: true, "made_up": false, "": false}
-	for r, want := range known {
-		if r.Known() != want {
-			t.Errorf("%q.Known() = %v", r, !want)
-		}
-	}
-}
-
 func TestPreface(t *testing.T) {
 	const conn = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
 	root := rawpipe.RootFingerprint([]byte("root DER"))
@@ -160,6 +151,8 @@ func TestCheckIdentity(t *testing.T) {
 	}
 }
 
+// TestLabel: a known reason labels as itself; anything else, Other included,
+// is not Known and labels as Other.
 func TestLabel(t *testing.T) {
 	for r, want := range map[rawpipe.Reason]rawpipe.Reason{
 		rawpipe.DialFailed: rawpipe.DialFailed, "made_up": rawpipe.Other, "": rawpipe.Other,
@@ -167,6 +160,9 @@ func TestLabel(t *testing.T) {
 	} {
 		if got := r.Label(); got != want {
 			t.Errorf("%q.Label() = %q, want %q", r, got, want)
+		}
+		if known := want != rawpipe.Other; r.Known() != known {
+			t.Errorf("%q.Known() = %v, want %v", r, !known, known)
 		}
 	}
 }

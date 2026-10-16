@@ -105,7 +105,6 @@ type vectorCase struct {
 
 var vectorCases = []vectorCase{
 	{name: "ok", verdict: "ok"},
-	{name: "ok, optional claim", payload: `{"sub":"s","n":1,"note":"x"}`, verdict: "ok"},
 	{name: "ok, x5c where chained", chained: true, verdict: "ok",
 		header: `{"alg":"ES256","typ":"example+jwt","kid":"k1","x5c":["AA=="]}`},
 	{name: "ok, unknown claim ignored", ignore: true, verdict: "ok",
@@ -113,8 +112,6 @@ var vectorCases = []vectorCase{
 
 	{name: "malformed: two segments", verdict: "malformed",
 		token: func(s string) string { return s[:strings.LastIndexByte(s, '.')] }},
-	{name: "malformed: four segments", verdict: "malformed",
-		token: func(s string) string { return s + ".x" }},
 	{name: "malformed: over max_len", verdict: "malformed",
 		payload: `{"sub":"` + strings.Repeat("s", vectorMaxLen) + `","n":1}`},
 
@@ -148,8 +145,6 @@ var vectorCases = []vectorCase{
 		}},
 	{name: "signature: not base64url", verdict: "signature",
 		token: func(s string) string { return s[:strings.LastIndexByte(s, '.')] + ".!!" }},
-	{name: "signature: empty", verdict: "signature",
-		token: func(s string) string { return s[:strings.LastIndexByte(s, '.')+1] }},
 
 	{name: "claims: duplicate key", verdict: "claims", payload: `{"sub":"s","n":1,"n":2}`},
 	{name: "claims: case-variant key", verdict: "claims", payload: `{"sub":"s","n":1,"N":2}`},

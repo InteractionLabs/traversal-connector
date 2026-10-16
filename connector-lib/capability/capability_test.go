@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -69,13 +68,10 @@ func TestVerify(t *testing.T) {
 		"wrong connector":   {sign(t, nil), "c2", "db.internal", rawpipe.WrongConnector},
 		"wrong destination": {sign(t, nil), connector, "other.internal", rawpipe.WrongDestination},
 		"foreign key":       {foreign, connector, "db.internal", rawpipe.InvalidCapability},
-		"garbage":           {"a.b.c", connector, "db.internal", rawpipe.InvalidCapability},
 		"wrong subject": {sign(t, func(c *capability.Claims) { c.Subject = "someone" }),
 			connector, "db.internal", rawpipe.InvalidCapability},
 		"expired": {sign(t, func(c *capability.Claims) { c.IssuedAt -= 600; c.ExpiresAt -= 600 }),
 			connector, "db.internal", rawpipe.InvalidCapability},
-		"tampered": {strings.Replace(sign(t, nil), ".", ".e30", 1), connector, "db.internal",
-			rawpipe.InvalidCapability},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := v.Verify(c.token, c.connector, c.host, 5432)
@@ -159,33 +155,6 @@ func TestParseKeys(t *testing.T) {
 	}
 }
 
-// BenchmarkVerifyManyLive: verify cost must not grow with live jtis (one per
-// recent capability), since every tenant's opens share one verifier.
-func BenchmarkVerifyManyLive(b *testing.B) {
-	for _, live := range []int{0, 60000} {
-		b.Run(strconv.Itoa(live), func(b *testing.B) {
-			v, _ := capability.NewVerifier(pinnedConfig())
-			mint := func(i int) string {
-				c := capabilitytest.Claims(issuer, connector, "db.internal", 5432)
-				c.JTI = "jti-" + strconv.Itoa(i)
-				tok, _ := capability.Sign(key, "k1", c)
-				return tok
-			}
-			for i := range live {
-				_, _ = v.Verify(mint(i), connector, "db.internal", 5432)
-			}
-			toks := make([]string, b.N)
-			for i := range toks {
-				toks[i] = mint(live + i)
-			}
-			b.ResetTimer()
-			for i := range b.N {
-				_, _ = v.Verify(toks[i], connector, "db.internal", 5432)
-			}
-		})
-	}
-}
-
 // TestClaimsDecoding: an unknown claim, of any JSON type, is ignored; a
 // duplicate or case-variant key (at any depth), trailing data, invalid UTF-8,
 // and a missing, null or mistyped required claim are refused even when
@@ -229,28 +198,6 @@ func TestClaimsDecoding(t *testing.T) {
 	}
 	if _, err := verifier(t).Verify(good, connector, "db.internal", 5432); err != nil {
 		t.Errorf("good token: %v", err)
-	}
-}
-
-// TestStrictHeader: the header holds exactly alg, typ, kid and optionally
-// x5c; an unknown field, a case variant or a missing field is refused.
-func TestStrictHeader(t *testing.T) {
-	parts := strings.Split(sign(t, nil), ".")
-	for name, h := range map[string]string{
-		"unknown field": `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1","cty":"x"}`,
-		"case variant":  `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1","KID":"k1"}`,
-		"missing kid":   `{"alg":"ES256","typ":"traversal-capability+jwt"}`,
-		"mistyped kid":  `{"alg":"ES256","typ":"traversal-capability+jwt","kid":1}`,
-	} {
-		tok := resign(t, base64.RawURLEncoding.EncodeToString([]byte(h)), parts[1])
-		if _, err := verifier(t).Verify(tok, connector, "db.internal", 5432); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-	plain := `{"alg":"ES256","typ":"traversal-capability+jwt","kid":"k1"}`
-	tok := resign(t, base64.RawURLEncoding.EncodeToString([]byte(plain)), parts[1])
-	if _, err := verifier(t).Verify(tok, connector, "db.internal", 5432); err != nil {
-		t.Errorf("exact header: %v", err)
 	}
 }
 

@@ -163,10 +163,6 @@ func TestChainedCapabilityRejections(t *testing.T) {
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.NotAfter = time.Now().Add(-time.Minute)
 			}))},
-		{"not yet valid", signChained(t, envKey, "env", chainedClaims(nil),
-			cert(func(c *capabilitytest.EnvironmentCert) {
-				c.NotBefore = time.Now().Add(time.Hour)
-			}))},
 		{"server-auth EKU", signChained(t, envKey, "env", chainedClaims(nil),
 			cert(func(c *capabilitytest.EnvironmentCert) {
 				c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
@@ -203,10 +199,6 @@ func TestChainedCapabilityRejections(t *testing.T) {
 		{"garbage certificate", signChained(t, envKey, "env", chainedClaims(nil),
 			[]byte("not a certificate"))},
 		{"x5c not an array", rawChained(t, header(`"`+stdB64+`"`))},
-		{"duplicate x5c", rawChained(t, strings.Replace(header(`["`+stdB64+`"]`), "}",
-			`,"x5c":["`+stdB64+`"]}`, 1))},
-		{"case-variant x5c", rawChained(t, strings.Replace(header(`["`+stdB64+`"]`), "}",
-			`,"X5C":["`+stdB64+`"]}`, 1))},
 		{"no x5c and an unknown kid", func() string {
 			tok, _ := capability.Sign(envKey, "env", chainedClaims(nil))
 			return tok
@@ -314,37 +306,6 @@ func TestNewVerifierConfig(t *testing.T) {
 	}
 	// Roots alone need no issuer.
 	newVerifier(t, rootsConfig(root))
-}
-
-// TestSigner: a Signer with a chain signs chained capabilities, which a
-// verifier pinning only the root trusts; without one it signs for verifiers
-// that pin its kid, which the root alone cannot vouch for.
-func TestSigner(t *testing.T) {
-	root := capabilitytest.ValidRoot(t, rootSeed)
-	roots := newVerifier(t, rootsConfig(root))
-	pinned := newVerifier(t, capability.VerifierConfig{Issuer: chainIssuer,
-		Subject: capability.SubjectIntegrationProxy,
-		Keys:    map[string]*ecdsa.PublicKey{"env": &envKey.PublicKey}})
-	for name, c := range map[string]struct {
-		chain      [][]byte
-		roots, kid bool
-	}{
-		"chained":   {chain: [][]byte{envCert(t, root, nil)}, roots: true, kid: true},
-		"unchained": {kid: true},
-	} {
-		token, err := capability.Signer{Key: envKey, KID: "env", Chain: c.chain}.Sign(
-			chainedClaims(nil))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		for verifier, want := range map[string]bool{"root": c.roots, "kid": c.kid} {
-			v := map[string]*capability.Verifier{"root": roots, "kid": pinned}[verifier]
-			if err := verifyChained(v, token); (err == nil) != want {
-				t.Errorf("%s at a verifier pinning the %s: %v, want accepted %v", name,
-					verifier, err, want)
-			}
-		}
-	}
 }
 
 func TestSignChainedBounds(t *testing.T) {

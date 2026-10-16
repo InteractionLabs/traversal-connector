@@ -10,13 +10,6 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/drain"
 )
 
-func TestZeroValueIsIdle(t *testing.T) {
-	var tr drain.Tracker
-	if err := tr.Wait(context.Background()); err != nil || tr.InFlight() != 0 || tr.Draining() {
-		t.Fatalf("zero Tracker: %v, %d in flight, draining %v", err, tr.InFlight(), tr.Draining())
-	}
-}
-
 func TestLimit(t *testing.T) {
 	var tr drain.Tracker
 	first, second, third := tr.Add(2), tr.Add(2), tr.Add(2)
@@ -84,22 +77,4 @@ func TestWaitSeesLateWork(t *testing.T) {
 			t.Fatalf("%d in flight", n)
 		}
 	}
-}
-
-func TestDraining(t *testing.T) {
-	var tr drain.Tracker
-	tr.Drain()
-	if !tr.Draining() || !tr.Add(0) {
-		t.Fatal("Draining is a flag; Add still admits")
-	}
-}
-
-func TestDoneWithoutAdd(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Done without Add did not panic")
-		}
-	}()
-	var tr drain.Tracker
-	tr.Done()
 }

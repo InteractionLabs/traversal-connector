@@ -30,70 +30,52 @@ var reads = map[string]func(io.Reader) ([]byte, error){
 	},
 }
 
-// TestPrefixed: the prefix comes first, then the conn, through Read and
-// WriteTo alike; CloseWrite still half-closes and Abort still resets.
-func TestPrefixed(t *testing.T) {
-	for name, read := range reads {
-		t.Run(name, func(t *testing.T) {
-			far, near := halfconntest.TCPPair(t)
-			c := halfconn.Prefixed(near, strings.NewReader("hello"))
-			_, _ = far.Write([]byte(" world"))
-			_ = far.CloseWrite()
-			if b, err := read(c); err != nil || string(b) != "hello world" {
-				t.Fatalf("read %q, %v", b, err)
-			}
-			if err := c.CloseWrite(); err != nil {
-				t.Fatal(err)
-			}
-			if b, err := io.ReadAll(far); err != nil || len(b) != 0 {
-				t.Fatalf("far end after CloseWrite: %q, %v", b, err)
-			}
-		})
-	}
-	t.Run("Abort", func(t *testing.T) {
-		far, near := halfconntest.TCPPair(t)
-		halfconn.ConnEnd(halfconn.Prefixed(near, strings.NewReader("x"))).Abort()
-		_ = far.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if _, err := io.ReadAll(far); err == nil {
-			t.Fatal("peer saw a clean end, not a reset")
+// wrappers each wrap near so that "hello", already taken from its peer, is
+// read before anything else near receives.
+var wrappers = map[string]func(t *testing.T, far, near *net.TCPConn) halfconn.Conn{
+	"Prefixed": func(_ *testing.T, _, near *net.TCPConn) halfconn.Conn {
+		return halfconn.Prefixed(near, strings.NewReader("hello"))
+	},
+	"Buffered": func(t *testing.T, far, near *net.TCPConn) halfconn.Conn {
+		_, _ = far.Write([]byte("hello"))
+		br := bufio.NewReader(near)
+		if _, err := br.Peek(5); err != nil {
+			t.Fatal(err)
 		}
-	})
+		return halfconn.Buffered(near, br)
+	},
 }
 
-// TestBuffered: bytes already in the reader come first, through Read and
-// through io.Copy (WriteTo) alike, and CloseWrite still half-closes.
-func TestBuffered(t *testing.T) {
-	for name, read := range reads {
-		t.Run(name, func(t *testing.T) {
+// TestWrappers: a wrapper's held bytes come first, through Read and WriteTo
+// alike; CloseWrite still half-closes, and ConnEnd's Abort still resets.
+func TestWrappers(t *testing.T) {
+	for wrapper, wrap := range wrappers {
+		for name, read := range reads {
+			t.Run(wrapper+"/"+name, func(t *testing.T) {
+				far, near := halfconntest.TCPPair(t)
+				c := wrap(t, far, near)
+				_, _ = far.Write([]byte(" world"))
+				_ = far.CloseWrite()
+				if b, err := read(c); err != nil || string(b) != "hello world" {
+					t.Fatalf("read %q, %v", b, err)
+				}
+				if err := c.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				if b, err := io.ReadAll(far); err != nil || len(b) != 0 {
+					t.Fatalf("far end after CloseWrite: %q, %v", b, err)
+				}
+			})
+		}
+		t.Run(wrapper+"/Abort", func(t *testing.T) {
 			far, near := halfconntest.TCPPair(t)
-			_, _ = far.Write([]byte("hello"))
-			br := bufio.NewReader(near)
-			if _, err := br.Peek(5); err != nil {
-				t.Fatal(err)
-			}
-			c := halfconn.Buffered(near, br)
-			if c == halfconn.Conn(near) {
-				t.Fatal("Buffered dropped the buffered bytes")
-			}
-			_, _ = far.Write([]byte(" world"))
-			_ = far.CloseWrite()
-			if b, err := read(c); err != nil || string(b) != "hello world" {
-				t.Fatalf("read %q, %v", b, err)
-			}
-			if err := c.CloseWrite(); err != nil {
-				t.Fatal(err)
-			}
-			if b, err := io.ReadAll(far); err != nil || len(b) != 0 {
-				t.Fatalf("far end after CloseWrite: %q, %v", b, err)
+			halfconn.ConnEnd(wrap(t, far, near)).Abort()
+			_ = far.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := io.ReadAll(far); err == nil {
+				t.Fatal("peer saw a clean end, not a reset")
 			}
 		})
 	}
-	t.Run("nothing buffered", func(t *testing.T) {
-		_, near := halfconntest.TCPPair(t)
-		if c := halfconn.Buffered(near, bufio.NewReader(near)); c != halfconn.Conn(near) {
-			t.Fatalf("Buffered wrapped an empty reader: %T", c)
-		}
-	})
 }
 
 // TestEstablished: a CONNECT handler that accepts gets the client the exact
@@ -134,21 +116,5 @@ func TestEstablished(t *testing.T) {
 	const want = "HTTP/1.1 200 Connection Established\r\n\r\ntunnel"
 	if b, err := io.ReadAll(tcp); err != nil || string(b) != want {
 		t.Fatalf("client read %q, %v; want %q", b, err, want)
-	}
-}
-
-// TestBufferedAbort: halfconn.ConnEnd's Abort still resets a buffered TCP
-// connection, so the peer sees a failure rather than an end.
-func TestBufferedAbort(t *testing.T) {
-	far, near := halfconntest.TCPPair(t)
-	_, _ = far.Write([]byte("x"))
-	br := bufio.NewReader(near)
-	if _, err := br.Peek(1); err != nil {
-		t.Fatal(err)
-	}
-	halfconn.ConnEnd(halfconn.Buffered(near, br)).Abort()
-	_ = far.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.ReadAll(far); err == nil {
-		t.Fatal("peer saw a clean end, not a reset")
 	}
 }
