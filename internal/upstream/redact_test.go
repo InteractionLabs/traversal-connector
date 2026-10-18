@@ -3,7 +3,10 @@ package upstream
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
@@ -189,5 +193,73 @@ func TestRedactionConcurrency(t *testing.T) {
 	served(waiting)
 	if n := len(client.redactions); n != 0 {
 		t.Fatalf("%d redaction slots still held", n)
+	}
+}
+
+// TestNoRequestTimeoutIsTheDefault: REQUEST_TIMEOUT of 0 or less is the 60s
+// default, not a timeout that refuses every covered response at once.
+func TestNoRequestTimeoutIsTheDefault(t *testing.T) {
+	r := redact.NewRedactor()
+	if err := r.Update(&redact.RulesFile{Version: "v1", Rules: []redact.Rule{
+		{Name: "email", Type: "regex", Pattern: `[a-z]+@[a-z.]+`, Replacement: "[REDACTED]"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		client, err := New(&config.Config{RequestTimeout: timeout}, r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.bufferFor != config.DefaultRequestTimeout ||
+			client.auto.ResponseHeaderTimeout != config.DefaultRequestTimeout {
+			t.Errorf("%v: buffered for %v, headers within %v, want %v", timeout,
+				client.bufferFor, client.auto.ResponseHeaderTimeout, config.DefaultRequestTimeout)
+		}
+		resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/plain"}},
+			Body: io.NopCloser(strings.NewReader("contact user@example.com"))}
+		if err := client.respond(context.Background(), resp, time.Now(), "h:443", "h", true); err != nil {
+			t.Fatalf("%v: a covered response was refused: %v", timeout, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if string(body) != "contact [REDACTED]" {
+			t.Errorf("%v: served %q", timeout, body)
+		}
+	}
+}
+
+// TestResponseHeaderTimeout: a destination that sends no headers within
+// REQUEST_TIMEOUT is answered upstream_failed, not waited on for as long as
+// the caller stays, whether or not rules cover it.
+func TestResponseHeaderTimeout(t *testing.T) {
+	hang := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-hang
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(hang) })
+	dial := func(ctx context.Context, _ string, _ uint16) (halfconn.Conn, string, error) {
+		c, err := (&net.Dialer{}).DialContext(ctx, "tcp", srv.Listener.Addr().String())
+		if err != nil {
+			return nil, "", err
+		}
+		return c.(*net.TCPConn), srv.Listener.Addr().String(), nil //nolint:forcetypeassert // tcp
+	}
+	const timeout = 100 * time.Millisecond
+	client, err := New(&config.Config{RequestTimeout: timeout}, redact.NewRedactor(), dial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &url.URL{Scheme: "http", Host: "api.internal:80"}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.internal/x", nil)
+	w := httptest.NewRecorder()
+	start := time.Now()
+	client.Forward(w, req, target)
+	if elapsed := time.Since(start); elapsed > 20*timeout {
+		t.Fatalf("answered after %v, want about %v", elapsed, timeout)
+	}
+	if w.Code != http.StatusBadGateway ||
+		w.Header().Get(rawpipe.HeaderReason) != string(rawpipe.UpstreamFailed) {
+		t.Fatalf("%d %q, want 502 upstream_failed", w.Code, w.Header().Get(rawpipe.HeaderReason))
 	}
 }

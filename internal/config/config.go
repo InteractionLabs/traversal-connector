@@ -37,8 +37,10 @@ const (
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
-	// Default timeout and interval durations.
-	defaultRequestTimeout          = 60 * time.Second
+	// DefaultRequestTimeout is REQUEST_TIMEOUT's default, and what bounds an
+	// upstream request configured with none (0 or less).
+	DefaultRequestTimeout = 60 * time.Second
+	// Default interval durations.
 	defaultConfigRefreshInterval   = 30 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
 )
@@ -248,7 +250,7 @@ func Load() (Config, error) {
 		EnvLevel: env.EnvLevel(
 			env.GetEnvString("ENV_LEVEL", string(env.EnvLevelDevelopment)),
 		),
-		RequestTimeout: env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
+		RequestTimeout: env.GetEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
 			DefaultBodySizeMB,

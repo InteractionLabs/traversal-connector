@@ -68,20 +68,25 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	timeout := cfg.RequestTimeout
+	if timeout <= 0 {
+		// A timeout of none would make every buffered response time out at once.
+		timeout = config.DefaultRequestTimeout
+	}
 	var auto, h2c, http1 http.Protocols
 	auto.SetHTTP1(true)
 	auto.SetHTTP2(true)
 	h2c.SetUnencryptedHTTP2(true)
 	http1.SetHTTP1(true)
 	return &Client{
-		auto:       transport(tlsCfg, dial, auto),
-		h2c:        transport(tlsCfg, dial, h2c),
-		http1:      transport(tlsCfg, dial, http1),
+		auto:       transport(tlsCfg, dial, auto, timeout),
+		h2c:        transport(tlsCfg, dial, h2c, timeout),
+		http1:      transport(tlsCfg, dial, http1, timeout),
 		redactor:   r,
 		maxRequest: cfg.MaxRequestBodySizeMB * bytesPerMB,
 		maxBody:    finite(cfg.MaxResponseBodySizeMB, config.DefaultBodySizeMB),
 		maxDecoded: finite(cfg.MaxDecodedResponseBodySizeMB, config.DefaultDecodedBodySizeMB),
-		bufferFor:  cfg.RequestTimeout,
+		bufferFor:  timeout,
 		redactions: make(chan struct{}, positive(cfg.MaxConcurrentRedactions,
 			config.DefaultMaxConcurrentRedactions)),
 		tracer:  otel.Tracer(InstrumentationName),
@@ -125,8 +130,11 @@ func trust(cfg *config.Config) (*tls.Config, error) {
 
 // transport dials only through dial, which owns the egress proxy and the
 // address checks, so it has no Proxy of its own: HTTP(S)_PROXY would skip
-// the dial policy.
-func transport(tlsCfg *tls.Config, dial Dialer, protocols http.Protocols) *http.Transport {
+// the dial policy. A destination has timeout to answer with its headers; its
+// body, unless buffered to redact, streams for as long as it runs.
+func transport(
+	tlsCfg *tls.Config, dial Dialer, protocols http.Protocols, timeout time.Duration,
+) *http.Transport {
 	return &http.Transport{
 		Protocols:       &protocols,
 		TLSClientConfig: tlsCfg.Clone(),
@@ -142,9 +150,10 @@ func transport(tlsCfg *tls.Config, dial Dialer, protocols http.Protocols) *http.
 			conn, _, err := dial(ctx, host, uint16(port))
 			return conn, err
 		},
-		TLSHandshakeTimeout: 10 * time.Second,
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: timeout,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
 	}
 }
 
