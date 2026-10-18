@@ -73,9 +73,9 @@ func TestStreamConnEnds(t *testing.T) {
 }
 
 // TestStreamConnWriteFailure: a write to e that fails aborts e and fails the
-// conn, rather than ending e cleanly and leaving the conn's next write with
-// no reader. e is a fake: TCP fails reads and writes together on a reset, so
-// it cannot fail only the write.
+// conn with e's error wrapped, rather than ending e cleanly and leaving the
+// conn's next write with no reader. e is a fake: TCP fails reads and writes
+// together on a reset, so it cannot fail only the write.
 func TestStreamConnWriteFailure(t *testing.T) {
 	e := newWriteFailingEnd()
 	c := halfconn.NewStreamConn(e)
@@ -83,8 +83,11 @@ func TestStreamConnWriteFailure(t *testing.T) {
 	if _, err := within(t, func() (int, error) { return c.Write([]byte("y")) }); err == nil {
 		t.Fatal("write after the failure succeeded")
 	}
-	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, io.EOF) {
-		t.Fatalf("read after the failure: %v, want a failure", err)
+	// e's error, wrapped: an HTTP/2 conn over c would take net/http's own
+	// StreamError for a reset of one of its streams and read on.
+	_, err := c.Read(make([]byte, 1))
+	if !errors.Is(err, errWrite) || err == errWrite { //nolint:errorlint // identity is the point
+		t.Fatalf("read after the failure: %v, want errWrite wrapped", err)
 	}
 	within(t, c.Wait)
 	if e.closedWrite {

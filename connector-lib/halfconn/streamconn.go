@@ -2,6 +2,7 @@ package halfconn
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -33,7 +34,7 @@ func NewStreamConn(e End) *StreamConn {
 	c := &StreamConn{Conn: near, closed: make(chan struct{}), failed: make(chan struct{})}
 	fail := func(err error) {
 		c.failOnce.Do(func() {
-			c.err = err
+			c.err = &streamError{err}
 			close(c.failed)
 			e.Abort()
 			_ = far.Close()
@@ -83,6 +84,17 @@ func pump(dst io.Writer, src io.Reader) (n int64, rerr, werr error) {
 		}
 	}
 }
+
+// streamError is e's failure as the conn reports it. It wraps e's error so a
+// protocol over the conn cannot take it for one of its own: an HTTP/2
+// stream's body fails with net/http's StreamError, which an HTTP/2 conn
+// inside the pipe would answer by resetting one of its own streams and
+// reading on, not by closing.
+type streamError struct{ err error }
+
+func (e *streamError) Error() string { return fmt.Sprintf("halfconn: stream failed: %v", e.err) }
+
+func (e *streamError) Unwrap() error { return e.err }
 
 // Read is the conn's Read, but once e has failed it returns that failure,
 // not io.EOF.
