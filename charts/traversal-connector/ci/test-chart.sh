@@ -229,6 +229,9 @@ render config-signed "$fixtures/direct-export-values.yaml" --set configUpdates.e
 assert_contains "$tmp_dir/config-signed.yaml" "$(printf '            - name: TRAVERSAL_CONFIG_KEYS\n              value: "a2V5cw=="')"
 render config-unsigned "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true
 assert_not_contains "$tmp_dir/config-unsigned.yaml" 'TRAVERSAL_CONFIG_KEYS'
+render config-keys-off "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false \
+  --set-string configUpdates.signingKeys=a2V5cw==
+assert_not_contains "$tmp_dir/config-keys-off.yaml" 'TRAVERSAL_CONFIG'
 
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
