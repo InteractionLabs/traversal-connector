@@ -221,9 +221,9 @@ func TestUploadStreamed(t *testing.T) {
 	}
 }
 
-// TestRedaction: a covered host's text is buffered and redacted; its gRPC,
-// binary, or endless responses are refused as redaction_unsupported, never
-// sent as they came.
+// TestRedaction: a covered host's text is buffered and redacted, and its
+// trailers, which no rule redacts, are dropped; its gRPC, binary, or endless
+// responses are refused as redaction_unsupported, never sent as they came.
 func TestRedaction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -240,6 +240,14 @@ func TestRedaction(t *testing.T) {
 			<-r.Context().Done()
 		case "/grpc":
 			t.Error("a gRPC request to a covered host reached it")
+		case "/trailer":
+			// Flushing before the end makes the body chunked, so the trailer
+			// arrives after it.
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Trailer", "X-Secret")
+			_, _ = io.WriteString(w, "contact user@example.com")
+			w.(http.Flusher).Flush()
+			w.Header().Set("X-Secret", "user@example.com")
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -261,6 +269,7 @@ func TestRedaction(t *testing.T) {
 		{"/binary", "", 502, ""},
 		{"/endless", "", 502, ""},
 		{"/grpc", "application/grpc", 502, ""},
+		{"/trailer", "", 200, "contact [REDACTED]"},
 	} {
 		req, _ := http.NewRequest(http.MethodGet, "http://covered.internal"+c.path, nil)
 		if c.contentType != "" {
@@ -281,6 +290,9 @@ func TestRedaction(t *testing.T) {
 			t.Errorf("%s: reason %q", c.path, resp.Header.Get(rawpipe.HeaderReason))
 		case strings.Contains(string(body), "user@example.com"):
 			t.Errorf("%s: unredacted %q", c.path, body)
+		case len(resp.Trailer) > 0 || resp.Header.Get("Trailer") != "":
+			t.Errorf("%s: trailers past redaction: %v, Trailer %q", c.path, resp.Trailer,
+				resp.Header.Get("Trailer"))
 		}
 	}
 }

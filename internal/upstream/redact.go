@@ -77,8 +77,6 @@ func (c *Client) respond(
 		return nil
 	}
 	resp.Header.Del(headerAcceptRanges)
-	// Trailers would leave unredacted.
-	resp.Trailer = nil
 	switch mediaType := mediaTypeOf(resp.Header.Get(headerContentType)); {
 	case resp.StatusCode == http.StatusSwitchingProtocols || mediaType == "text/event-stream" ||
 		isGRPC(mediaType) || !redactable(mediaType):
@@ -172,7 +170,12 @@ func (c *Client) redact(ctx context.Context, host, contentType string, body []by
 	return body, changed || byteChanged, nil
 }
 
+// replaceBody sends body in place of the one read. It drops the trailers,
+// which would leave unredacted: it runs after the read because Go's transport
+// fills resp.Trailer only at the body's end.
 func replaceBody(resp *http.Response, body []byte, redacted, representationChanged bool) error {
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
 	if redacted {
 		resp.Header.Set(headerRedacted, "true")
 	}
