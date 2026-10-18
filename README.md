@@ -275,7 +275,7 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from a response from a host your redaction rules cover, which is buffered to be redacted. A larger response is refused. Other responses stream and have no limit. |
 | `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
 | `TRAVERSAL_CONNECTOR_ID` | **required** | This connector's ID, a lower-case UUID provided by Traversal. It names the connector's tunnels and must match its certificate's SPIFFE ID if that is connector-scoped. Startup fails if unset. |
-| `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
+| `EGRESS_PROXY_URL` | (none) | **Not supported in 0.10.x**: tunnels to the Traversal SaaS cannot run through a forward proxy yet, so startup fails when it is set, and the Helm chart refuses to render with `proxyURL`. Stay on 0.9.x if you need a forward proxy to reach Traversal. It is unrelated to `TRAVERSAL_PIPES_EGRESS_PROXY`, the proxy for destinations. |
 
 ### mTLS to the control plane
 

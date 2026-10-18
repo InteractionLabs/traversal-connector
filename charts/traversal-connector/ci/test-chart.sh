@@ -98,7 +98,6 @@ assert_contains "$tmp_dir/disabled.yaml" 'value: "true"'
 assert_not_contains "$tmp_dir/disabled.yaml" 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
 assert_not_contains "$tmp_dir/disabled.yaml" 'name: telemetry-sidecar'
 render disabled-ignored-connect-to "$fixtures/telemetry-disabled-values.yaml" \
-  --set-string proxyURL=http://proxy.internal:3128 \
   --set-string otel.connectTo=not-an-address
 assert_not_contains "$tmp_dir/disabled-ignored-connect-to.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
 
@@ -130,8 +129,9 @@ assert_render_fails zero-endpoint-port 'port must be from 1 to 65535' "${common[
 assert_render_fails oversized-endpoint-port 'port must be from 1 to 65535' "${common[@]}" --set-string otel.logsEndpoint=https://telemetry.example.invalid:65536
 assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a host:port' "${common[@]}" --set-string controllerConnectTo=https://route.internal:443
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
-assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
-assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
+# 0.10.x cannot run tunnels through a forward proxy: refused at render, not
+# at startup mid-rollout.
+assert_render_fails proxy-unsupported 'proxyURL is not supported by connector 0.10.x yet; stay on 0.9.x' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca

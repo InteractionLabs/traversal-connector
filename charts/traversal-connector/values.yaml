@@ -36,6 +36,9 @@ connectorID: ""
 # ─── Optional connection tuning ──────────────────────────────────────────────
 # All values left blank fall back to connector built-in defaults.
 envLevel: ""               # ENV_LEVEL: production | development
+# proxyURL is not supported by connector 0.10.x: tunnels cannot run through a
+# forward proxy yet, so the chart refuses to render with it set. Stay on 0.9.x
+# if you need it.
 proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
 requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
 maxRequestBodySizeMB: ""   # MAX_REQUEST_BODY_SIZE_MB (default 32)
