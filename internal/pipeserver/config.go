@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpproxy"
+
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/dialpolicy"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
@@ -25,7 +27,6 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/upstream"
-	"golang.org/x/net/http/httpproxy"
 )
 
 // New builds the pipe side from the environment, or says why the connector

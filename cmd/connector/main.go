@@ -43,11 +43,12 @@ func main() {
 		os.Exit(1)
 	}
 	flush, err := setupTelemetry(&cfg, otlpTLS)
-	defer flush()
 	if err != nil {
 		slog.Error("failed to initialize telemetry", "error", err)
-		return
+		flush() // os.Exit runs no defers
+		os.Exit(1)
 	}
+	defer flush()
 	// Emitted here rather than where the opt-out is read, so the one line saying
 	// this deployment is unobservable lands on the same stream, in the same
 	// format, as everything an operator reads after it.
