@@ -272,8 +272,9 @@ func TestRemoteRunAppliesRulesAfterExplicitEmptyStartup(t *testing.T) {
 }
 
 // TestRemoteRequiresSignature: with config keys installed, only configs
-// signed for this connector apply, never at a lower version, and a refused
-// one keeps the last-known-good rules.
+// signed for this connector apply, each at a version above the one applied,
+// and a refused one keeps the last-known-good rules. Another document at the
+// applied version is refused; the same one re-signed (a retry) is a no-op.
 func TestRemoteRequiresSignature(t *testing.T) {
 	const self = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
 	key := capabilitytest.Key("config")
@@ -304,10 +305,11 @@ func TestRemoteRequiresSignature(t *testing.T) {
 	accepted := redactor.rules.Load()
 	updated := strings.Replace(remoteRules, "[hidden]", "[updated]", 1)
 	for name, object := range map[string]string{
-		"unsigned":       updated,
-		"for a sibling":  sign("6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d01", 6, updated),
-		"an older one":   sign(self, 4, updated),
-		"tampered after": strings.Replace(sign(self, 6, updated), "[updated]", "[changed]", 1),
+		"unsigned":               updated,
+		"for a sibling":          sign("6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d01", 6, updated),
+		"an older one":           sign(self, 4, updated),
+		"another at its version": sign(self, 5, updated),
+		"tampered after":         strings.Replace(sign(self, 6, updated), "[updated]", "[changed]", 1),
 	} {
 		body.Store(object)
 		if err := loader.refresh(ctx); err == nil {
@@ -317,16 +319,24 @@ func TestRemoteRequiresSignature(t *testing.T) {
 			t.Fatalf("%s: changed the rules", name)
 		}
 	}
-	// The same version re-signed (a retry) and a newer one both apply.
-	for _, version := range []uint64{5, 6} {
-		body.Store(
-			sign(self, version, strings.Replace(updated, "[updated]", fmt.Sprint(version), 1)),
-		)
-		if err := loader.refresh(ctx); err != nil {
-			t.Fatalf("version %d: %v", version, err)
-		}
+	// The applied document re-signed at its version is a no-op.
+	body.Store(sign(self, 5, remoteRules))
+	if err := loader.refresh(ctx); err != nil {
+		t.Fatalf("the applied config re-signed: %v", err)
+	}
+	if redactor.rules.Load() != accepted {
+		t.Fatal("the applied config re-signed changed the rules")
+	}
+	// A newer one applies, and then its version is the floor.
+	body.Store(sign(self, 6, strings.Replace(updated, "[updated]", "6", 1)))
+	if err := loader.refresh(ctx); err != nil {
+		t.Fatalf("version 6: %v", err)
 	}
 	if got := string(applyBytes(redactor, "", []byte("secret"))); got != "6" {
 		t.Fatalf("newest config not applied: %q", got)
+	}
+	body.Store(sign(self, 6, updated))
+	if err := loader.refresh(ctx); err == nil {
+		t.Fatal("another document at version 6 applied")
 	}
 }

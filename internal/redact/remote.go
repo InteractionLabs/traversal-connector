@@ -102,14 +102,19 @@ type RemoteLoader struct {
 	outcomes metric.Int64Counter
 	// verify, if set (RequireSignature), checks each fetched object's
 	// signature for this connector and returns its document and version.
-	verify  func([]byte) ([]byte, uint64, error)
-	version uint64 // of the config applied
+	verify func([]byte) ([]byte, uint64, error)
+	// version and document are the signed config applied: its version and
+	// the SHA-256 of its document. They are in memory only, so a restart
+	// accepts any validly signed version again.
+	version  uint64
+	document [sha256.Size]byte
 }
 
 // RequireSignature makes the loader accept only configs signed for
-// connector by one of keys (signedconfig), at a version no lower than the
-// one it holds. A config that fails counts as a failed fetch: the
-// last-known-good rules stay.
+// connector by one of keys (signedconfig), at a version above the one it
+// holds; the applied document again at its own version, re-signed, changes
+// nothing. A config that fails counts as a failed fetch: the last-known-good
+// rules stay.
 func (l *RemoteLoader) RequireSignature(connector string, keys map[string]*ecdsa.PublicKey) {
 	l.verify = func(object []byte) ([]byte, uint64, error) {
 		document, c, err := signedconfig.Verify(object, connector, keys)
@@ -209,21 +214,28 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			return errors.New("could not read config response")
 		}
 		hash := sha256.Sum256(data)
-		version := l.version
-		if !l.loaded || hash != l.hash {
-			if l.verify != nil {
-				var verifyErr error
-				if data, version, verifyErr = l.verify(data); verifyErr != nil {
-					outcome = "unsigned"
-					return verifyErr
-				}
-				if version < l.version {
-					outcome = "rolled_back"
-					return fmt.Errorf(
-						"config version %d is older than the applied %d; retaining it",
-						version, l.version)
-				}
+		version, document := l.version, l.document
+		changed := !l.loaded || hash != l.hash
+		if changed && l.verify != nil {
+			var verifyErr error
+			if data, version, verifyErr = l.verify(data); verifyErr != nil {
+				outcome = "unsigned"
+				return verifyErr
 			}
+			document = sha256.Sum256(data)
+			// One version is one document: another at the applied version
+			// would replace it with no version to tell them apart.
+			switch {
+			case l.loaded && version == l.version && document == l.document:
+				changed = false
+			case l.loaded && version <= l.version:
+				outcome = "rolled_back"
+				return fmt.Errorf(
+					"config version %d is not newer than the applied %d; retaining it",
+					version, l.version)
+			}
+		}
+		if changed {
 			rules, parseErr := ParseConfig(data)
 			if parseErr != nil {
 				return parseErr
@@ -247,7 +259,8 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			outcome = "unchanged"
 		}
 		// Only cache a version AFTER its rules were successfully compiled/applied.
-		l.hash, l.etag, l.loaded, l.version = hash, resp.Header.Get("ETag"), true, version
+		l.hash, l.etag, l.loaded = hash, resp.Header.Get("ETag"), true
+		l.version, l.document = version, document
 	default:
 		return fmt.Errorf("config endpoint returned HTTP %d", resp.StatusCode)
 	}
