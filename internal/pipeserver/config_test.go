@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -359,5 +360,44 @@ func recordingProxy(t *testing.T) (string, func() []string) {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Clone(seen)
+	}
+}
+
+// TestWarnsWhenProxyResolves: the connector warns at start exactly when an
+// egress proxy resolves hostnames, as its address floor then covers only IP
+// literals.
+func TestWarnsWhenProxyResolves(t *testing.T) {
+	const proxy = "http://proxy.internal:3128"
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		warn bool
+	}{
+		{"HTTPS_PROXY, resolving by default", map[string]string{"HTTPS_PROXY": proxy}, true},
+		{"HTTPS_PROXY, resolving off", map[string]string{"HTTPS_PROXY": proxy,
+			"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "false"}, false},
+		{"the setting, resolving on", map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": proxy,
+			"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true"}, true},
+		{"the setting, resolving off by default",
+			map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": proxy}, false},
+		{"no proxy", nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+				"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY", "https_proxy",
+				"HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+				t.Setenv(k, c.env[k])
+			}
+			var logs strings.Builder
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			if _, err := newPolicy(&env.Reader{}); err != nil {
+				t.Fatal(err)
+			}
+			if warned := strings.Contains(logs.String(), "level=WARN"); warned != c.warn {
+				t.Fatalf("warned %v, want %v: %s", warned, c.warn, logs.String())
+			}
+		})
 	}
 }
