@@ -95,3 +95,22 @@ func refusals(t *testing.T, reader *sdkmetric.ManualReader, reason string) int64
 	}
 	return n
 }
+
+// TestBufferedLimitsAreFinite: a client configured with no body limits still
+// bounds the responses it buffers to redact; a request body, which streams,
+// stays unlimited.
+func TestBufferedLimitsAreFinite(t *testing.T) {
+	client, err := New(&config.Config{}, redact.NewRedactor(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.maxRequest != 0 {
+		t.Errorf("request limit %d, want none", client.maxRequest)
+	}
+	if want := int64(config.DefaultBodySizeMB) << 20; client.maxBody != want {
+		t.Errorf("buffered response limit %d, want %d", client.maxBody, want)
+	}
+	if want := int64(config.DefaultDecodedBodySizeMB) << 20; client.maxDecoded != want {
+		t.Errorf("decoded response limit %d, want %d", client.maxDecoded, want)
+	}
+}

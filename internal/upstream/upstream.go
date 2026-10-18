@@ -47,9 +47,9 @@ type Client struct {
 	// upgrades, which Go's transport keeps on HTTP/1 only for WebSocket.
 	auto, h2c, http1 *http.Transport
 	redactor         *redact.Redactor
-	// maxRequest bounds a request body as it streams. maxBody and maxDecoded
-	// bound a buffered response on the wire and decoded; bufferFor bounds how
-	// long it may take to end.
+	// maxRequest bounds a request body as it streams (0: no limit). maxBody
+	// and maxDecoded bound a buffered response on the wire and decoded, and
+	// are always finite; bufferFor bounds how long it may take to end.
 	maxRequest, maxBody, maxDecoded int64
 	bufferFor                       time.Duration
 	tracer                          trace.Tracer
@@ -76,12 +76,22 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 		http1:      transport(tlsCfg, dial, http1),
 		redactor:   r,
 		maxRequest: cfg.MaxRequestBodySizeMB * bytesPerMB,
-		maxBody:    cfg.MaxResponseBodySizeMB * bytesPerMB,
-		maxDecoded: cfg.MaxDecodedResponseBodySizeMB * bytesPerMB,
+		maxBody:    finite(cfg.MaxResponseBodySizeMB, config.DefaultBodySizeMB),
+		maxDecoded: finite(cfg.MaxDecodedResponseBodySizeMB, config.DefaultDecodedBodySizeMB),
 		bufferFor:  cfg.RequestTimeout,
 		tracer:     otel.Tracer(InstrumentationName),
 		metrics:    m,
 	}, nil
+}
+
+// finite is limitMB in bytes, or defaultMB's when limitMB is none (0 or
+// less): a buffered response is held whole in memory, so its limit cannot be
+// none.
+func finite(limitMB, defaultMB int64) int64 {
+	if limitMB > 0 {
+		return limitMB * bytesPerMB
+	}
+	return defaultMB * bytesPerMB
 }
 
 // trust is the customer's: UPSTREAM_TLS_VERIFY, and UPSTREAM_TLS_CA_BASE64 or

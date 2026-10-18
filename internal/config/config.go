@@ -21,10 +21,12 @@ import (
 
 const (
 	// Default configuration values.
-	defaultBodySizeMB = 32
+	// DefaultBodySizeMB is each body limit's default, and what bounds a
+	// buffered (redacted) response configured with no limit (0).
+	DefaultBodySizeMB = 32
 	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
 	// deliberately far above the wire ceiling rather than equal to it.
-	defaultDecodedBodySizeMB = 256
+	DefaultDecodedBodySizeMB = 256
 	defaultHTTPPort          = "8080"
 	defaultUpstreamTLSVerify = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
@@ -240,15 +242,15 @@ func Load() (Config, error) {
 		RequestTimeout: env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_RESPONSE_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxDecodedResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
-			defaultDecodedBodySizeMB,
+			DefaultDecodedBodySizeMB,
 		),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),

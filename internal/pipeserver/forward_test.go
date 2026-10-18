@@ -372,3 +372,90 @@ func TestWebSocket(t *testing.T) {
 		t.Fatalf("after the 101: %q %v", line, err)
 	}
 }
+
+// TestBodyLimits: every buffer a pipe fills for a covered host is finite.
+// A request over MAX_REQUEST_BODY_SIZE_MB by its Content-Length, or with
+// headers well over net/http's default limit, is refused before it reaches the
+// destination; a response over MAX_RESPONSE_BODY_SIZE_MB, with a length or
+// chunked, is refused as redaction_unsupported, not read to its end.
+func TestBodyLimits(t *testing.T) {
+	const limit = 1 << 20
+	reached := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached <- r.URL.Path
+		w.Header().Set("Content-Type", "text/plain")
+		switch r.URL.Path {
+		case "/big":
+			_, _ = io.WriteString(w, strings.Repeat("a", limit+1))
+		case "/big-chunked":
+			// No Content-Length: the response is chunked, of unknown length.
+			for range 3 {
+				_, _ = io.WriteString(w, strings.Repeat("a", limit/2))
+				w.(http.Flusher).Flush() //nolint:forcetypeassert // httptest
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := redact.NewRedactor()
+	if err := r.Update(&redact.RulesFile{Version: "v1", Rules: []redact.Rule{{Name: "email",
+		Type: "regex", Pattern: `[a-z]+@[a-z.]+`, Hosts: []string{`covered\.internal`}}}}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, &config.Config{RequestTimeout: 5 * time.Second, MaxRequestBodySizeMB: 1,
+		MaxResponseBodySizeMB: 1, MaxDecodedResponseBodySizeMB: 1}, r, srv.Listener.Addr().String())
+	for _, c := range []struct {
+		name, method, path string
+		body               string
+		header             string
+		http1              bool
+		status             int
+		reason             rawpipe.Reason
+	}{
+		{name: "request body by Content-Length", method: http.MethodPost, path: "/r",
+			body: strings.Repeat("a", limit+1), status: http.StatusRequestEntityTooLarge},
+		{name: "request headers", method: http.MethodGet, path: "/r", http1: true,
+			header: strings.Repeat("a", 2*http.DefaultMaxHeaderBytes),
+			status: http.StatusRequestHeaderFieldsTooLarge},
+		{name: "response body", method: http.MethodGet, path: "/big",
+			status: http.StatusBadGateway, reason: rawpipe.RedactionUnsupported},
+		{name: "chunked response body", method: http.MethodGet, path: "/big-chunked",
+			status: http.StatusBadGateway, reason: rawpipe.RedactionUnsupported},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var body io.Reader
+			if c.body != "" {
+				body = strings.NewReader(c.body)
+			}
+			req, _ := http.NewRequest(c.method, "http://covered.internal"+c.path, body)
+			if c.header != "" {
+				req.Header.Set("X-Pad", c.header)
+			}
+			resp, err := h.client("covered.internal:80", c.http1).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != c.status {
+				t.Fatalf("%d %.80q, want %d", resp.StatusCode, got, c.status)
+			}
+			if c.reason != "" && resp.Header.Get(rawpipe.HeaderReason) != string(c.reason) {
+				t.Fatalf("reason %q, want %q", resp.Header.Get(rawpipe.HeaderReason), c.reason)
+			}
+			if len(got) > limit {
+				t.Fatalf("a body past the limit was sent: %d bytes", len(got))
+			}
+			wantReached := c.status == http.StatusBadGateway
+			select {
+			case path := <-reached:
+				if !wantReached {
+					t.Fatalf("an oversized request reached the destination: %s", path)
+				}
+			default:
+				if wantReached {
+					t.Fatal("the request did not reach the destination")
+				}
+			}
+		})
+	}
+}
