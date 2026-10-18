@@ -199,11 +199,13 @@ configUpdates:
   enabled: false
   refreshInterval: "30s"
   # Traversal's config signing keys, a Key-ID PEM bundle (the install command
-  # sets it). Set, only configs Traversal signed for this connector apply, each
-  # at a version above the config applied (the applied one re-sent is a
-  # no-op); empty, configs apply unsigned. The version floor is in memory
-  # only: after a restart the connector accepts any validly signed version,
-  # including an older one, until it applies one.
+  # sets it). Set, only configs Traversal signed for this connector apply,
+  # while within their signed validity window (5 minutes' clock skew
+  # allowed), each at a version above the config applied and issued no
+  # earlier (the applied one re-sent is a no-op); empty, configs apply
+  # unsigned. The floor is in memory only: after a restart the connector
+  # accepts any validly signed config that has not expired, including an
+  # older one, until it applies one, so the window bounds that replay.
   signingKeys: ""
 
 # ─── Local-file redaction (opt-in) ───────────────────────────────────────────

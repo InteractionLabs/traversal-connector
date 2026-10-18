@@ -5,8 +5,11 @@
 //
 // TOML ignores comments, so connectors without config keys read the same
 // object unchanged. The JWS payload binds the document (its SHA-256, over
-// every byte after that line) to one connector and a version, so a config
-// cannot be moved to another connector or replayed over a newer one.
+// every byte after that line) to one connector, a version and a validity
+// window, so a config cannot be moved to another connector, replayed over a
+// newer one, or replayed at all once it expires: a connector that restarts
+// has no applied config to compare with, so expiry is what bounds a replay
+// then.
 package signedconfig
 
 import (
@@ -16,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/jws"
 )
@@ -29,6 +33,9 @@ const (
 	// capability (another typ and audience) never verifies as one.
 	Audience    = "traversal-connector-config"
 	maxTokenLen = 2048
+	// MaxClockSkew is how far a connector's clock may be from the signer's:
+	// a config is valid from iat - MaxClockSkew to exp + MaxClockSkew.
+	MaxClockSkew = 5 * time.Minute
 )
 
 // Claims is a config signature's payload. Every field is required.
@@ -40,18 +47,29 @@ type Claims struct {
 	Version uint64 `json:"version"`
 	// SHA256 is the hex digest of the document after the signature line.
 	SHA256 string `json:"sha256"`
+	// IssuedAt and ExpiresAt, Unix seconds, bound when a connector accepts
+	// the config. IssuedAt only goes up for one connector too: the connector
+	// refuses one issued before the config it holds.
+	IssuedAt  int64 `json:"iat"`
+	ExpiresAt int64 `json:"exp"`
 }
 
-// Sign returns document signed for connector at version, by key under kid.
-func Sign(key *ecdsa.PrivateKey, kid, connector string, version uint64, document []byte,
+// Sign returns document signed for connector at version, by key under kid,
+// valid from issued until expires.
+func Sign(key *ecdsa.PrivateKey, kid, connector string, version uint64,
+	issued, expires time.Time, document []byte,
 ) ([]byte, error) {
-	if kid == "" || connector == "" || version == 0 {
+	switch {
+	case kid == "" || connector == "" || version == 0:
 		return nil, errors.New("signedconfig: kid, connector and version are required")
+	case issued.Unix() <= 0 || !expires.After(issued):
+		return nil, errors.New("signedconfig: expires must be after issued")
 	}
 	sum := sha256.Sum256(document)
 	token, err := jws.Sign(key, jws.Header{Typ: tokenType, Kid: kid},
 		Claims{Audience: Audience, ConnectorID: connector, Version: version,
-			SHA256: hex.EncodeToString(sum[:])})
+			SHA256: hex.EncodeToString(sum[:]), IssuedAt: issued.Unix(),
+			ExpiresAt: expires.Unix()})
 	if err != nil {
 		return nil, err
 	}
@@ -61,9 +79,10 @@ func Sign(key *ecdsa.PrivateKey, kid, connector string, version uint64, document
 	return out.Bytes(), nil
 }
 
-// Verify checks a signed config for connector against keys (by kid) and
-// returns the document and its claims. It never quotes the input.
-func Verify(object []byte, connector string, keys map[string]*ecdsa.PublicKey,
+// Verify checks a signed config for connector against keys (by kid), valid
+// at now, and returns the document and its claims. It never quotes the
+// input.
+func Verify(object []byte, connector string, keys map[string]*ecdsa.PublicKey, now time.Time,
 ) ([]byte, *Claims, error) {
 	line, document, ok := bytes.Cut(object, []byte("\n"))
 	token, signed := strings.CutPrefix(strings.TrimSuffix(string(line), "\r"), Prefix)
@@ -98,6 +117,12 @@ func Verify(object []byte, connector string, keys map[string]*ecdsa.PublicKey,
 		return nil, nil, errors.New("config is for another connector")
 	case c.Version == 0:
 		return nil, nil, errors.New("config signature has no version")
+	case c.IssuedAt <= 0 || c.ExpiresAt <= c.IssuedAt:
+		return nil, nil, errors.New("config signature has a bad validity window")
+	case now.Add(MaxClockSkew).Before(time.Unix(c.IssuedAt, 0)):
+		return nil, nil, errors.New("config signature is not valid yet")
+	case !now.Add(-MaxClockSkew).Before(time.Unix(c.ExpiresAt, 0)):
+		return nil, nil, errors.New("config signature has expired")
 	case c.SHA256 != hex.EncodeToString(sum[:]):
 		return nil, nil, errors.New("config does not match its signature")
 	}

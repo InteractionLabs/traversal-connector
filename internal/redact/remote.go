@@ -101,27 +101,24 @@ type RemoteLoader struct {
 	status   atomic.Pointer[remoteStatus]
 	outcomes metric.Int64Counter
 	// verify, if set (RequireSignature), checks each fetched object's
-	// signature for this connector and returns its document and version.
-	verify func([]byte) ([]byte, uint64, error)
-	// version and document are the signed config applied: its version and
-	// the SHA-256 of its document. They are in memory only, so a restart
-	// accepts any validly signed version again.
+	// signature for this connector and returns its document and claims.
+	verify func([]byte) ([]byte, *signedconfig.Claims, error)
+	// version, issued and document are the signed config applied: its
+	// version, its iat, and the SHA-256 of its document. They are in memory
+	// only; after a restart a config's exp is what bounds a replay.
 	version  uint64
+	issued   int64
 	document [sha256.Size]byte
 }
 
 // RequireSignature makes the loader accept only configs signed for
-// connector by one of keys (signedconfig), at a version above the one it
-// holds; the applied document again at its own version, re-signed, changes
-// nothing. A config that fails counts as a failed fetch: the last-known-good
-// rules stay.
+// connector by one of keys (signedconfig), unexpired, at a version above the
+// one it holds and issued no earlier; the applied document again at its own
+// version, re-signed, changes nothing. A config that fails counts as a failed
+// fetch: the last-known-good rules stay.
 func (l *RemoteLoader) RequireSignature(connector string, keys map[string]*ecdsa.PublicKey) {
-	l.verify = func(object []byte) ([]byte, uint64, error) {
-		document, c, err := signedconfig.Verify(object, connector, keys)
-		if err != nil {
-			return nil, 0, err
-		}
-		return document, c.Version, nil
+	l.verify = func(object []byte) ([]byte, *signedconfig.Claims, error) {
+		return signedconfig.Verify(object, connector, keys, time.Now())
 	}
 }
 
@@ -214,18 +211,24 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			return errors.New("could not read config response")
 		}
 		hash := sha256.Sum256(data)
-		version, document := l.version, l.document
+		version, issued, document := l.version, l.issued, l.document
 		changed := !l.loaded || hash != l.hash
 		if changed && l.verify != nil {
+			var claims *signedconfig.Claims
 			var verifyErr error
-			if data, version, verifyErr = l.verify(data); verifyErr != nil {
+			if data, claims, verifyErr = l.verify(data); verifyErr != nil {
 				outcome = "unsigned"
 				return verifyErr
 			}
-			document = sha256.Sum256(data)
+			version, issued, document = claims.Version, claims.IssuedAt, sha256.Sum256(data)
 			// One version is one document: another at the applied version
-			// would replace it with no version to tell them apart.
+			// would replace it with no version to tell them apart. A config
+			// issued before the applied one is older whatever its version.
 			switch {
+			case l.loaded && issued < l.issued:
+				outcome = "rolled_back"
+				return errors.New(
+					"config was issued before the applied one; retaining the applied one")
 			case l.loaded && version == l.version && document == l.document:
 				changed = false
 			case l.loaded && version <= l.version:
@@ -260,7 +263,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 		}
 		// Only cache a version AFTER its rules were successfully compiled/applied.
 		l.hash, l.etag, l.loaded = hash, resp.Header.Get("ETag"), true
-		l.version, l.document = version, document
+		l.version, l.issued, l.document = version, issued, document
 	default:
 		return fmt.Errorf("config endpoint returned HTTP %d", resp.StatusCode)
 	}

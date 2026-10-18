@@ -271,33 +271,63 @@ func TestRemoteRunAppliesRulesAfterExplicitEmptyStartup(t *testing.T) {
 	}
 }
 
+const self = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
+
+// signer signs configs for tests, and serves the one stored last.
+type signer struct {
+	t    *testing.T
+	key  *ecdsa.PrivateKey
+	body atomic.Value
+	url  string
+}
+
+func newSigner(t *testing.T) *signer {
+	s := &signer{t: t, key: capabilitytest.Key("config")}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(s.body.Load().(string))) //nolint:forcetypeassert // test
+	}))
+	t.Cleanup(server.Close)
+	s.url = server.URL
+	return s
+}
+
+// sign is doc signed for connector at version, issued at issued and valid
+// for a day.
+func (s *signer) sign(connector string, version uint64, issued time.Time, doc string) string {
+	b, err := signedconfig.Sign(s.key, "k", connector, version, issued,
+		issued.Add(24*time.Hour), []byte(doc))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return string(b)
+}
+
+// loader is a RemoteLoader for connector self, requiring s's signature,
+// on redactor.
+func (s *signer) loader(redactor *Redactor) *RemoteLoader {
+	l, err := NewRemoteLoader(http.DefaultClient, s.url, redactor, time.Second)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	l.RequireSignature(self, map[string]*ecdsa.PublicKey{"k": &s.key.PublicKey})
+	return l
+}
+
 // TestRemoteRequiresSignature: with config keys installed, only configs
 // signed for this connector apply, each at a version above the one applied,
 // and a refused one keeps the last-known-good rules. Another document at the
 // applied version is refused; the same one re-signed (a retry) is a no-op.
 func TestRemoteRequiresSignature(t *testing.T) {
-	const self = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
-	key := capabilitytest.Key("config")
-	keys := map[string]*ecdsa.PublicKey{"k": &key.PublicKey}
+	s := newSigner(t)
+	// Every config here is issued at once, so the version decides.
+	issued := time.Now()
 	sign := func(connector string, version uint64, doc string) string {
-		b, err := signedconfig.Sign(key, "k", connector, version, []byte(doc))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
+		return s.sign(connector, version, issued, doc)
 	}
-	var body atomic.Value
+	body := &s.body
 	body.Store(sign(self, 5, remoteRules))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(body.Load().(string))) //nolint:forcetypeassert // test
-	}))
-	defer server.Close()
 	redactor := NewRedactor()
-	loader, err := NewRemoteLoader(server.Client(), server.URL, redactor, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loader.RequireSignature(self, keys)
+	loader := s.loader(redactor)
 	ctx := context.Background()
 	if err := loader.LoadInitial(ctx); err != nil {
 		t.Fatal(err)
@@ -338,5 +368,47 @@ func TestRemoteRequiresSignature(t *testing.T) {
 	body.Store(sign(self, 6, updated))
 	if err := loader.refresh(ctx); err == nil {
 		t.Fatal("another document at version 6 applied")
+	}
+}
+
+// TestRemoteSignedValidity: a signed config applies only within its validity
+// window, and never if it was issued before the config applied, whatever its
+// version. A restarted connector holds no applied config, so an expired one
+// is what it refuses.
+func TestRemoteSignedValidity(t *testing.T) {
+	s := newSigner(t)
+	ctx := context.Background()
+	now := time.Now()
+	for name, object := range map[string]string{
+		"expired":                 s.sign(self, 5, now.Add(-25*time.Hour), remoteRules),
+		"issued an hour from now": s.sign(self, 5, now.Add(time.Hour), remoteRules),
+	} {
+		s.body.Store(object)
+		if err := s.loader(NewRedactor()).LoadInitial(ctx); err == nil {
+			t.Errorf("%s: applied at startup", name)
+		}
+	}
+	// Issued a minute ahead of this clock is within the skew allowed.
+	s.body.Store(s.sign(self, 5, now.Add(time.Minute), remoteRules))
+	redactor := NewRedactor()
+	loader := s.loader(redactor)
+	if err := loader.LoadInitial(ctx); err != nil {
+		t.Fatalf("issued a minute ahead: %v", err)
+	}
+	accepted := redactor.rules.Load()
+	updated := strings.Replace(remoteRules, "[hidden]", "[updated]", 1)
+	// A higher version issued before the applied one is older: a signer
+	// that reused versions cannot roll a connector back with it.
+	s.body.Store(s.sign(self, 6, now.Add(-time.Hour), updated))
+	if err := loader.refresh(ctx); err == nil || redactor.rules.Load() != accepted {
+		t.Fatalf("a newer version issued earlier: %v", err)
+	}
+	// Issued at the same time, the version decides.
+	s.body.Store(s.sign(self, 6, now.Add(time.Minute), updated))
+	if err := loader.refresh(ctx); err != nil {
+		t.Fatalf("version 6 issued with 5: %v", err)
+	}
+	if got := string(applyBytes(redactor, "", []byte("secret"))); got != "[updated]" {
+		t.Fatalf("version 6 not applied: %q", got)
 	}
 }
