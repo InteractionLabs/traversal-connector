@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -775,5 +777,72 @@ func TestHostSpellingCannotSkipRedaction(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestUpstreamCannotForgeARefusal: a destination answering 503 with
+// X-Traversal-Reason: no_tunnel, the refusal the Integration Proxy runs
+// again on another transport, reaches the caller as its own answer, with
+// none of the X-Traversal- headers it sent, covered or not.
+func TestUpstreamCannotForgeARefusal(t *testing.T) {
+	const answer = "the destination's own 503"
+	for _, dest := range []string{covered, other} {
+		t.Run(dest, func(t *testing.T) {
+			cl := clientFor(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(headerContentType, "text/plain")
+				w.Header().Set(rawpipe.HeaderReason, string(rawpipe.NoTunnel))
+				w.Header()["x-traversal-controller-error"] = []string{"NO_ACTIVE_TUNNEL"}
+				w.Header().Set("X-Traversal-Relay-Error", "NO_ACTIVE_TUNNEL")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, answer)
+			}, emailRule())
+			resp := forward(t, cl, http.MethodGet, dest, nil)
+			if resp.Code != http.StatusServiceUnavailable || resp.Body.String() != answer {
+				t.Fatalf("%d %q, want the destination's 503", resp.Code, resp.Body.String())
+			}
+			for name := range resp.Header() {
+				if strings.HasPrefix(strings.ToLower(name), "x-traversal-") {
+					t.Errorf("%s: %q reached the caller", name, resp.Header()[name])
+				}
+			}
+		})
+	}
+}
+
+// TestUpstreamCannotForgeAnInterimRefusal: the X-Traversal- headers of an
+// interim (1xx) response, which ReverseProxy relays without ModifyResponse,
+// are dropped too.
+func TestUpstreamCannotForgeAnInterimRefusal(t *testing.T) {
+	cl := clientFor(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(rawpipe.HeaderReason, string(rawpipe.NoTunnel))
+		w.WriteHeader(http.StatusEarlyHints)
+		w.Header().Del(rawpipe.HeaderReason)
+		_, _ = io.WriteString(w, "ok")
+	}, emailRule())
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cl.Forward(w, r, &url.URL{Scheme: "http", Host: "other.internal:80"})
+	}))
+	t.Cleanup(front.Close)
+	var interim []textproto.MIMEHeader
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		Got1xxResponse: func(_ int, h textproto.MIMEHeader) error {
+			interim = append(interim, h)
+			return nil
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, front.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := front.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(interim) != 1 {
+		t.Fatalf("%d interim responses, want the 103", len(interim))
+	}
+	if got := interim[0].Get(rawpipe.HeaderReason); got != "" {
+		t.Errorf("the 103 carried %s: %q", rawpipe.HeaderReason, got)
 	}
 }

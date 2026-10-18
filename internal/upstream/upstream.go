@@ -210,8 +210,21 @@ func (c *Client) Forward(w http.ResponseWriter, r *http.Request, target *url.URL
 		span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
 		return c.respond(ctx, resp, start, target.Host, host, covered)
 	}
-	rp.ServeHTTP(w, r)
+	rp.ServeHTTP(interim{w}, r)
 }
+
+// interim strips the X-Traversal- headers of an interim (1xx) response,
+// which ReverseProxy passes to the caller without ModifyResponse.
+type interim struct{ http.ResponseWriter }
+
+func (i interim) WriteHeader(status int) {
+	if status < http.StatusOK {
+		stripTraversalHeaders(i.Header())
+	}
+	i.ResponseWriter.WriteHeader(status)
+}
+
+func (i interim) Unwrap() http.ResponseWriter { return i.ResponseWriter }
 
 // fail answers r with err's reason: a dial refusal's, redaction_unsupported,
 // or upstream_failed for any other failure.

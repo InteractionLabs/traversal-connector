@@ -29,6 +29,10 @@ const (
 	// headerRedacted tells Traversal the body is not the one the upstream
 	// sent.
 	headerRedacted = "X-Traversal-Redacted"
+	// traversalHeaders is the namespace of the headers the connector and
+	// Traversal read as their own: headerRedacted, rawpipe.HeaderReason, and
+	// the Integration Proxy's error headers.
+	traversalHeaders = "X-Traversal-"
 )
 
 // Why a response to a covered host was dropped rather than forwarded. The set
@@ -75,8 +79,7 @@ func unredactableRequest(r *http.Request) string {
 func (c *Client) respond(
 	ctx context.Context, resp *http.Response, start time.Time, target, host string, covered bool,
 ) error {
-	// Only the connector may say it redacted a body; Traversal cannot check.
-	resp.Header.Del(headerRedacted)
+	stripTraversalHeaders(resp.Header)
 	coding := classifyContentCoding(resp.Header.Values(headerContentEncoding))
 	c.metrics.encodings.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(connector.AttrTargetHost, target),
@@ -109,6 +112,20 @@ func (c *Client) respond(
 	// The redacted body stays in memory until it is sent.
 	resp.Body = &releasing{ReadCloser: resp.Body, release: sync.OnceFunc(release)}
 	return nil
+}
+
+// stripTraversalHeaders drops every X-Traversal- header a destination sent,
+// in any case: a name with a byte net/http does not canonicalize keeps its
+// own. Only the connector may say it redacted a body or refused a request:
+// Traversal cannot check either, and the Integration Proxy runs a request
+// it reads as refused (no_tunnel) again on another transport.
+func stripTraversalHeaders(h http.Header) {
+	for name := range h {
+		if len(name) >= len(traversalHeaders) &&
+			strings.EqualFold(name[:len(traversalHeaders)], traversalHeaders) {
+			delete(h, name)
+		}
+	}
 }
 
 // acquire takes one of the connector's redaction slots, waiting until

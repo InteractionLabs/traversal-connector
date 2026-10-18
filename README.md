@@ -559,6 +559,11 @@ between two ranges is invisible to both.
 Hosts no rule targets are unaffected: their responses are forwarded byte for
 byte, in whatever coding they arrived, with nothing decoded or re-encoded.
 
+On every response, whether rules target its host or not, the connector drops
+any `X-Traversal-*` header the destination sent. Those headers are the
+connector's and Traversal's own (`X-Traversal-Redacted`, `X-Traversal-Reason`),
+and Traversal cannot tell a forged one from the connector's.
+
 Two response headers change when the connector rewrites a body. It sets
 `X-Traversal-Redacted: true`, and it strips the headers that fingerprint the
 original bytes (`ETag`, `Last-Modified`, `Content-MD5`, and the `Digest` family)
