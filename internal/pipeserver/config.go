@@ -84,6 +84,10 @@ func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, 
 			return nil, err
 		}
 		t.Addr = connectTo
+	} else if cfg.TraversalControllerConnectTo != "" {
+		// Tunnels go to the controller, so its route is theirs unless set
+		// apart. config.Load has validated it.
+		t.Addr = cfg.TraversalControllerConnectTo
 	}
 	if cfg.EgressProxyURL != nil {
 		return nil, errors.New("EGRESS_PROXY_URL: tunnels through it are not supported yet")

@@ -96,6 +96,23 @@ func TestNew(t *testing.T) {
 			}
 			return ""
 		}},
+		{name: "controller connect-to routes tunnels", spiffeID: orgScoped,
+			mutate: func(c *config.Config) { c.TraversalControllerConnectTo = "10.0.0.2:443" },
+			check: func(tunnels *Tunnels) string {
+				if tunnels.Addr != "10.0.0.2:443" || tunnels.TLS.ServerName != "edge.example.com" {
+					return "TRAVERSAL_CONTROLLER_CONNECT_TO did not route tunnels"
+				}
+				return ""
+			}},
+		{name: "tunnel connect-to over the controller's", spiffeID: orgScoped,
+			env:    map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443"},
+			mutate: func(c *config.Config) { c.TraversalControllerConnectTo = "10.0.0.2:443" },
+			check: func(tunnels *Tunnels) string {
+				if tunnels.Addr != "10.0.0.1:443" {
+					return "TRAVERSAL_TUNNELS_CONNECT_TO did not win"
+				}
+				return ""
+			}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
 			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS: one is required"},

@@ -269,7 +269,7 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | Variable | Default | Description |
 |---|---|---|
 | `TRAVERSAL_CONTROLLER_URL` | **required** | URL of the Traversal control plane; tunnels go to its host on port 443. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
-| `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
+| `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. It also routes tunnels unless `TRAVERSAL_TUNNELS_CONNECT_TO` is set. Cannot be combined with `EGRESS_PROXY_URL`. |
 | `REQUEST_TIMEOUT` | `60s` | How long a destination may take to send its response headers, and how long a response from a host your redaction rules cover may take to end; one that takes longer is a stream, which cannot be redacted, and is refused. Other response bodies stream for as long as they run. `0` or less is the default. |
 | `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of a request body sent to a destination. Bodies stream, so a larger one is cut off with an error once it passes the limit. |
 | `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from a response from a host your redaction rules cover, which is buffered to be redacted. A larger response is refused. Other responses stream and have no limit. |
@@ -334,7 +334,7 @@ addresses, and any CIDR you add. Private ranges are allowed.
 | `TRAVERSAL_CAPABILITY_ROOTS` | (none) | Traversal's capability root certificates (PEM, raw or base64). Required unless `TRAVERSAL_CAPABILITY_KEYS` is set. |
 | `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_ISSUER` | (none) | Pinned capability keys and their issuer, beside or instead of roots. |
 | `TRAVERSAL_TUNNELS_COUNT` | `2` | Tunnels held, at most 8. |
-| `TRAVERSAL_TUNNELS_CONNECT_TO` | (none) | `host:port` to dial instead of the controller host on 443; SNI and certificate checks are unchanged. |
+| `TRAVERSAL_TUNNELS_CONNECT_TO` | `TRAVERSAL_CONTROLLER_CONNECT_TO` | `host:port` to dial instead of the controller host on 443; SNI and certificate checks are unchanged. Unset, tunnels follow `TRAVERSAL_CONTROLLER_CONNECT_TO`, or with neither set go to the controller host on 443. |
 | `TRAVERSAL_PIPES_MAX` | `200` | Pipes open at once. |
 | `TRAVERSAL_PIPES_MAX_LIFETIME` | `4h` | A pipe this old is closed; the proxy opens another. |
 | `TRAVERSAL_PIPES_IDLE_TIMEOUT` | `15m` | A pipe that carries no request for this long is closed. |
