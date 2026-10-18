@@ -19,6 +19,22 @@
 {{- end -}}
 {{- end -}}
 
+{{- /* Capability trust, as the connector requires it at startup
+       (TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS; keys need
+       TRAVERSAL_CAPABILITY_ISSUER): refused at render rather than found as a
+       crash-looping pod. */}}
+{{- define "traversal-connector.validateCapabilityTrust" -}}
+{{- $pipes := .Values.pipes | default dict -}}
+{{- $roots := $pipes.trustedRoots | default dict -}}
+{{- $keys := $pipes.capabilityKeys | default "" | toString | trim -}}
+{{- if not (or ($roots.current | default "" | trim) $keys) -}}
+{{- fail "pipes.trustedRoots.current or pipes.capabilityKeys is required: the connector trusts no capability without one." -}}
+{{- end -}}
+{{- if and $keys (not ($pipes.capabilityIssuer | default "" | toString | trim)) -}}
+{{- fail "pipes.capabilityIssuer is required with pipes.capabilityKeys." -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "traversal-connector.urlAuthority" -}}
 {{- regexReplaceAll `^https://([^/]+).*$` . `${1}` -}}
 {{- end -}}

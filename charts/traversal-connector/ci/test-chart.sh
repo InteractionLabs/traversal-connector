@@ -101,7 +101,9 @@ render disabled-ignored-connect-to "$fixtures/telemetry-disabled-values.yaml" \
   --set-string otel.connectTo=not-an-address
 assert_not_contains "$tmp_dir/disabled-ignored-connect-to.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
 
-common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false)
+# The fixtures' synthetic capability trust, for scenarios built without them.
+trust=(--set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci --set-string "pipes.capabilityKeys=$(awk '$1 == "capabilityKeys:" { print $2 }' "$fixtures/direct-export-values.yaml")")
+common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false "${trust[@]}")
 render tls-one "$fixtures/direct-export-values.yaml" \
   --set-string controllerTLS.certPEM=certificate-one \
   --set-string controllerTLS.keyPEM=private-key \
@@ -217,7 +219,8 @@ next_root=$'-----BEGIN CERTIFICATE-----\nbmV4dA==\n-----END CERTIFICATE-----\n'
 capability_roots() {
   awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
 }
-render raw-roots "$fixtures/direct-export-values.yaml" \
+no_keys=(--set-string pipes.capabilityKeys= --set-string pipes.capabilityIssuer=)
+render raw-roots "$fixtures/direct-export-values.yaml" "${no_keys[@]}" \
   --set-string pipes.trustedRoots.current="$current_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots.yaml")" == "${current_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root"
@@ -227,6 +230,14 @@ render raw-roots-rotation "$fixtures/direct-export-values.yaml" \
   --set-string pipes.trustedRoots.next="$next_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
+
+# Capability trust is refused at render when the connector would refuse it.
+assert_render_fails no-capability-trust 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+  -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}"
+assert_render_fails next-root-only 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+  -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}" --set-string pipes.trustedRoots.next="$next_root"
+assert_render_fails keys-without-issuer 'pipes.capabilityIssuer is required with pipes.capabilityKeys' \
+  -f "$fixtures/direct-export-values.yaml" --set-string pipes.capabilityIssuer=
 
 # Config signing keys reach the connector only with OTA on.
 render config-signed "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true \

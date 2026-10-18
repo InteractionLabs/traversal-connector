@@ -20,6 +20,7 @@
 {{- $sidecarEnabled := include "traversal-connector.sidecarEnabled" . -}}
 {{- $otlp := dict -}}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "controllerConnectTo" "address" .Values.controllerConnectTo) -}}
+{{- include "traversal-connector.validateCapabilityTrust" . -}}
 {{- if and .Values.upstreamTLS.caFile $hasUpstreamTLS }}
 {{- fail "upstreamTLS.caFile cannot be combined with upstreamTLS.caPEM or upstreamTLS.existingSecret; set only one CA source." }}
 {{- end }}
