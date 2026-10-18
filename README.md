@@ -381,12 +381,14 @@ name = "ssn"
 type = "regex"
 pattern = '\b\d{3}-\d{2}-(\d{4})\b'
 replacement = "***-**-$1"
+hosts = ['.*']
 
 [[rules]]
 name = "email"
 type = "regex-structured-data"
 pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
+hosts = ['api\.example\.com']
 ```
 
 The optional `version` string is metadata. Unknown TOML fields are ignored.
@@ -464,12 +466,14 @@ name = "ssn"
 type = "regex"
 pattern = '\b\d{3}-\d{2}-(\d{4})\b'
 replacement = "***-**-$1"
+hosts = ['.*']
 
 [[redaction.rules]]
 name = "email"
 type = "regex-structured-data"
 pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
+hosts = ['api\.example\.com']
 ```
 
 Validate a document locally with `go run ./cmd/validate-config < config.toml`.
@@ -503,7 +507,7 @@ Each rule requires:
 - `type` — `"regex"` for byte-level redaction over the full response body, or `"regex-structured-data"` for per-field redaction over JSON response bodies. Unsupported types reject the entire remote update.
 - `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
-- `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
+- `hosts` — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. **Required:** a rule with no `hosts`, or `hosts = []`, is refused at load (the connector does not start, or keeps its last-known-good rules), so a rule cannot cover every host by omission; write `hosts = [".*"]` for every host. Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
 
 Matching follows DNS rather than byte equality, so one upstream cannot be reached under a spelling that carries a different rule set. Patterns are matched **case-insensitively** (`api\.github\.com` and `API\.GITHUB\.COM` both match `API.github.com`), and a single trailing dot on the requested hostname is ignored, since it only marks the name as already absolute (`github.com.` matches `github\.com`).
 

@@ -41,6 +41,7 @@ redaction:
     type = "regex"
     pattern = 'secret'
     replacement = "[REDACTED]"
+    hosts = ['api\.example\.com']
 ```
 
 Alternatively, leave `rulesContent` empty and set exactly one of

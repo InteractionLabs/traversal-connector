@@ -15,6 +15,7 @@ default_replacement = "[LOCAL]"
 name = "token"
 type = "regex"
 pattern = 'secret'
+hosts = ['.*']
 `
 
 func writeLocalRules(t *testing.T, path, content string) {
@@ -34,10 +35,12 @@ func TestFileLoaderInitial(t *testing.T) {
 		{name: "legacy version only", content: `version="v1"`, want: "secret"},
 		{name: "invalid TOML", content: "CUSTOMER_CANARY = [", wantErr: true},
 		{name: "invalid pattern", content: strings.ReplaceAll(localRules, "'secret'", "'[CUSTOMER_CANARY'"), wantErr: true},
-		{name: "invalid host", content: localRules + "\nhosts=['.*', '[CUSTOMER_CANARY']", wantErr: true},
+		{name: "invalid host", content: strings.Replace(localRules, "hosts = ['.*']", "hosts=['.*', '[CUSTOMER_CANARY']", 1), wantErr: true},
+		{name: "no hosts", content: strings.Replace(localRules, "hosts = ['.*']\n", "", 1), wantErr: true},
+		{name: "empty hosts", content: strings.Replace(localRules, "['.*']", "[]", 1), wantErr: true},
 		{name: "unsupported type", content: strings.ReplaceAll(localRules, `"regex"`, `"CUSTOMER_CANARY"`), wantErr: true},
 		{name: "omitted type", content: strings.ReplaceAll(localRules, "type = \"regex\"\n", ""), wantErr: true},
-		{name: "mixed valid and invalid types", content: localRules + "\n[[rules]]\nname='bad'\ntype='CUSTOMER_CANARY'\npattern='secret'", wantErr: true},
+		{name: "mixed valid and invalid types", content: localRules + "\n[[rules]]\nname='bad'\ntype='CUSTOMER_CANARY'\npattern='secret'\nhosts=['.*']", wantErr: true},
 		{name: "unknown top-level field", content: "owner='security'\n" + localRules, want: "[LOCAL]"},
 		{name: "unknown rule field", content: localRules + "\nCUSTOMER_CANARY=true", want: "[LOCAL]"},
 		{name: "unknown rule table", content: localRules + "\n[rules.metadata]\nowner='security'", want: "[LOCAL]"},
@@ -115,8 +118,9 @@ func TestFileLoaderReload(t *testing.T) {
 		remoteRules,
 		strings.ReplaceAll(localRules, `"regex"`, `"glob"`),
 		strings.ReplaceAll(localRules, "type = \"regex\"\n", ""),
-		localRules + "\n[[rules]]\nname='bad'\ntype='glob'\npattern='secret'",
-		localRules + "\n[[rules]]\nname='bad'\npattern='secret'",
+		localRules + "\n[[rules]]\nname='bad'\ntype='glob'\npattern='secret'\nhosts=['.*']",
+		localRules + "\n[[rules]]\nname='bad'\npattern='secret'\nhosts=['.*']",
+		strings.Replace(localRules, "hosts = ['.*']\n", "", 1),
 	} {
 		writeLocalRules(t, path, bad)
 		if err := l.refresh(); err == nil {

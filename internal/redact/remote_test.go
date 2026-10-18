@@ -22,6 +22,7 @@ name = "token"
 type = "regex"
 pattern = 'secret'
 replacement = "[hidden]"
+hosts = ['.*']
 `
 
 func TestRemoteConfigValidation(t *testing.T) {
@@ -35,7 +36,9 @@ func TestRemoteConfigValidation(t *testing.T) {
 		strings.Replace(remoteRules, `pattern = 'secret'`, `pattern = ''`, 1),
 		remoteRules + "\nredact_fields = [\"message\"]",
 		remoteRules + "\nredact_fields = []",
-		remoteRules + "\n[[redaction.rules]]\nname='token'\ntype='regex'\npattern='other'",
+		remoteRules + "\n[[redaction.rules]]\nname='token'\ntype='regex'\npattern='other'\nhosts=['.*']",
+		strings.Replace(remoteRules, "hosts = ['.*']\n", "", 1),
+		strings.Replace(remoteRules, "['.*']", "[]", 1),
 		strings.Repeat(" ", MaxConfigBytes+1),
 	} {
 		if _, err := ParseConfig([]byte(bad)); err == nil {

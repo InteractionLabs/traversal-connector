@@ -61,10 +61,14 @@ func ParseConfig(data []byte) (*RulesFile, error) {
 			return nil, errors.New("field filters require regex-structured-data")
 		}
 	}
-	return &RulesFile{
+	rules := &RulesFile{
 		DefaultReplacement: doc.Redaction.DefaultReplacement,
 		Rules:              *doc.Redaction.Rules,
-	}, nil
+	}
+	if err := rules.CheckHosts(); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }
 
 // ValidateConfig uses the same parser and compiler as RemoteLoader/Update,
