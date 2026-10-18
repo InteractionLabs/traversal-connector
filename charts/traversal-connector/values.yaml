@@ -217,7 +217,7 @@ redaction:
   # once, each holding up to maxResponseBodySizeMB plus
   # maxDecodedResponseBodySizeMB in memory. One that waits its whole
   # requestTimeout for a slot is refused (capacity). Applies to OTA rules too.
-  maxConcurrent: ""  # TRAVERSAL_REDACTION_MAX_CONCURRENT (default 8)
+  maxConcurrent: ""  # TRAVERSAL_REDACTION_MAX_CONCURRENT (default 8, 1 to 1024)
   reloadInterval: "10s"
   # Inline TOML; the chart creates a ConfigMap.
   rulesContent: ""

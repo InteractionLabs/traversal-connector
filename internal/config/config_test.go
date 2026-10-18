@@ -368,6 +368,27 @@ func TestLoad_RejectsMalformedCert(t *testing.T) {
 	}
 }
 
+// TestLoad_RedactionConcurrencyIsStrict: TRAVERSAL_REDACTION_MAX_CONCURRENT
+// that is set but not a count from 1 to 1024 stops Load, naming the setting,
+// rather than running the default.
+func TestLoad_RedactionConcurrencyIsStrict(t *testing.T) {
+	for _, v := range []string{"eight", "0", "-1", "1025", "4.5"} {
+		t.Run(v, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_REDACTION_MAX_CONCURRENT", v)
+			_, err := Load()
+			if err == nil ||
+				!strings.HasPrefix(err.Error(), "TRAVERSAL_REDACTION_MAX_CONCURRENT:") {
+				t.Fatalf("Load() = %v, want a TRAVERSAL_REDACTION_MAX_CONCURRENT error", err)
+			}
+		})
+	}
+}
+
 func TestLoad_AcceptsHTTPInDev(t *testing.T) {
 	hosts := []string{
 		"localhost", "127.0.0.1", "host.docker.internal",

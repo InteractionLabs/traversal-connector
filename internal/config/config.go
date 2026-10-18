@@ -31,8 +31,10 @@ const (
 	// connector holds in memory at once, and what bounds it when configured
 	// as none (0 or less).
 	DefaultMaxConcurrentRedactions = 8
-	defaultHTTPPort                = "8080"
-	defaultUpstreamTLSVerify       = true
+	// maxConcurrentRedactions bounds TRAVERSAL_REDACTION_MAX_CONCURRENT.
+	maxConcurrentRedactions  = 1024
+	defaultHTTPPort          = "8080"
+	defaultUpstreamTLSVerify = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
@@ -85,7 +87,8 @@ type Config struct {
 	// MaxConcurrentRedactions is how many covered responses the whole
 	// connector buffers and redacts at once: each may hold
 	// MaxResponseBodySizeMB on the wire and MaxDecodedResponseBodySizeMB
-	// decoded. Read from TRAVERSAL_REDACTION_MAX_CONCURRENT.
+	// decoded. Read strictly from TRAVERSAL_REDACTION_MAX_CONCURRENT, 1 to
+	// 1024.
 	MaxConcurrentRedactions int64
 	// EgressProxyURL is the optional HTTP forward proxy URL used for any
 	// connector-initiated egress to the Traversal SaaS — both the bidi
@@ -242,6 +245,7 @@ func Load() (Config, error) {
 		}
 	}
 
+	var strict env.Reader
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL:       *traversalControllerURL,
@@ -263,10 +267,8 @@ func Load() (Config, error) {
 			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
 			DefaultDecodedBodySizeMB,
 		),
-		MaxConcurrentRedactions: env.GetEnvInt64(
-			"TRAVERSAL_REDACTION_MAX_CONCURRENT",
-			DefaultMaxConcurrentRedactions,
-		),
+		MaxConcurrentRedactions: int64(strict.Int("TRAVERSAL_REDACTION_MAX_CONCURRENT",
+			DefaultMaxConcurrentRedactions, maxConcurrentRedactions)),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
@@ -297,6 +299,9 @@ func Load() (Config, error) {
 		RedactionReloadInterval: defaultRedactionReloadInterval,
 	}
 
+	if err := strict.Err(); err != nil {
+		return Config{}, err
+	}
 	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {
 		return Config{}, errors.New(
 			"TRAVERSAL_CONFIG_ENDPOINT is no longer supported; OTA uses the controller origin",
