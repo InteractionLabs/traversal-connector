@@ -35,6 +35,22 @@
 {{- end -}}
 {{- end -}}
 
+{{- /* The connector's identity, as it requires it at startup: a lower-case
+       UUID connectorID (rawpipe.IsConnectorID), and controllerTLS's client
+       certificate and key, without which no tunnel opens. A 0.9.x values
+       file lacking either fails here, at render, rather than as a
+       crash-looping rollout. */}}
+{{- define "traversal-connector.validateIdentity" -}}
+{{- $id := required "connectorID is required" .Values.connectorID | toString -}}
+{{- if not (regexMatch `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` $id) -}}
+{{- fail "connectorID must be the lower-case UUID Traversal provided, such as 6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00: connector 0.10.x refuses any other form." -}}
+{{- end -}}
+{{- $tls := .Values.controllerTLS | default dict -}}
+{{- if not (or $tls.existingSecret (and $tls.certPEM $tls.keyPEM)) -}}
+{{- fail "controllerTLS is required: set controllerTLS.existingSecret, or controllerTLS.certPEM and controllerTLS.keyPEM. Connector 0.10.x opens its tunnels with that client certificate." -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "traversal-connector.urlAuthority" -}}
 {{- regexReplaceAll `^https://([^/]+).*$` . `${1}` -}}
 {{- end -}}

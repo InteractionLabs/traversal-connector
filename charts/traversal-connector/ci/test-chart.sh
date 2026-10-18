@@ -103,12 +103,12 @@ assert_not_contains "$tmp_dir/disabled-ignored-connect-to.yaml" 'OTEL_EXPORTER_O
 
 # The fixtures' synthetic capability trust, for scenarios built without them.
 trust=(--set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci --set-string "pipes.capabilityKeys=$(awk '$1 == "capabilityKeys:" { print $2 }' "$fixtures/direct-export-values.yaml")")
-common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false "${trust[@]}")
-render tls-one "$fixtures/direct-export-values.yaml" \
+common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --set-string controllerTLS.existingSecret=ci-controller-tls --set otel.sidecar.enabled=false "${trust[@]}")
+render tls-one "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string controllerTLS.certPEM=certificate-one \
   --set-string controllerTLS.keyPEM=private-key \
   --set-string podAnnotations.example\\.com/owner=ci
-render tls-two "$fixtures/direct-export-values.yaml" \
+render tls-two "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string controllerTLS.certPEM=certificate-two \
   --set-string controllerTLS.keyPEM=private-key
 checksum_one=$(grep 'checksum/controller-tls:' "$tmp_dir/tls-one.yaml")
@@ -120,6 +120,23 @@ assert_not_contains "$tmp_dir/direct.yaml" 'checksum/controller-tls:'
 assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
 assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
 assert_render_fails missing-id 'connectorID is required' "${common[@]}" --set connectorID=
+# A 0.9.x values file upgraded to 0.10.x fails at render, not as a crash-looping
+# rollout: 0.10.x needs a lower-case UUID connectorID and controllerTLS.
+for id in ci AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE aaaaaaaabbbbccccddddeeeeeeeeeeee \
+  ' aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}'; do
+  assert_render_fails non-uuid-id 'connectorID must be the lower-case UUID' "${common[@]}" --set-string "connectorID=$id"
+done
+assert_render_fails no-controller-tls 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret=
+assert_render_fails empty-controller-tls 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM= --set-string controllerTLS.keyPEM= --set-string controllerTLS.caPEM=
+assert_render_fails controller-ca-only 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.caPEM=ca
+assert_render_fails controller-cert-only 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM=certificate
+render controller-tls-inline "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM=certificate --set-string controllerTLS.keyPEM=private-key
+assert_contains "$tmp_dir/controller-tls-inline.yaml" 'name: controller-tls-inline-traversal-connector-controller-tls'
+assert_contains "$tmp_dir/direct.yaml" $'            - name: TLS_CERT_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: ci-controller-tls'
 assert_render_fails non-boolean 'disableTelemetry must be a boolean' "${common[@]}" --set-string disableTelemetry=false
 assert_render_fails sidecar-no-tls 'otel.sidecar.enabled requires controllerTLS' -f "$fixtures/sidecar-values.yaml" --set controllerTLS.existingSecret=
 assert_render_fails divergent-sidecar 'requires a single OTLP egress endpoint' -f "$fixtures/sidecar-values.yaml" --set otel.logsEndpoint=https://logs.example.invalid:4317

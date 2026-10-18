@@ -88,6 +88,7 @@
 {{- fail "otel.sidecar.enabled requires controllerTLS to be configured (controllerTLS.existingSecret, or certPEM/keyPEM/caPEM): the sidecar forwards over the connector's mTLS identity." }}
 {{- end }}
 {{- end }}
+{{- include "traversal-connector.validateIdentity" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -2,6 +2,9 @@ envName: ci
 controllerURL: https://controller.example.invalid
 connectorID: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
+controllerTLS:
+  existingSecret: ci-controller-tls
+
 otel:
   sidecar:
     enabled: false

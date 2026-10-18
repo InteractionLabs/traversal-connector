@@ -30,8 +30,8 @@ controllerURL: ""
 # Tunnels follow it too unless pipes.tunnelsConnectTo is set. Cannot be
 # combined with proxyURL.
 controllerConnectTo: ""  # TRAVERSAL_CONTROLLER_CONNECT_TO
-# Unique identifier for this connector deployment, provided to you by Traversal.
-# Maps to TRAVERSAL_CONNECTOR_ID.
+# Unique identifier for this connector deployment, provided to you by Traversal:
+# a lower-case UUID, or the chart fails at render. Maps to TRAVERSAL_CONNECTOR_ID.
 connectorID: ""
 
 # ─── Optional connection tuning ──────────────────────────────────────────────
@@ -99,9 +99,12 @@ pipes:
   # cannot be removed. An entry that does not parse stops the connector starting.
   forbiddenCIDRs: ""       # TRAVERSAL_PIPES_FORBIDDEN_CIDRS
 
-# ─── mTLS to the Traversal control plane (optional) ──────────────────────────
-# Either provide PEM strings inline (chart will render a Secret) or reference
-# an existing Secret with keys: tls.crt, tls.key, ca.crt.
+# ─── mTLS to the Traversal control plane (required) ──────────────────────────
+# The connector's client certificate: its tunnels cannot open without one, so
+# the chart fails at render unless existingSecret, or certPEM and keyPEM, are
+# set. Either provide PEM strings inline (chart will render a Secret) or
+# reference an existing Secret with keys: tls.crt, tls.key, ca.crt (ca.crt is
+# optional; without it the system roots verify the controller).
 # Since v0.3.0, this same cert + key are also presented for mTLS to the OTLP
 # telemetry endpoints when those endpoints are TLS-enabled.
 controllerTLS:
