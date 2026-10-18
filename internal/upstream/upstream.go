@@ -52,8 +52,11 @@ type Client struct {
 	// are always finite; bufferFor bounds how long it may take to end.
 	maxRequest, maxBody, maxDecoded int64
 	bufferFor                       time.Duration
-	tracer                          trace.Tracer
-	metrics                         *metrics
+	// redactions holds a slot for each covered response buffered at once,
+	// across the connector: each may hold maxBody and maxDecoded in memory.
+	redactions chan struct{}
+	tracer     trace.Tracer
+	metrics    *metrics
 }
 
 func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
@@ -79,8 +82,10 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 		maxBody:    finite(cfg.MaxResponseBodySizeMB, config.DefaultBodySizeMB),
 		maxDecoded: finite(cfg.MaxDecodedResponseBodySizeMB, config.DefaultDecodedBodySizeMB),
 		bufferFor:  cfg.RequestTimeout,
-		tracer:     otel.Tracer(InstrumentationName),
-		metrics:    m,
+		redactions: make(chan struct{}, positive(cfg.MaxConcurrentRedactions,
+			config.DefaultMaxConcurrentRedactions)),
+		tracer:  otel.Tracer(InstrumentationName),
+		metrics: m,
 	}, nil
 }
 
@@ -92,6 +97,14 @@ func finite(limitMB, defaultMB int64) int64 {
 		return limitMB * bytesPerMB
 	}
 	return defaultMB * bytesPerMB
+}
+
+// positive is n, or def when n is none (0 or less).
+func positive(n, def int64) int64 {
+	if n > 0 {
+		return n
+	}
+	return def
 }
 
 // trust is the customer's: UPSTREAM_TLS_VERIFY, and UPSTREAM_TLS_CA_BASE64 or
@@ -186,7 +199,7 @@ func (c *Client) Forward(w http.ResponseWriter, r *http.Request, target *url.URL
 	rp.ModifyResponse = func(resp *http.Response) error {
 		c.metrics.requested(ctx, target.Host, connector.StatusSuccess, start)
 		span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
-		return c.respond(ctx, resp, target.Host, host, covered)
+		return c.respond(ctx, resp, start, target.Host, host, covered)
 	}
 	rp.ServeHTTP(w, r)
 }
@@ -208,11 +221,18 @@ var errRefused = errors.New("refused")
 // refuse counts a response dropped because it could not be redacted, and is
 // the error that answers it.
 func (c *Client) refuse(ctx context.Context, target, label string, err error) error {
+	return c.drop(ctx, target, label, rawpipe.RedactionUnsupported, err)
+}
+
+// drop counts a covered response dropped rather than forwarded unredacted,
+// under label, and is the error that answers it with reason.
+func (c *Client) drop(
+	ctx context.Context, target, label string, reason rawpipe.Reason, err error,
+) error {
 	c.metrics.refusals.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(connector.AttrTargetHost, target),
 		attribute.String(attrRefusalReason, label)))
-	slog.WarnContext(ctx, "upstream response dropped: it cannot be redacted",
+	slog.WarnContext(ctx, "upstream response dropped rather than forwarded unredacted",
 		"target_host", target, "reason", label, "error", telemetry.SanitizeError(err))
-	return fmt.Errorf("%w: %w", errRefused,
-		rawpipe.Errorf(rawpipe.RedactionUnsupported, "%s", err.Error()))
+	return fmt.Errorf("%w: %w", errRefused, rawpipe.Errorf(reason, "%s", err.Error()))
 }

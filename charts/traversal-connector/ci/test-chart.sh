@@ -159,6 +159,11 @@ assert_contains "$tmp_dir/local-existingconfigmap.yaml" $'          configMap:\n
 assert_contains "$tmp_dir/local-existingsecret.yaml" $'          secret:\n            secretName: "local-rules"'
 assert_contains "$tmp_dir/local-rulescontent.yaml" $'          configMap:\n            name: "local-rulescontent-traversal-connector-redaction-rules"'
 
+# The connector's redaction concurrency: unset, its default; set, the setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_REDACTION_MAX_CONCURRENT'
+render redaction-concurrency "$fixtures/direct-export-values.yaml" --set redaction.maxConcurrent=3
+assert_contains "$tmp_dir/redaction-concurrency.yaml" $'            - name: TRAVERSAL_REDACTION_MAX_CONCURRENT\n              value: "3"'
+
 render local-legacy "$fixtures/direct-export-values.yaml" \
   --set configUpdates.enabled=false --set-string redactionRules='rules=[]'
 assert_contains "$tmp_dir/local-legacy.yaml" 'REDACTION_RULES_FILE'

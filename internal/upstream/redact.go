@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
 const (
@@ -42,6 +44,9 @@ const (
 	// refusalMalformedJSON is about the document, not its coding: the body
 	// decoded and was not the one JSON document its content type promised.
 	refusalMalformedJSON = "malformed_json"
+	// refusalCapacity is a response that waited its whole request timeout for
+	// a redaction slot, TRAVERSAL_REDACTION_MAX_CONCURRENT being in use.
+	refusalCapacity = "capacity"
 )
 
 // unredactableRequest says why a request to a covered host cannot be
@@ -64,8 +69,11 @@ func unredactableRequest(r *http.Request) string {
 // The caller's Accept-Encoding is forwarded, so Go's transport does not
 // decompress and the body comes in the coding the upstream chose: redacting
 // means decoding it here, as a pattern over a deflate stream matches nothing.
+//
+// start is when the request began: a response waiting for a redaction slot
+// waits only for what is left of its timeout.
 func (c *Client) respond(
-	ctx context.Context, resp *http.Response, target, host string, covered bool,
+	ctx context.Context, resp *http.Response, start time.Time, target, host string, covered bool,
 ) error {
 	// Only the connector may say it redacted a body; Traversal cannot check.
 	resp.Header.Del(headerRedacted)
@@ -89,6 +97,60 @@ func (c *Client) respond(
 		return c.refuse(ctx, target, refusalPartialContent,
 			errors.New("a partial response cannot be redacted"))
 	}
+	release, err := c.acquire(ctx, target, start.Add(c.bufferFor))
+	if err != nil {
+		_ = resp.Body.Close()
+		return err
+	}
+	if err := c.buffer(ctx, resp, target, host, coding); err != nil {
+		release()
+		return err
+	}
+	// The redacted body stays in memory until it is sent.
+	resp.Body = &releasing{ReadCloser: resp.Body, release: sync.OnceFunc(release)}
+	return nil
+}
+
+// acquire takes one of the connector's redaction slots, waiting until
+// deadline for one, and returns what gives it back. A response still waiting
+// then is refused for capacity.
+func (c *Client) acquire(ctx context.Context, target string, deadline time.Time,
+) (func(), error) {
+	release := func() { <-c.redactions }
+	select {
+	case c.redactions <- struct{}{}:
+		return release, nil
+	default:
+	}
+	wait := time.NewTimer(time.Until(deadline))
+	defer wait.Stop()
+	select {
+	case c.redactions <- struct{}{}:
+		return release, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-wait.C:
+		return nil, c.drop(ctx, target, refusalCapacity, rawpipe.Capacity,
+			fmt.Errorf("no redaction slot came free within the %v request timeout", c.bufferFor))
+	}
+}
+
+// releasing gives back a redaction slot when its body is closed.
+type releasing struct {
+	io.ReadCloser
+	release func()
+}
+
+func (r *releasing) Close() error {
+	defer r.release()
+	return r.ReadCloser.Close()
+}
+
+// buffer reads a covered response whole, redacts it, and puts the result in
+// its place, or says why it cannot be sent.
+func (c *Client) buffer(
+	ctx context.Context, resp *http.Response, target, host string, coding contentCoding,
+) error {
 	body, reason, err := c.read(resp.Body)
 	if err != nil {
 		return c.refuse(ctx, target, reason, err)

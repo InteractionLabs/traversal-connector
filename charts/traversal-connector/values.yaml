@@ -203,6 +203,11 @@ configUpdates:
 # See the repository README for the local TOML format.
 redaction:
   enabled: false
+  # How many responses from covered hosts the connector buffers and redacts at
+  # once, each holding up to maxResponseBodySizeMB plus
+  # maxDecodedResponseBodySizeMB in memory. One that waits its whole
+  # requestTimeout for a slot is refused (capacity). Applies to OTA rules too.
+  maxConcurrent: ""  # TRAVERSAL_REDACTION_MAX_CONCURRENT (default 8)
   reloadInterval: "10s"
   # Inline TOML; the chart creates a ConfigMap.
   rulesContent: ""

@@ -27,8 +27,12 @@ const (
 	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
 	// deliberately far above the wire ceiling rather than equal to it.
 	DefaultDecodedBodySizeMB = 256
-	defaultHTTPPort          = "8080"
-	defaultUpstreamTLSVerify = true
+	// DefaultMaxConcurrentRedactions is how many covered responses the
+	// connector holds in memory at once, and what bounds it when configured
+	// as none (0 or less).
+	DefaultMaxConcurrentRedactions = 8
+	defaultHTTPPort                = "8080"
+	defaultUpstreamTLSVerify       = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
@@ -76,6 +80,11 @@ type Config struct {
 	// cannot supply it either: ISIZE sits at the end of the stream, is modulo
 	// 2^32, and is written by the same upstream whose output is in question.
 	MaxDecodedResponseBodySizeMB int64
+	// MaxConcurrentRedactions is how many covered responses the whole
+	// connector buffers and redacts at once: each may hold
+	// MaxResponseBodySizeMB on the wire and MaxDecodedResponseBodySizeMB
+	// decoded. Read from TRAVERSAL_REDACTION_MAX_CONCURRENT.
+	MaxConcurrentRedactions int64
 	// EgressProxyURL is the optional HTTP forward proxy URL used for any
 	// connector-initiated egress to the Traversal SaaS — both the bidi
 	// control-plane tunnel and OTLP telemetry export. Read from
@@ -251,6 +260,10 @@ func Load() (Config, error) {
 		MaxDecodedResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
 			DefaultDecodedBodySizeMB,
+		),
+		MaxConcurrentRedactions: env.GetEnvInt64(
+			"TRAVERSAL_REDACTION_MAX_CONCURRENT",
+			DefaultMaxConcurrentRedactions,
 		),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
