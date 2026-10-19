@@ -134,6 +134,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	defer s.pipes.Done()
 	stream, err := rawpipe.Accept(w, r)
 	if err != nil {
+		s.metrics.acceptFailed()
+		log.Info("pipe", "outcome", "accept_failed", "error", err)
 		return
 	}
 	s.metrics.opened("")

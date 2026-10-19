@@ -85,8 +85,8 @@ func (m *metrics) opened(reason rawpipe.Reason) {
 	m.opens.Add(context.Background(), 1, outcome(o))
 }
 
-// acceptFailed records the open of a pipe admitted and dialed whose stream
-// could not be accepted, so no refusal reason reached the edge controller.
+// acceptFailed records the open of a pipe admitted whose stream could not be
+// accepted, so no refusal reason reached the edge controller.
 func (m *metrics) acceptFailed() {
 	m.opens.Add(context.Background(), 1, outcome("accept_failed"))
 }

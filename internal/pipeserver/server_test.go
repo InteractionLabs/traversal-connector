@@ -1,12 +1,19 @@
 package pipeserver
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // TestPipeRefusals: an open is refused before any TLS or dial for a bad
@@ -50,4 +57,61 @@ func TestTunnelServerLimits(t *testing.T) {
 	if h.MaxReceiveBufferPerStream > 1<<20 {
 		t.Errorf("per-stream window %d: a stalled pipe holds too much", h.MaxReceiveBufferPerStream)
 	}
+}
+
+// captureOpens installs a collectable meter provider for the test; it must
+// run before newMetrics. The returned func is the raw_pipe_open_total count
+// with outcome o.
+func captureOpens(t *testing.T) (opens func(o string) int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(previous) })
+	return func(o string) int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if m.Name != telemetry.MetricRawPipeOpenTotal || !ok {
+					continue
+				}
+				for _, p := range sum.DataPoints {
+					if v, _ := p.Attributes.Value("outcome"); v.AsString() == o {
+						n += p.Value
+					}
+				}
+			}
+		}
+		return n
+	}
+}
+
+// TestAcceptFailedCounted: a pipe admitted but whose stream cannot be
+// accepted (here a ResponseRecorder, which cannot run full duplex) is counted
+// as accept_failed, and frees its slot.
+func TestAcceptFailedCounted(t *testing.T) {
+	opens := captureOpens(t)
+	h := newHarness(t, nil, nil, "127.0.0.1:1")
+	s := &Server{ConnectorID: connector, Verifier: h.tunnels.Server.Verifier, MaxPipes: 1,
+		metrics: testMetrics(t)}
+	req := httptest.NewRequest(http.MethodConnect, "https://db.internal:443", http.NoBody)
+	req.Host = "db.internal:443"
+	req.Header.Set(rawpipe.HeaderCapability, h.token("db.internal", 443))
+	s.serve(httptest.NewRecorder(), req)
+	if got := opens("accept_failed"); got != 1 {
+		t.Errorf("accept_failed opens = %d, want 1", got)
+	}
+	if got := opens("opened"); got != 0 {
+		t.Errorf("opened opens = %d, want 0", got)
+	}
+	if !s.pipes.Add(s.MaxPipes) {
+		t.Error("the failed pipe still holds its slot")
+	}
+	s.pipes.Done()
 }
