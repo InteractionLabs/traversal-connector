@@ -295,6 +295,12 @@ assert_contains "$tmp_dir/direct.yaml" $'      terminationGracePeriodSeconds: 40
 render grace "$fixtures/direct-export-values.yaml" --set terminationGracePeriodSeconds=90
 assert_contains "$tmp_dir/grace.yaml" $'      terminationGracePeriodSeconds: 90\n'
 
+# The connector sets Go's soft memory limit from its container's: the
+# downward API renders limits.memory in bytes, and the connector takes 90%.
+assert_contains "$tmp_dir/direct.yaml" $'            - name: TRAVERSAL_MEMORY_LIMIT_BYTES\n              valueFrom:\n                resourceFieldRef:\n                  containerName: connector\n                  resource: limits.memory\n                  divisor: "1"\n'
+render no-memory-limit "$fixtures/direct-export-values.yaml" --set resources.limits.memory=null
+assert_not_contains "$tmp_dir/no-memory-limit.yaml" 'TRAVERSAL_MEMORY_LIMIT_BYTES'
+
 render security-overrides "$fixtures/direct-export-values.yaml" \
   --set podSecurityContext.runAsGroup=10001 \
   --set securityContext.runAsUser=10001

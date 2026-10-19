@@ -176,6 +176,17 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
+            {{- /* The connector sets Go's soft memory limit (GOMEMLIMIT) to 90% of
+                   this; the downward API cannot scale it. Without a limit it would
+                   render the node's allocatable memory, so it is set only with one. */}}
+            {{- if dig "limits" "memory" "" (.Values.resources | default dict) }}
+            - name: TRAVERSAL_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: connector
+                  resource: limits.memory
+                  divisor: "1"
+            {{- end }}
             {{- with .Values.redaction.maxConcurrent }}
             - name: TRAVERSAL_REDACTION_MAX_CONCURRENT
               value: {{ . | toString | quote }}

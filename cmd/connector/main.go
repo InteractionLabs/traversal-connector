@@ -49,6 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer flush()
+	setMemoryLimit()
 	// Emitted here rather than where the opt-out is read, so the one line saying
 	// this deployment is unobservable lands on the same stream, in the same
 	// format, as everything an operator reads after it.

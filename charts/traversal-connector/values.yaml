@@ -11,6 +11,9 @@ image:
 
 replicaCount: 5
 
+# limits.memory also sets Go's soft memory limit (GOMEMLIMIT) to 90% of it,
+# through TRAVERSAL_MEMORY_LIMIT_BYTES, so the connector collects garbage
+# before the kernel kills it. Without a memory limit Go's default stays.
 resources:
   requests:
     cpu: 500m
