@@ -15,10 +15,15 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const connector = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
@@ -145,7 +150,10 @@ func open(
 
 func read(r io.Reader) string { b, _ := io.ReadAll(r); return string(b) }
 
-func TestPipes(t *testing.T) {
+// testCapability is a verifier trusting kid "k", and token, which signs a
+// capability for this connector to db.internal:5432 with it.
+func testCapability(t *testing.T) (verifier *capability.Verifier, token func() string) {
+	t.Helper()
 	key := capabilitytest.Key("pipeserver")
 	verifier, err := capability.NewVerifier(capability.VerifierConfig{
 		Issuer: "traversal-raw-tunnel/test", Subject: capability.SubjectIntegrationProxy,
@@ -154,6 +162,74 @@ func TestPipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return verifier, func() string {
+		tok, err := capability.Sign(key, "k",
+			capabilitytest.Claims("traversal-raw-tunnel/test", connector, "db.internal", 5432))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+}
+
+// captureMetrics installs a collectable meter provider for the test; it must
+// run before newMetrics. opens returns the raw_pipe_open_total count with
+// outcome o.
+func captureMetrics(t *testing.T) (opens func(o string) int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(previous) })
+	return func(o string) int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if m.Name != telemetry.MetricRawPipeOpenTotal || !ok {
+					continue
+				}
+				for _, p := range sum.DataPoints {
+					if v, _ := p.Attributes.Value("outcome"); v.AsString() == o {
+						n += p.Value
+					}
+				}
+			}
+		}
+		return n
+	}
+}
+
+// TestAcceptFailedCounted: a pipe admitted and dialed but whose stream cannot
+// be accepted (here a ResponseRecorder, which cannot run full duplex) is
+// counted as accept_failed, and frees its slot.
+func TestAcceptFailedCounted(t *testing.T) {
+	opens := captureMetrics(t)
+	verifier, token := testCapability(t)
+	s := &Server{ConnectorID: connector, Verifier: verifier, Policy: loopback(echo(t)),
+		MaxPipes: 1, metrics: testMetrics(t)}
+	req := httptest.NewRequest(http.MethodConnect, "https://db.internal:5432", http.NoBody)
+	req.Host = "db.internal:5432"
+	req.Header.Set(rawpipe.HeaderCapability, token())
+	s.serve(httptest.NewRecorder(), req)
+	if got := opens("accept_failed"); got != 1 {
+		t.Errorf("accept_failed opens = %d, want 1", got)
+	}
+	if got := opens("opened"); got != 0 {
+		t.Errorf("opened opens = %d, want 0", got)
+	}
+	if !s.pipes.Add(s.MaxPipes) {
+		t.Error("the failed pipe still holds its slot")
+	}
+}
+
+func TestPipes(t *testing.T) {
+	verifier, token := testCapability(t)
 	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Kids: []string{"k"}, Server: &Server{
 		ConnectorID: connector, Verifier: verifier, Policy: loopback(echo(t)), MaxPipes: 4,
 		metrics: testMetrics(t),
@@ -163,14 +239,6 @@ func TestPipes(t *testing.T) {
 	done := tunnels.Start(ctx)
 	cc := accept()
 
-	token := func() string {
-		tok, err := capability.Sign(key, "k",
-			capabilitytest.Claims("traversal-raw-tunnel/test", connector, "db.internal", 5432))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return tok
-	}
 	if status, _, body := open(t, cc, token(), "ping", nil); status != 200 || read(body) != "PING" {
 		t.Fatalf("pipe: %d", status)
 	}

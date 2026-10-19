@@ -37,7 +37,8 @@ func newMetrics() (*metrics, error) {
 	m.dials, errs[1] = meter.Int64Counter(telemetry.MetricRawTunnelDialTotal,
 		metric.WithDescription("Raw-pipe tunnel dials, by result"))
 	m.opens, errs[2] = meter.Int64Counter(telemetry.MetricRawPipeOpenTotal,
-		metric.WithDescription("Raw pipe opens, by outcome: opened or the refusal reason"))
+		metric.WithDescription(
+			"Raw pipe opens, by outcome: opened, the refusal reason, or accept_failed"))
 	m.pipes, errs[3] = meter.Int64UpDownCounter(telemetry.MetricRawPipes,
 		metric.WithDescription("Raw pipes open now"))
 	m.ends, errs[4] = meter.Int64Counter(telemetry.MetricRawPipeEndTotal,
@@ -82,6 +83,12 @@ func (m *metrics) opened(reason rawpipe.Reason) {
 		o = string(reason)
 	}
 	m.opens.Add(context.Background(), 1, outcome(o))
+}
+
+// acceptFailed records the open of a pipe admitted and dialed whose stream
+// could not be accepted, so no refusal reason reached the edge controller.
+func (m *metrics) acceptFailed() {
+	m.opens.Add(context.Background(), 1, outcome("accept_failed"))
 }
 
 func (m *metrics) ended(sent, received int64, o halfconn.Outcome) {

@@ -127,6 +127,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	stream, err := rawpipe.Accept(w, r)
 	if err != nil {
 		_ = conn.Close()
+		s.metrics.acceptFailed()
 		return
 	}
 	s.metrics.opened("")
