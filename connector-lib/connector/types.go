@@ -1,7 +1,5 @@
 package connector
 
-import "errors"
-
 // ErrorCode represents a typed error code used on the wire between connector
 // and controller.
 type ErrorCode string
@@ -13,36 +11,6 @@ const (
 	ErrorCodeMissingTargetURL    ErrorCode = "MISSING_TARGET_URL"
 	ErrorCodeUnsupportedEncoding ErrorCode = "UNSUPPORTED_ENCODING"
 )
-
-// CodedError attaches an ErrorCode to an error so the code survives the trip to
-// the controller. Without it every failure arrives as ErrorCodeUpstreamError,
-// which cannot distinguish a deliberate refusal from a timeout or a dropped
-// connection.
-type CodedError struct {
-	Code ErrorCode
-	Err  error
-}
-
-func (e *CodedError) Error() string { return e.Err.Error() }
-
-func (e *CodedError) Unwrap() error { return e.Err }
-
-// NewCodedError wraps err with code.
-func NewCodedError(code ErrorCode, err error) error {
-	return &CodedError{Code: code, Err: err}
-}
-
-// ErrorCodeFor returns the code err carries, falling back to
-// ErrorCodeUpstreamError. Keeping the fallback here means a new code becomes
-// visible on the wire by being wrapped at the point of failure, with no
-// matching change at the transport layer.
-func ErrorCodeFor(err error) ErrorCode {
-	var coded *CodedError
-	if errors.As(err, &coded) {
-		return coded.Code
-	}
-	return ErrorCodeUpstreamError
-}
 
 // HTTP headers that should be filtered (hop-by-hop).
 var HopByHopHeaders = map[string]bool{

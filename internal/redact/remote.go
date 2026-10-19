@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/signedconfig"
+	otlp "github.com/InteractionLabs/traversal-connector/connector-lib/telemetry"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
@@ -58,10 +61,14 @@ func ParseConfig(data []byte) (*RulesFile, error) {
 			return nil, errors.New("field filters require regex-structured-data")
 		}
 	}
-	return &RulesFile{
+	rules := &RulesFile{
 		DefaultReplacement: doc.Redaction.DefaultReplacement,
 		Rules:              *doc.Redaction.Rules,
-	}, nil
+	}
+	if err := rules.CheckHosts(); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }
 
 // ValidateConfig uses the same parser and compiler as RemoteLoader/Update,
@@ -97,6 +104,26 @@ type RemoteLoader struct {
 	loaded   bool
 	status   atomic.Pointer[remoteStatus]
 	outcomes metric.Int64Counter
+	// verify, if set (RequireSignature), checks each fetched object's
+	// signature for this connector and returns its document and claims.
+	verify func([]byte) ([]byte, *signedconfig.Claims, error)
+	// version, issued and document are the signed config applied: its
+	// version, its iat, and the SHA-256 of its document. They are in memory
+	// only; after a restart a config's exp is what bounds a replay.
+	version  uint64
+	issued   int64
+	document [sha256.Size]byte
+}
+
+// RequireSignature makes the loader accept only configs signed for
+// connector by one of keys (signedconfig), unexpired, at a version above the
+// one it holds and issued no earlier; the applied document again at its own
+// version, re-signed, changes nothing. A config that fails counts as a failed
+// fetch: the last-known-good rules stay.
+func (l *RemoteLoader) RequireSignature(connector string, keys map[string]*ecdsa.PublicKey) {
+	l.verify = func(object []byte) ([]byte, *signedconfig.Claims, error) {
+		return signedconfig.Verify(object, connector, keys, time.Now())
+	}
 }
 
 func NewRemoteLoader(
@@ -123,11 +150,8 @@ func NewRemoteLoader(
 	if err != nil {
 		return nil, fmt.Errorf("config refresh metric: %w", err)
 	}
-	_, err = meter.Int64ObservableGauge(telemetry.MetricConfigRuleCount,
-		metric.WithInt64Callback(func(_ context.Context, observer metric.Int64Observer) error {
-			observer.Observe(l.status.Load().rules)
-			return nil
-		}))
+	err = otlp.NewObservableGauge(meter, telemetry.MetricConfigRuleCount,
+		func() int64 { return l.status.Load().rules })
 	if err != nil {
 		return nil, fmt.Errorf("config rule count metric: %w", err)
 	}
@@ -191,7 +215,34 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 			return errors.New("could not read config response")
 		}
 		hash := sha256.Sum256(data)
-		if !l.loaded || hash != l.hash {
+		version, issued, document := l.version, l.issued, l.document
+		changed := !l.loaded || hash != l.hash
+		if changed && l.verify != nil {
+			var claims *signedconfig.Claims
+			var verifyErr error
+			if data, claims, verifyErr = l.verify(data); verifyErr != nil {
+				outcome = "unsigned"
+				return verifyErr
+			}
+			version, issued, document = claims.Version, claims.IssuedAt, sha256.Sum256(data)
+			// One version is one document: another at the applied version
+			// would replace it with no version to tell them apart. A config
+			// issued before the applied one is older whatever its version.
+			switch {
+			case l.loaded && issued < l.issued:
+				outcome = "rolled_back"
+				return errors.New(
+					"config was issued before the applied one; retaining the applied one")
+			case l.loaded && version == l.version && document == l.document:
+				changed = false
+			case l.loaded && version <= l.version:
+				outcome = "rolled_back"
+				return fmt.Errorf(
+					"config version %d is not newer than the applied %d; retaining it",
+					version, l.version)
+			}
+		}
+		if changed {
 			rules, parseErr := ParseConfig(data)
 			if parseErr != nil {
 				return parseErr
@@ -216,6 +267,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 		}
 		// Only cache a version AFTER its rules were successfully compiled/applied.
 		l.hash, l.etag, l.loaded = hash, resp.Header.Get("ETag"), true
+		l.version, l.issued, l.document = version, issued, document
 	default:
 		return fmt.Errorf("config endpoint returned HTTP %d", resp.StatusCode)
 	}

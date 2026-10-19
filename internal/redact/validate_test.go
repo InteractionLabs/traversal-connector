@@ -34,9 +34,9 @@ func TestOfflineValidatorAgreesWithRuntime(t *testing.T) {
 		pattern, hosts string
 		valid          bool
 	}{
-		{"x", "[]", true},
-		{"[", "[]", false},
-		{"(?<=a)b", "[]", false},
+		{"x", "['.*']", true},
+		{"[", "['.*']", false},
+		{"(?<=a)b", "['.*']", false},
 		{`\p{Greek}+`, `['api\.example\.com']`, true},
 		{"x", "['[']", false},
 		{"x", "['(?<=a)b']", false},

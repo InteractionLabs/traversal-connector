@@ -98,16 +98,17 @@ assert_contains "$tmp_dir/disabled.yaml" 'value: "true"'
 assert_not_contains "$tmp_dir/disabled.yaml" 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT'
 assert_not_contains "$tmp_dir/disabled.yaml" 'name: telemetry-sidecar'
 render disabled-ignored-connect-to "$fixtures/telemetry-disabled-values.yaml" \
-  --set-string proxyURL=http://proxy.internal:3128 \
   --set-string otel.connectTo=not-an-address
 assert_not_contains "$tmp_dir/disabled-ignored-connect-to.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
 
-common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=ci --set otel.sidecar.enabled=false)
-render tls-one "$fixtures/direct-export-values.yaml" \
+# The fixtures' synthetic capability trust, for scenarios built without them.
+trust=(--set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci --set-string "pipes.capabilityKeys=$(awk '$1 == "capabilityKeys:" { print $2 }' "$fixtures/direct-export-values.yaml")")
+common=(--set envName=ci --set controllerURL=https://controller.example.invalid --set connectorID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee --set-string controllerTLS.existingSecret=ci-controller-tls --set otel.sidecar.enabled=false "${trust[@]}")
+render tls-one "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string controllerTLS.certPEM=certificate-one \
   --set-string controllerTLS.keyPEM=private-key \
   --set-string podAnnotations.example\\.com/owner=ci
-render tls-two "$fixtures/direct-export-values.yaml" \
+render tls-two "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string controllerTLS.certPEM=certificate-two \
   --set-string controllerTLS.keyPEM=private-key
 checksum_one=$(grep 'checksum/controller-tls:' "$tmp_dir/tls-one.yaml")
@@ -119,6 +120,23 @@ assert_not_contains "$tmp_dir/direct.yaml" 'checksum/controller-tls:'
 assert_render_fails missing-env 'envName is required' "${common[@]}" --set envName=
 assert_render_fails missing-controller 'controllerURL is required' "${common[@]}" --set controllerURL=
 assert_render_fails missing-id 'connectorID is required' "${common[@]}" --set connectorID=
+# A 0.9.x values file upgraded to 0.10.x fails at render, not as a crash-looping
+# rollout: 0.10.x needs a lower-case UUID connectorID and controllerTLS.
+for id in ci AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE aaaaaaaabbbbccccddddeeeeeeeeeeee \
+  ' aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}'; do
+  assert_render_fails non-uuid-id 'connectorID must be the lower-case UUID' "${common[@]}" --set-string "connectorID=$id"
+done
+assert_render_fails no-controller-tls 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret=
+assert_render_fails empty-controller-tls 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM= --set-string controllerTLS.keyPEM= --set-string controllerTLS.caPEM=
+assert_render_fails controller-ca-only 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.caPEM=ca
+assert_render_fails controller-cert-only 'controllerTLS is required' "${common[@]}" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM=certificate
+render controller-tls-inline "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
+  --set-string controllerTLS.certPEM=certificate --set-string controllerTLS.keyPEM=private-key
+assert_contains "$tmp_dir/controller-tls-inline.yaml" 'name: controller-tls-inline-traversal-connector-controller-tls'
+assert_contains "$tmp_dir/direct.yaml" $'            - name: TLS_CERT_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: ci-controller-tls'
 assert_render_fails non-boolean 'disableTelemetry must be a boolean' "${common[@]}" --set-string disableTelemetry=false
 assert_render_fails sidecar-no-tls 'otel.sidecar.enabled requires controllerTLS' -f "$fixtures/sidecar-values.yaml" --set controllerTLS.existingSecret=
 assert_render_fails divergent-sidecar 'requires a single OTLP egress endpoint' -f "$fixtures/sidecar-values.yaml" --set otel.logsEndpoint=https://logs.example.invalid:4317
@@ -130,8 +148,9 @@ assert_render_fails zero-endpoint-port 'port must be from 1 to 65535' "${common[
 assert_render_fails oversized-endpoint-port 'port must be from 1 to 65535' "${common[@]}" --set-string otel.logsEndpoint=https://telemetry.example.invalid:65536
 assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a host:port' "${common[@]}" --set-string controllerConnectTo=https://route.internal:443
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
-assert_render_fails proxy-controller-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string controllerConnectTo=route.internal:443
-assert_render_fails proxy-otel-connect-to 'proxyURL cannot be combined' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string otel.connectTo=route.internal:4317
+# 0.10.x cannot run tunnels through a forward proxy: refused at render, not
+# at startup mid-rollout.
+assert_render_fails proxy-unsupported 'proxyURL is not supported by connector 0.10.x yet; stay on 0.9.x' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca
@@ -159,6 +178,16 @@ assert_contains "$tmp_dir/local-existingconfigmap.yaml" $'          configMap:\n
 assert_contains "$tmp_dir/local-existingsecret.yaml" $'          secret:\n            secretName: "local-rules"'
 assert_contains "$tmp_dir/local-rulescontent.yaml" $'          configMap:\n            name: "local-rulescontent-traversal-connector-redaction-rules"'
 
+# The connector's redaction concurrency: unset, its default; set, the setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_REDACTION_MAX_CONCURRENT'
+render redaction-concurrency "$fixtures/direct-export-values.yaml" --set redaction.maxConcurrent=3
+assert_contains "$tmp_dir/redaction-concurrency.yaml" $'            - name: TRAVERSAL_REDACTION_MAX_CONCURRENT\n              value: "3"'
+
+# The uncovered-stream cap: unset, the connector's 15 minutes; set, the setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME'
+render stream-cap "$fixtures/direct-export-values.yaml" --set-string redaction.uncoveredStreamMaxLifetime=5m
+assert_contains "$tmp_dir/stream-cap.yaml" $'            - name: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME\n              value: "5m"'
+
 render local-legacy "$fixtures/direct-export-values.yaml" \
   --set configUpdates.enabled=false --set-string redactionRules='rules=[]'
 assert_contains "$tmp_dir/local-legacy.yaml" 'REDACTION_RULES_FILE'
@@ -174,25 +203,36 @@ assert_render_fails both-sources 'mutually exclusive' \
   "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
-# Raw pipes: off by default; on, each set value becomes its setting.
+# Tunnels: each set pipes value becomes its setting; unset, none renders.
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_PIPES'
-render raw "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+assert_not_contains "$tmp_dir/direct.yaml" 'MAX_TUNNELS_ALLOWED'
+render raw "$fixtures/direct-export-values.yaml" \
   --set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci \
   --set-string pipes.capabilityKeys=a2V5cw== \
   --set pipes.tunnelCount=4 --set pipes.egressProxyResolves=true \
-  --set pipes.refuseTCP=true \
+  --set pipes.pipeMaxStreams=50 \
   --set-string 'pipes.forbiddenCIDRs=10.9.0.0/16\,fd00:1::/32'
-for want in 'TRAVERSAL_PIPES\n              value: "enabled"' \
-  'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
+for want in 'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
   'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
   'TRAVERSAL_TUNNELS_COUNT\n              value: "4"' \
+  'TRAVERSAL_PIPES_MAX_STREAMS\n              value: "50"' \
   'TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"' \
-  'TRAVERSAL_PIPES_REFUSE_TCP\n              value: "true"' \
   'TRAVERSAL_PIPES_FORBIDDEN_CIDRS\n              value: "10.9.0.0/16,fd00:1::/32"'; do
   assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
 done
-assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_PIPES_MAX'
-assert_render_fails raw-boolean 'pipes.enabled must be a boolean' "${common[@]}" --set-string pipes.enabled=false
+# maxPipes unset renders no TRAVERSAL_PIPES_MAX (TRAVERSAL_PIPES_MAX_STREAMS is set).
+if grep -qx -- '            - name: TRAVERSAL_PIPES_MAX' "$tmp_dir/raw.yaml"; then
+  fail "did not expect TRAVERSAL_PIPES_MAX in $tmp_dir/raw.yaml"
+fi
+# Values from before the raw tunnel was the only one still upgrade: they are
+# ignored, not refused.
+render legacy-values "$fixtures/direct-export-values.yaml" --set pipes.enabled=false \
+  --set-string maxTunnelsAllowed=4 \
+  --set-string maxConcurrentRequests=4 --set-string reconnectInterval=1s --set-string maxBackoffDelay=1s
+for legacy in TRAVERSAL_PIPES MAX_TUNNELS_ALLOWED MAX_CONCURRENT_REQUESTS RECONNECT_INTERVAL \
+  MAX_BACKOFF_DELAY; do
+  assert_not_contains "$tmp_dir/legacy-values.yaml" "$legacy"
+done
 
 # Capability roots: current, then next, as one PEM bundle; none, no setting.
 assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
@@ -201,16 +241,35 @@ next_root=$'-----BEGIN CERTIFICATE-----\nbmV4dA==\n-----END CERTIFICATE-----\n'
 capability_roots() {
   awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
 }
-render raw-roots "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+no_keys=(--set-string pipes.capabilityKeys= --set-string pipes.capabilityIssuer=)
+render raw-roots "$fixtures/direct-export-values.yaml" "${no_keys[@]}" \
   --set-string pipes.trustedRoots.current="$current_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots.yaml")" == "${current_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root"
 assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
-render raw-roots-rotation "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+render raw-roots-rotation "$fixtures/direct-export-values.yaml" \
   --set-string pipes.trustedRoots.current="$current_root" \
   --set-string pipes.trustedRoots.next="$next_root"
 [[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
+
+# Capability trust is refused at render when the connector would refuse it.
+assert_render_fails no-capability-trust 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+  -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}"
+assert_render_fails next-root-only 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+  -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}" --set-string pipes.trustedRoots.next="$next_root"
+assert_render_fails keys-without-issuer 'pipes.capabilityIssuer is required with pipes.capabilityKeys' \
+  -f "$fixtures/direct-export-values.yaml" --set-string pipes.capabilityIssuer=
+
+# Config signing keys reach the connector only with OTA on.
+render config-signed "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true \
+  --set-string configUpdates.signingKeys=a2V5cw==
+assert_contains "$tmp_dir/config-signed.yaml" "$(printf '            - name: TRAVERSAL_CONFIG_KEYS\n              value: "a2V5cw=="')"
+render config-unsigned "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=true
+assert_not_contains "$tmp_dir/config-unsigned.yaml" 'TRAVERSAL_CONFIG_KEYS'
+render config-keys-off "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false \
+  --set-string configUpdates.signingKeys=a2V5cw==
+assert_not_contains "$tmp_dir/config-keys-off.yaml" 'TRAVERSAL_CONFIG'
 
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
@@ -240,6 +299,12 @@ assert_contains "$tmp_dir/sidecar.yaml" 'mountPath: /var/lib/telemetry-sidecar'
 assert_contains "$tmp_dir/direct.yaml" $'      terminationGracePeriodSeconds: 40\n'
 render grace "$fixtures/direct-export-values.yaml" --set terminationGracePeriodSeconds=90
 assert_contains "$tmp_dir/grace.yaml" $'      terminationGracePeriodSeconds: 90\n'
+
+# The connector sets Go's soft memory limit from its container's: the
+# downward API renders limits.memory in bytes, and the connector takes 90%.
+assert_contains "$tmp_dir/direct.yaml" $'            - name: TRAVERSAL_MEMORY_LIMIT_BYTES\n              valueFrom:\n                resourceFieldRef:\n                  containerName: connector\n                  resource: limits.memory\n                  divisor: "1"\n'
+render no-memory-limit "$fixtures/direct-export-values.yaml" --set resources.limits.memory=null
+assert_not_contains "$tmp_dir/no-memory-limit.yaml" 'TRAVERSAL_MEMORY_LIMIT_BYTES'
 
 render security-overrides "$fixtures/direct-export-values.yaml" \
   --set podSecurityContext.runAsGroup=10001 \

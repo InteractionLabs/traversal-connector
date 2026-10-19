@@ -1,6 +1,7 @@
 package pipeserver
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,22 +10,27 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"io"
+	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/capability/capabilitytest"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
+	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
-
-const org = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d"
 
 // connectorConfig is a connector config whose client certificate names
 // spiffeID.
@@ -61,8 +67,17 @@ func TestNew(t *testing.T) {
 		env            map[string]string
 		mutate         func(*config.Config)
 		wantErr        string // empty: valid
+		// check, if set, says what is wrong with a valid result, or "".
+		check func(*Tunnels) string
 	}{
-		{name: "defaults", spiffeID: orgScoped},
+		{name: "defaults", spiffeID: orgScoped, check: func(tunnels *Tunnels) string {
+			if tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" ||
+				tunnels.Server.MaxPipes != 200 || !slices.Equal(tunnels.Kids, []string{"k1"}) ||
+				len(tunnels.Roots) != 0 {
+				return "defaults not applied"
+			}
+			return ""
+		}},
 		{name: "connector-scoped certificate", spiffeID: orgScoped + "/connector/" + connector},
 		{name: "every setting", spiffeID: orgScoped, env: map[string]string{
 			"TRAVERSAL_PIPES_MAX": "10", "TRAVERSAL_TUNNELS_COUNT": "4",
@@ -70,12 +85,41 @@ func TestNew(t *testing.T) {
 			"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443",
 			"TRAVERSAL_PIPES_EGRESS_PROXY": "http://proxy:3128", "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true",
 			"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16, fd00:1::/32",
+			"TRAVERSAL_PIPES_MAX_STREAMS":     "50", "TRAVERSAL_PIPES_STREAM_WINDOW_KB": "64",
+		}, check: func(tunnels *Tunnels) string {
+			s := tunnels.Server
+			switch {
+			case tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || s.MaxPipes != 10 ||
+				s.PipeLimits.IdleTimeout != 0 || s.MaxLifetime != time.Hour ||
+				s.PipeLimits.MaxStreams != 50 || s.PipeLimits.StreamWindow != 64<<10:
+				return "settings not applied"
+			case forbidden(t, "10.9.1.1") != rawpipe.ForbiddenAddress:
+				return "TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied"
+			}
+			return ""
 		}},
+		{name: "controller connect-to routes tunnels", spiffeID: orgScoped,
+			mutate: func(c *config.Config) { c.TraversalControllerConnectTo = "10.0.0.2:443" },
+			check: func(tunnels *Tunnels) string {
+				if tunnels.Addr != "10.0.0.2:443" || tunnels.TLS.ServerName != "edge.example.com" {
+					return "TRAVERSAL_CONTROLLER_CONNECT_TO did not route tunnels"
+				}
+				return ""
+			}},
+		{name: "tunnel connect-to over the controller's", spiffeID: orgScoped,
+			env:    map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443"},
+			mutate: func(c *config.Config) { c.TraversalControllerConnectTo = "10.0.0.2:443" },
+			check: func(tunnels *Tunnels) string {
+				if tunnels.Addr != "10.0.0.1:443" {
+					return "TRAVERSAL_TUNNELS_CONNECT_TO did not win"
+				}
+				return ""
+			}},
 		{name: "base64 keys", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "b64"}},
 		{name: "no keys or roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": ""},
-			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS is required"},
+			wantErr: "TRAVERSAL_CAPABILITY_KEYS or TRAVERSAL_CAPABILITY_ROOTS: one is required"},
 		{name: "keys without issuer", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_ISSUER": ""},
-			wantErr: "TRAVERSAL_CAPABILITY_ISSUER is required"},
+			wantErr: "TRAVERSAL_CAPABILITY_ISSUER: required"},
 		{name: "roots alone", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
 			"TRAVERSAL_CAPABILITY_ISSUER": "", "TRAVERSAL_CAPABILITY_ROOTS": "roots"}},
 		{name: "base64 roots", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_CAPABILITY_KEYS": "",
@@ -87,20 +131,11 @@ func TestNew(t *testing.T) {
 			env:     map[string]string{"TRAVERSAL_CAPABILITY_ROOTS": "roots"},
 			mutate:  func(c *config.Config) { c.TraversalControllerURL = "https://10.0.0.1" },
 			wantErr: "canonical controller host name"},
-		{name: "bad count", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_COUNT": "9"},
-			wantErr: "TRAVERSAL_TUNNELS_COUNT must be 1 to 8"},
-		{name: "bad duration", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_IDLE_TIMEOUT": "soon"},
-			wantErr: "TRAVERSAL_PIPES_IDLE_TIMEOUT"},
-		{name: "bad bool", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "yes"},
-			wantErr: "must be true or false"},
 		{name: "bad forbidden CIDR", spiffeID: orgScoped,
 			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,10.9.0.1"},
 			wantErr: `TRAVERSAL_PIPES_FORBIDDEN_CIDRS: "10.9.0.1" is not a CIDR`},
-		{name: "empty forbidden CIDR", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_PIPES_FORBIDDEN_CIDRS": "10.9.0.0/16,"},
-			wantErr: "TRAVERSAL_PIPES_FORBIDDEN_CIDRS"},
 		{name: "https egress proxy", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "https://p:3128"},
-			wantErr: "must be an http:// URL"},
+			wantErr: "TRAVERSAL_PIPES_EGRESS_PROXY: must be an http:// URL"},
 		{name: "another connector's certificate", spiffeID: orgScoped + "/connector/" + strings.Replace(connector, "6", "7", 1),
 			wantErr: "is for connector"},
 		{name: "not a tenant certificate", spiffeID: "spiffe://traversal.com/processor/x",
@@ -109,14 +144,10 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.ConnectorID = strings.ToUpper(c.ConnectorID) }, wantErr: "lower-case UUID"},
 		{name: "http controller", spiffeID: orgScoped,
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
-		{name: "refuse TCP", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_PIPES_REFUSE_TCP": "true"}},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
-		{name: "connect-to port not a number", spiffeID: orgScoped,
-			env:     map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:https"},
-			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: port must be a number"},
 		{name: "legacy egress proxy", spiffeID: orgScoped,
-			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL"},
+			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL: "},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
@@ -136,24 +167,16 @@ func TestNew(t *testing.T) {
 			if c.mutate != nil {
 				c.mutate(cfg)
 			}
-			tunnels, err := New(cfg, nil)
+			tunnels, err := New(cfg, redact.NewRedactor(), http.NotFoundHandler())
 			switch {
 			case c.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
 			case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
 				t.Fatalf("error %v, want one containing %q", err, c.wantErr)
-			case c.wantErr == "" && c.name == "every setting" &&
-				(tunnels.Count != 4 || tunnels.Addr != "10.0.0.1:443" || tunnels.Server.MaxPipes != 10 ||
-					tunnels.Server.IdleTimeout != 0 || tunnels.Server.MaxLifetime != time.Hour):
-				t.Fatalf("settings not applied: %+v %+v", tunnels, tunnels.Server)
-			case c.name == "every setting" && forbidden(tunnels, "10.9.1.1") != rawpipe.ForbiddenAddress:
-				t.Fatal("TRAVERSAL_PIPES_FORBIDDEN_CIDRS not applied")
-			case c.name == "refuse TCP" && !tunnels.Server.RefuseTCP:
-				t.Fatal("RefuseTCP not applied")
-			case c.wantErr == "" && c.name == "defaults" &&
-				(tunnels.Count != 2 || tunnels.Addr != "edge.example.com:443" || tunnels.Server.MaxPipes != 200 ||
-					!slices.Equal(tunnels.Kids, []string{"k1"}) || len(tunnels.Roots) != 0):
-				t.Fatalf("defaults: %+v", tunnels)
+			case c.check != nil:
+				if why := c.check(tunnels); why != "" {
+					t.Fatal(why)
+				}
 			}
 		})
 	}
@@ -170,7 +193,7 @@ func TestTunnelTLS(t *testing.T) {
 	cfg.TLSCA = &ca
 	t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
 	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
-	tunnels, err := New(cfg, nil)
+	tunnels, err := New(cfg, redact.NewRedactor(), http.NotFoundHandler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +209,16 @@ func TestTunnelTLS(t *testing.T) {
 
 // forbidden is the reason tunnels' dial policy refuses host, or "" if it
 // allows it. Policies refuse before dialing, so nothing is dialed.
-func forbidden(tunnels *Tunnels, host string) rawpipe.Reason {
+// forbidden is whether the dial policy built from the environment refuses
+// host.
+func forbidden(t *testing.T, host string) rawpipe.Reason {
+	dial, err := newPolicy(&env.Reader{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // an allowed host fails to dial at once
-	conn, _, err := tunnels.Server.Policy.Dial(ctx, host, 443)
+	conn, _, err := dial(ctx, host, 443)
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -216,7 +245,8 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 	t.Setenv("TRAVERSAL_CAPABILITY_KEYS", "")
 	root := testRoot(t)
 	t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(root))
-	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"), nil)
+	tunnels, err := New(connectorConfig(t, "spiffe://traversal.com/tenant/"+org+"/acme"),
+		redact.NewRedactor(), http.NotFoundHandler())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,21 +267,170 @@ func TestRootsVerifyForTheControllerHost(t *testing.T) {
 
 func base64Of(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-// TestNewVerifierBundleErrors: a bad bundle's error starts with the setting
-// it came from, so an operator knows which to fix.
-func TestNewVerifierBundleErrors(t *testing.T) {
-	for setting, want := range map[string]string{
-		"TRAVERSAL_CAPABILITY_KEYS":  "TRAVERSAL_CAPABILITY_KEYS: capability: no keys",
-		"TRAVERSAL_CAPABILITY_ROOTS": "TRAVERSAL_CAPABILITY_ROOTS: capability: roots: ",
+// TestEgressProxyFromEnvironment: with TRAVERSAL_PIPES_EGRESS_PROXY unset,
+// HTTPS_PROXY is the egress proxy, resolving hostnames as in #67, and NO_PROXY
+// hosts are dialed direct, both through the dial policy; the setting, when set,
+// wins.
+func TestEgressProxyFromEnvironment(t *testing.T) {
+	const dest = "192.0.2.10" // TEST-NET-1: allowed, and never answers
+	for _, c := range []struct {
+		name string
+		env  map[string]string // "{proxy}" is the recording proxy's URL
+		host string
+		via  string // "proxy", "direct" or "forbidden"
+	}{
+		{name: "HTTPS_PROXY when the setting is unset", host: dest, via: "proxy",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
+		{name: "HTTP_PROXY without HTTPS_PROXY", host: dest, via: "proxy",
+			env: map[string]string{"HTTP_PROXY": "{proxy}"}},
+		{name: "hostname through HTTPS_PROXY goes unresolved", host: "db.internal", via: "proxy",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
+		{name: "NO_PROXY host dialed direct", host: dest, via: "direct",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}", "NO_PROXY": "192.0.2.0/24"}},
+		{name: "setting wins over HTTPS_PROXY and NO_PROXY", host: dest, via: "proxy",
+			env: map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": "{proxy}",
+				"HTTPS_PROXY": "http://unused.invalid:3128", "NO_PROXY": dest}},
+		{name: "forbidden address through HTTPS_PROXY", host: "169.254.169.254", via: "forbidden",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}"}},
+		{name: "forbidden address in NO_PROXY", host: "169.254.169.254", via: "forbidden",
+			env: map[string]string{"HTTPS_PROXY": "{proxy}", "NO_PROXY": "169.254.0.0/16"}},
 	} {
-		t.Run(setting, func(t *testing.T) {
-			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
-			t.Setenv("TRAVERSAL_CAPABILITY_KEYS", keysPEM)
-			t.Setenv("TRAVERSAL_CAPABILITY_ROOTS", rootPEM(testRoot(t)))
-			t.Setenv(setting, base64Of("junk"))
-			_, _, err := newVerifier("https://edge.example.com")
-			if err == nil || !strings.HasPrefix(err.Error(), want) {
-				t.Fatalf("error %v, want one starting %q", err, want)
+		t.Run(c.name, func(t *testing.T) {
+			proxyURL, connects := recordingProxy(t)
+			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+				"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY",
+				"https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+				t.Setenv(k, strings.ReplaceAll(c.env[k], "{proxy}", proxyURL))
+			}
+			dial, err := newPolicy(&env.Reader{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			conn, _, err := dial(ctx, c.host, 443)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			var got string
+			switch reason := rawpipe.ReasonOf(err, ""); {
+			case reason == rawpipe.ForbiddenAddress:
+				got = "forbidden"
+			case err == nil && slices.Equal(connects(), []string{c.host + ":443"}):
+				got = "proxy"
+			case reason == rawpipe.DialFailed && len(connects()) == 0:
+				got = "direct"
+			default:
+				t.Fatalf("dial: %v, proxy saw %v", err, connects())
+			}
+			if got != c.via || c.via == "forbidden" && len(connects()) != 0 {
+				t.Fatalf("went %s, want %s (proxy saw %v)", got, c.via, connects())
+			}
+		})
+	}
+}
+
+// TestUnresolvedProxyDials: every dial handed to the egress proxy is counted
+// by whether it names a hostname, which the proxy resolves, or an IP; a
+// refused or direct dial is not.
+func TestUnresolvedProxyDials(t *testing.T) {
+	dials := captureCounter(t, telemetry.MetricEgressProxyUnresolvedDialTotal, "target_kind")
+	proxyURL, _ := recordingProxy(t)
+	for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+		"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
+		"http_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("HTTPS_PROXY", proxyURL)
+	t.Setenv("NO_PROXY", "direct.internal")
+	dial, err := newPolicy(&env.Reader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"db.internal", "api.internal", "192.0.2.10", "169.254.169.254",
+		"direct.internal"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		if conn, _, err := dial(ctx, host, 443); err == nil {
+			_ = conn.Close()
+		}
+		cancel()
+	}
+	if got := dials("hostname"); got != 2 {
+		t.Errorf("hostname dials = %d, want 2", got)
+	}
+	if got := dials("ip"); got != 1 {
+		t.Errorf("ip dials = %d, want 1 (the forbidden one is refused before the proxy)", got)
+	}
+}
+
+// recordingProxy is an http:// proxy URL that accepts every CONNECT, and the
+// authorities it has been asked for.
+func recordingProxy(t *testing.T) (string, func() []string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var mu sync.Mutex
+	var seen []string
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			if req, err := http.ReadRequest(bufio.NewReader(c)); err == nil &&
+				req.Method == http.MethodConnect {
+				mu.Lock()
+				seen = append(seen, req.Host)
+				mu.Unlock()
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
+			}
+			_ = c.Close()
+		}
+	}()
+	return "http://" + ln.Addr().String(), func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+// TestWarnsWhenProxyResolves: the connector warns at start exactly when an
+// egress proxy resolves hostnames, as its address floor then covers only IP
+// literals.
+func TestWarnsWhenProxyResolves(t *testing.T) {
+	const proxy = "http://proxy.internal:3128"
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		warn bool
+	}{
+		{"HTTPS_PROXY, resolving by default", map[string]string{"HTTPS_PROXY": proxy}, true},
+		{"HTTPS_PROXY, resolving off", map[string]string{"HTTPS_PROXY": proxy,
+			"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "false"}, false},
+		{"the setting, resolving on", map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": proxy,
+			"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES": "true"}, true},
+		{"the setting, resolving off by default",
+			map[string]string{"TRAVERSAL_PIPES_EGRESS_PROXY": proxy}, false},
+		{"no proxy", nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+				"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY", "https_proxy",
+				"HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+				t.Setenv(k, c.env[k])
+			}
+			var logs strings.Builder
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			if _, err := newPolicy(&env.Reader{}); err != nil {
+				t.Fatal(err)
+			}
+			if warned := strings.Contains(logs.String(), "level=WARN"); warned != c.warn {
+				t.Fatalf("warned %v, want %v: %s", warned, c.warn, logs.String())
 			}
 		})
 	}

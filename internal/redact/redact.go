@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/netip"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -56,10 +55,10 @@ type Rule struct {
 	// SkipFields is an optional blocklist of pipe-delimited field names.
 	// When set, the rule never runs against those fields on the per-field path.
 	SkipFields []string `toml:"skip_fields"`
-	// Hosts is an optional allowlist of RE2 patterns matched against the request
+	// Hosts is the allowlist of RE2 patterns matched against the request
 	// hostname (port stripped). The rule only fires when the hostname fully
-	// matches at least one pattern. When empty, it defaults to [".*"], which
-	// matches every host. Each pattern is anchored to the whole hostname, so
+	// matches at least one pattern. A loaded rule must have one (CheckHosts):
+	// [".*"] matches every host. Each pattern is anchored to the whole hostname, so
 	// ".*github.com" matches "api.github.com" and "github.com" but not
 	// "github.com.evil.com". Matching follows DNS rather than byte equality:
 	// patterns are case-insensitive and the hostname is compared without a
@@ -80,6 +79,24 @@ type RulesFile struct {
 	// omit replacement. When empty, "[REDACTED]" is used.
 	DefaultReplacement string `toml:"default_replacement"`
 	Rules              []Rule `toml:"rules"`
+}
+
+// ErrNoHosts is a loaded rule with no hosts. Such a rule covered every
+// host, so one meant for a single destination, its hosts forgotten, made the
+// connector buffer and redact every response it carried; a rule for every
+// host now says so with hosts = [".*"]. It names no rule content.
+var ErrNoHosts = errors.New(`a redaction rule has no hosts: list the hosts it covers, ` +
+	`or hosts = [".*"] for every host`)
+
+// CheckHosts refuses a rules file with a rule that has no hosts
+// (ErrNoHosts), naming the rule by its place only.
+func (f *RulesFile) CheckHosts() error {
+	for i := range f.Rules {
+		if len(f.Rules[i].Hosts) == 0 {
+			return fmt.Errorf("rule %d of %d: %w", i+1, len(f.Rules), ErrNoHosts)
+		}
+	}
+	return nil
 }
 
 // compiledRule is a Rule with its regex pre-compiled and replacement as bytes.
@@ -187,22 +204,8 @@ func (r *Redactor) HasRulesForHost(host string) bool {
 	return false
 }
 
-// RequiresInspection reports whether a raw pipe to host must be refused
-// because redaction rules could apply to its traffic, which a raw pipe never
-// shows the connector. Rules match hostnames, so while any rule is loaded an
-// IP literal is refused too: the connector cannot tell which name it serves.
-// A rule with no hosts filter matches every host and so refuses every raw
-// pipe. A CNAME for a matched server still bypasses a host-scoped rule, as it
-// does for the executor.
-func (r *Redactor) RequiresInspection(host string) bool {
-	if len(*r.rules.Load()) == 0 {
-		return false
-	}
-	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
-		return true
-	}
-	return r.HasRulesForHost(host)
-}
+// HasRules reports whether any rule is loaded, for any host.
+func (r *Redactor) HasRules() bool { return len(*r.rules.Load()) > 0 }
 
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
 // ancestor paths, appears in set. "" never matches unless "" is in set.

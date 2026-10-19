@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -10,20 +11,20 @@ import (
 	sloggin "github.com/samber/slog-gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
-	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 )
 
-// RawTunnels is the raw pipe side as readiness sees it.
-type RawTunnels interface {
-	// Ready reports whether raw pipes can take traffic, and if not, why.
-	Ready(ctx context.Context) (ready bool, reason string)
+// Tunnels is the connector's tunnels as readiness sees them.
+type Tunnels interface {
+	// Up is how many tunnels are up.
+	Up() int
+	// Ready is nil if the connector can take pipes, and otherwise why not.
+	Ready(ctx context.Context) error
 }
 
 // NewRouter creates a gin HTTP engine for the traversal connector with health and
-// readiness endpoints. The connector is ready when it holds a legacy tunnel and,
-// if raw is set, raw pipes are ready.
-func NewRouter(cfg config.Config, cm *client.ConnectionManager, raw RawTunnels) *gin.Engine {
+// readiness endpoints. Readiness is the tunnels'.
+func NewRouter(cfg config.Config, tunnels Tunnels) *gin.Engine {
 	if cfg.EnvLevel.IsDev() {
 		gin.SetMode(gin.DebugMode)
 	} else {
@@ -50,7 +51,7 @@ func NewRouter(cfg config.Config, cm *client.ConnectionManager, raw RawTunnels) 
 	}
 
 	r.GET("/healthz", healthCheckHandler)
-	r.GET("/readyz", readinessHandler(cm, raw))
+	r.GET("/readyz", gin.WrapH(Readiness(tunnels)))
 
 	return r
 }
@@ -61,30 +62,19 @@ func healthCheckHandler(c *gin.Context) {
 	})
 }
 
-func readinessHandler(cm *client.ConnectionManager, raw RawTunnels) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		activeTunnels := cm.ActiveCount()
-		if activeTunnels == 0 {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status":         "not ready",
-				"active_tunnels": activeTunnels,
-				"reason":         "no active tunnel connections",
-			})
-			return
+// Readiness answers /readyz, and probes: requests in a pipe to
+// rawpipe.ProbeAuthority, so the status probe reads the same body either
+// way. active_tunnels is the field it parses.
+func Readiness(tunnels Tunnels) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"status": "ready", "active_tunnels": tunnels.Up()}
+		status := http.StatusOK
+		if err := tunnels.Ready(r.Context()); err != nil {
+			body["status"], body["reason"], status = "not ready", err.Error(),
+				http.StatusServiceUnavailable
 		}
-		if raw != nil {
-			if ready, reason := raw.Ready(c.Request.Context()); !ready {
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"status":         "not ready",
-					"active_tunnels": activeTunnels,
-					"reason":         reason,
-				})
-				return
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"status":         "ready",
-			"active_tunnels": activeTunnels,
-		})
-	}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(body)
+	})
 }

@@ -13,9 +13,11 @@ func TestValidateConfigCommand(t *testing.T) {
 		want         int
 	}{
 		{"empty_rules", "schema_version=1\n[redaction]\nrules=[]", 0},
-		{"go_re2", rule + `'\p{Greek}+'`, 0},
-		{"malformed", rule + "'['", 1},
-		{"lookbehind", rule + "'(?<=secret)value'", 1},
+		{"go_re2", rule + `'\p{Greek}+'` + "\nhosts=['.*']", 0},
+		{"malformed", rule + "'['\nhosts=['.*']", 1},
+		{"lookbehind", rule + "'(?<=secret)value'\nhosts=['.*']", 1},
+		{"no_hosts", rule + "'x'", 1},
+		{"empty_hosts", rule + "'x'\nhosts=[]", 1},
 		{"host_malformed", rule + "'x'\nhosts=['[']", 1},
 		{"host_lookbehind", rule + "'x'\nhosts=['(?<=a)b']", 1},
 		{"wildcard_first", rule + "'x'\nhosts=['.*','[']", 1},

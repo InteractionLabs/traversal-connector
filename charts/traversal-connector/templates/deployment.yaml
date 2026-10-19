@@ -20,11 +20,18 @@
 {{- $sidecarEnabled := include "traversal-connector.sidecarEnabled" . -}}
 {{- $otlp := dict -}}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "controllerConnectTo" "address" .Values.controllerConnectTo) -}}
+{{- include "traversal-connector.validateCapabilityTrust" . -}}
 {{- if and .Values.upstreamTLS.caFile $hasUpstreamTLS }}
 {{- fail "upstreamTLS.caFile cannot be combined with upstreamTLS.caPEM or upstreamTLS.existingSecret; set only one CA source." }}
 {{- end }}
 {{- if $telemetryEnabled }}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "otel.connectTo" "address" .Values.otel.connectTo) -}}
+{{- end }}
+{{- /* The connector refuses EGRESS_PROXY_URL at startup until tunnels can run
+       through it, so a release that set it fails here, before a rollout,
+       rather than crash-looping the new pods. */}}
+{{- if .Values.proxyURL }}
+{{- fail "proxyURL is not supported by connector 0.10.x yet; stay on 0.9.x" }}
 {{- end }}
 {{- if and .Values.proxyURL (or .Values.controllerConnectTo (and $telemetryEnabled .Values.otel.connectTo)) }}
 {{- fail "proxyURL cannot be combined with controllerConnectTo or otel.connectTo; fixed socket routing and forward proxy routing are mutually exclusive." }}
@@ -81,6 +88,7 @@
 {{- fail "otel.sidecar.enabled requires controllerTLS to be configured (controllerTLS.existingSecret, or certPEM/keyPEM/caPEM): the sidecar forwards over the connector's mTLS identity." }}
 {{- end }}
 {{- end }}
+{{- include "traversal-connector.validateIdentity" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -152,22 +160,6 @@ spec:
             - name: HTTP_PORT
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.maxTunnelsAllowed }}
-            - name: MAX_TUNNELS_ALLOWED
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.maxConcurrentRequests }}
-            - name: MAX_CONCURRENT_REQUESTS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.reconnectInterval }}
-            - name: RECONNECT_INTERVAL
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.maxBackoffDelay }}
-            - name: MAX_BACKOFF_DELAY
-              value: {{ . | quote }}
-            {{- end }}
             {{- with .Values.requestTimeout }}
             - name: REQUEST_TIMEOUT
               value: {{ . | quote }}
@@ -184,13 +176,26 @@ spec:
             - name: MAX_DECODED_RESPONSE_BODY_SIZE_MB
               value: {{ . | quote }}
             {{- end }}
-            {{- if not (kindIs "bool" .Values.pipes.enabled) }}
-            {{- fail (printf "pipes.enabled must be a boolean (true or false), got %q." (toString .Values.pipes.enabled)) }}
+            {{- /* The connector sets Go's soft memory limit (GOMEMLIMIT) to 90% of
+                   this; the downward API cannot scale it. Without a limit it would
+                   render the node's allocatable memory, so it is set only with one. */}}
+            {{- if dig "limits" "memory" "" (.Values.resources | default dict) }}
+            - name: TRAVERSAL_MEMORY_LIMIT_BYTES
+              valueFrom:
+                resourceFieldRef:
+                  containerName: connector
+                  resource: limits.memory
+                  divisor: "1"
             {{- end }}
-            {{- if .Values.pipes.enabled }}
-            - name: TRAVERSAL_PIPES
-              value: "enabled"
-            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "refuseTCP" "TRAVERSAL_PIPES_REFUSE_TCP" }}
+            {{- with .Values.redaction.maxConcurrent }}
+            - name: TRAVERSAL_REDACTION_MAX_CONCURRENT
+              value: {{ . | toString | quote }}
+            {{- end }}
+            {{- with .Values.redaction.uncoveredStreamMaxLifetime }}
+            - name: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME
+              value: {{ . | toString | quote }}
+            {{- end }}
+            {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "pipeMaxStreams" "TRAVERSAL_PIPES_MAX_STREAMS" "pipeStreamWindowKB" "TRAVERSAL_PIPES_STREAM_WINDOW_KB" "pipeConnectionWindowKB" "TRAVERSAL_PIPES_CONNECTION_WINDOW_KB" }}
             {{- with get $.Values.pipes $key }}
             - name: {{ $name }}
               value: {{ . | toString | quote }}
@@ -200,7 +205,6 @@ spec:
             {{- with compact (list ($roots.current | default "" | trim) ($roots.next | default "" | trim)) }}
             - name: TRAVERSAL_CAPABILITY_ROOTS
               value: {{ printf "%s\n" (join "\n" .) | b64enc | quote }}
-            {{- end }}
             {{- end }}
             {{- if not $telemetryEnabled }}
             - name: TRAVERSAL_DISABLE_TELEMETRY
@@ -276,6 +280,10 @@ spec:
               value: "true"
             - name: TRAVERSAL_CONFIG_REFRESH_INTERVAL
               value: {{ $.Values.configUpdates.refreshInterval | quote }}
+            {{- with .Values.configUpdates.signingKeys }}
+            - name: TRAVERSAL_CONFIG_KEYS
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if $redactionEnabled }}
             - name: REDACTION_RULES_FILE

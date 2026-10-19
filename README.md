@@ -2,19 +2,22 @@
 
 The Traversal Connector runs inside a private network and exposes its internal
 data sources to the Traversal control plane *without* opening any inbound
-firewall holes. It dials out to the control plane over gRPC, multiplexes one
-or more bidirectional tunnels, and executes HTTP requests it receives on those
-tunnels against upstream services on the local network.
+firewall holes. It holds outbound tunnels to the controller's host on port 443
+(mutual TLS, ALPN `x-traversal-tunnel`). Traversal opens a pipe on a tunnel per
+destination, carrying a signed capability for one host:port; the connector
+checks it, applies its dial policy, and serves the pipe as an HTTP/2 or
+HTTP/1.1 forward proxy inside TLS of its own, redacting responses from hosts
+its rules cover.
 
 ```
-   ┌────────────────────┐  outbound gRPC tunnels   ┌────────────────────┐  HTTP   ┌──────────────────┐
-   │  Traversal control │ ◄──────────────────────► │ Traversal Connector│ ──────► │ upstream services│
-   │       plane        │      (h2c or mTLS)       │  (this binary)     │         │ (Prometheus, …)  │
-   └────────────────────┘                          └────────────────────┘         └──────────────────┘
+   ┌────────────────────┐  outbound tunnels (mTLS)  ┌────────────────────┐  HTTP(S)  ┌──────────────────┐
+   │  Traversal control │ ◄───────────────────────► │ Traversal Connector│ ────────► │ upstream services│
+   │       plane        │   pipes: TLS, then HTTP   │  (this binary)     │           │ (Prometheus, …)  │
+   └────────────────────┘                           └────────────────────┘           └──────────────────┘
 ```
 
-The wire protocol is defined in
-[`connector-lib/proto/connector/v1/connector.proto`](connector-lib/proto/connector/v1/connector.proto).
+The tunnel and pipe protocol is defined in
+[`connector-lib/rawpipe`](connector-lib/rawpipe).
 
 ## Setup
 
@@ -259,24 +262,23 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `ENV_NAME` | **required** | Free-form environment name attached to telemetry as `service.namespace` and `deployment.environment` (e.g. `staging`, `production`). Startup fails if unset. |
 | `ENV_LEVEL` | `development` | Deployment level (`production` or `development`). The container image bakes in `production`; leave unset for local dev. |
 | `HTTP_PORT` | `8080` | Port for the local HTTP server (`/healthz`, `/readyz`). |
+| `TRAVERSAL_MEMORY_LIMIT_BYTES` | (none) | The container's memory limit in bytes; the Helm chart sets it from `resources.limits.memory` through the downward API. The connector sets Go's soft memory limit to 90% of it, so it collects garbage harder before the kernel kills it. Unset, or with `GOMEMLIMIT` set, Go's default applies. |
 | `ENV_FILE` | (none) | Optional path to a dotenv file (e.g. `/mnt/secrets/connector.env`). Useful when secrets are mounted as a file (e.g. Vault Agent). Process-environment values win over file values; the file only fills in values that are unset. Startup fails if the path is set but unreadable. |
 
 ### Control plane connection
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
-| `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
-| `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
-| `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
-| `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
-| `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
-| `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |
-| `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of HTTP request bodies sent upstream. |
-| `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from an upstream response, before any decoding. Applies to every response, including from hosts no redaction rule targets. A larger response is dropped. |
+| `TRAVERSAL_CONTROLLER_URL` | **required** | URL of the Traversal control plane; tunnels go to its host on port 443. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
+| `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. It also routes tunnels unless `TRAVERSAL_TUNNELS_CONNECT_TO` is set. Cannot be combined with `EGRESS_PROXY_URL`. |
+| `REQUEST_TIMEOUT` | `60s` | How long a destination may take to send its response headers, and how long a response from a host your redaction rules cover may take to end; one that takes longer is a stream, which cannot be redacted, and is refused. Other response bodies stream for as long as they run. `0` or less is the default. |
+| `MAX_REQUEST_BODY_SIZE_MB` | `32` | Maximum size of a request body sent to a destination. Bodies stream, so a larger one is cut off with an error once it passes the limit. |
+| `MAX_RESPONSE_BODY_SIZE_MB` | `32` | Maximum size read off the wire from a response from a host your redaction rules cover, which is buffered to be redacted. A larger response is refused. Other responses stream and have no limit. |
 | `MAX_DECODED_RESPONSE_BODY_SIZE_MB` | `256` | Maximum size a compressed response may expand to when the connector decodes it to redact. A stream that expands past this is dropped rather than decoded further. |
-| `TRAVERSAL_CONNECTOR_ID` | **required** | Identifier stamped on every gRPC request to the control plane via the `X-Traversal-Connector-ID` header, letting it attribute connections to a specific connector instance. Startup fails if unset. |
-| `EGRESS_PROXY_URL` | (none) | Optional HTTP forward-proxy URL (e.g. `http://proxy.example.com:3128`) used for **all** connector-initiated egress to the Traversal SaaS — both the bidi controller tunnel and OTLP telemetry export (when mTLS is configured for the OTLP endpoint). When set, `TRAVERSAL_CONTROLLER_URL` must use `https://` — HTTP/2 over a forward proxy requires TLS. It cannot be combined with either connect-to override; startup fails rather than silently ignoring a route. |
+| `TRAVERSAL_REDACTION_MAX_CONCURRENT` | `8` | How many responses from hosts your redaction rules cover the whole connector buffers and redacts at once; each may hold `MAX_RESPONSE_BODY_SIZE_MB` plus `MAX_DECODED_RESPONSE_BODY_SIZE_MB` in memory. A response waits for a slot for what is left of `REQUEST_TIMEOUT`, then is refused as `capacity`, counted in `connector.response_refusals_total`. From 1 to 1024; any other value stops the connector starting. |
+| `TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME` | `15m` | While any redaction rules exist, how long a long-lived response from a host no rule covers may run: an event stream (`text/event-stream`), a gRPC response, or an upgraded connection (WebSocket). Coverage is decided when a request is sent, so a rule added later for the host, by OTA or a reload, reaches such a stream only once it ends. At the cap the stream ends cleanly (an event stream's body ends, gRPC gets `UNAVAILABLE` trailers, a WebSocket closes) and its client reopens it under the rules then current. Ordinary responses, and every response while no rules exist, are not capped. `0s` turns the cap off; an invalid value stops the connector starting. |
+| `TRAVERSAL_CONNECTOR_ID` | **required** | This connector's ID, a lower-case UUID provided by Traversal. It names the connector's tunnels and must match its certificate's SPIFFE ID if that is connector-scoped. Startup fails if unset. |
+| `EGRESS_PROXY_URL` | (none) | **Not supported in 0.10.x**: tunnels to the Traversal SaaS cannot run through a forward proxy yet, so startup fails when it is set, and the Helm chart refuses to render with `proxyURL`. Stay on 0.9.x if you need a forward proxy to reach Traversal. It is unrelated to `TRAVERSAL_PIPES_EGRESS_PROXY`, the proxy for destinations. |
 
 ### mTLS to the control plane
 
@@ -323,27 +325,39 @@ UPSTREAM_TLS_VERIFY=true
 UPSTREAM_TLS_CA_FILE=/etc/traversal/upstream-ca/ca.crt
 ```
 
-### Upstream forward proxy
+### Tunnels, pipes and the dial policy
 
-Requests to upstream services honor the standard proxy environment variables
-(via Go's `http.ProxyFromEnvironment`), evaluated per request against the target
-URL. They are read once at startup, so changes require a restart:
+Every request reaches its destination through the connector's dial policy,
+which refuses loopback, link-local, cloud metadata and the connector's own
+addresses, and any CIDR you add. Private ranges are allowed.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HTTPS_PROXY` | (none) | Forward proxy for `https://` upstream targets. |
-| `HTTP_PROXY` | (none) | Forward proxy for `http://` upstream targets. |
-| `NO_PROXY` | (none) | Comma-separated hosts that are dialed directly. `.example.com` (or `example.com`) matches the domain and all subdomains; `host:port` matches one port; CIDRs match only targets addressed by IP, since hostnames are not resolved before matching. Loopback targets always bypass the proxy. |
+| `TRAVERSAL_CAPABILITY_ROOTS` | (none) | Traversal's capability root certificates (PEM, raw or base64). Required unless `TRAVERSAL_CAPABILITY_KEYS` is set. |
+| `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_ISSUER` | (none) | Pinned capability keys and their issuer, beside or instead of roots. |
+| `TRAVERSAL_TUNNELS_COUNT` | `2` | Tunnels held, at most 8. |
+| `TRAVERSAL_TUNNELS_CONNECT_TO` | `TRAVERSAL_CONTROLLER_CONNECT_TO` | `host:port` to dial instead of the controller host on 443; SNI and certificate checks are unchanged. Unset, tunnels follow `TRAVERSAL_CONTROLLER_CONNECT_TO`, or with neither set go to the controller host on 443. |
+| `TRAVERSAL_PIPES_MAX` | `200` | Pipes open at once. |
+| `TRAVERSAL_PIPES_MAX_LIFETIME` | `4h` | A pipe this old is closed; the proxy opens another. |
+| `TRAVERSAL_PIPES_IDLE_TIMEOUT` | `15m` | A pipe that carries no request for this long is closed. |
+| `TRAVERSAL_PIPES_MAX_STREAMS` | `100` | Concurrent requests in one HTTP/2 pipe. |
+| `TRAVERSAL_PIPES_STREAM_WINDOW_KB` / `TRAVERSAL_PIPES_CONNECTION_WINDOW_KB` | `256` / `1024` | HTTP/2 flow-control windows per request and per pipe. |
+| `TRAVERSAL_PIPES_EGRESS_PROXY` | (none) | `http://` forward proxy every request reaches its destination through (CONNECT). |
+| `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` | `false` (`true` for `HTTPS_PROXY`/`HTTP_PROXY`) | Send hostnames to that proxy, which resolves them; off, only IP literals go through it. Turn on only if the proxy refuses loopback, link-local and metadata addresses. |
+| `TRAVERSAL_PIPES_FORBIDDEN_CIDRS` | (none) | Comma-separated CIDRs never to reach, beside the built-in list. |
 
-These apply only to upstream requests. The controller tunnel and OTLP export use
-`EGRESS_PROXY_URL` and ignore these variables.
+`TRAVERSAL_PIPES_EGRESS_PROXY` is the documented setting. For backwards
+compatibility with #67, when it is unset `HTTPS_PROXY` (or else `HTTP_PROXY`)
+is used the same way, and `NO_PROXY` hosts are dialed directly; the dial policy
+applies either way. As in #67, that proxy resolves hostnames unless
+`TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` is set. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
+and the connector logs that the environment proxy is ignored.
 
-```sh
-# Internet-hosted integrations via the corporate proxy; internal services direct.
-HTTPS_PROXY=http://proxy.corp.example.com:3128
-HTTP_PROXY=http://proxy.corp.example.com:3128
-NO_PROXY=.corp.example.com,10.0.0.0/8
-```
+Whenever the proxy resolves hostnames, the connector warns once at start, as
+its address floor then covers only IP literals. Each dial handed to the proxy
+is counted in `connector.egress_proxy_unresolved_dial_total`, by `target_kind`:
+`hostname` (resolved by the proxy, not checked by the connector) or `ip`. A
+dial the dial policy refuses never reaches the proxy and is not counted.
 
 ### Redaction
 
@@ -375,12 +389,14 @@ name = "ssn"
 type = "regex"
 pattern = '\b\d{3}-\d{2}-(\d{4})\b'
 replacement = "***-**-$1"
+hosts = ['.*']
 
 [[rules]]
 name = "email"
 type = "regex-structured-data"
 pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
+hosts = ['api\.example\.com']
 ```
 
 The optional `version` string is metadata. Unknown TOML fields are ignored.
@@ -458,12 +474,14 @@ name = "ssn"
 type = "regex"
 pattern = '\b\d{3}-\d{2}-(\d{4})\b'
 replacement = "***-**-$1"
+hosts = ['.*']
 
 [[redaction.rules]]
 name = "email"
 type = "regex-structured-data"
 pattern = '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
 redact_fields = ["body|message"]
+hosts = ['api\.example\.com']
 ```
 
 Validate a document locally with `go run ./cmd/validate-config < config.toml`.
@@ -497,7 +515,7 @@ Each rule requires:
 - `type` — `"regex"` for byte-level redaction over the full response body, or `"regex-structured-data"` for per-field redaction over JSON response bodies. Unsupported types reject the entire remote update.
 - `pattern` — a [RE2](https://github.com/google/re2/wiki/Syntax) regular expression.
 - `replacement` *(optional)* — replacement string; use `$1`, `$2`, … to insert numbered capture groups from the pattern. Falls back to `default_replacement`.
-- `hosts` *(optional)* — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. Defaults to `[".*"]` (every host). Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
+- `hosts` — allowlist of RE2 patterns matched against the request **hostname** (port and userinfo stripped). The rule only fires when the hostname *fully* matches at least one pattern. **Required:** a rule with no `hosts`, or `hosts = []`, is refused at load (the connector does not start, or keeps its last-known-good rules), so a rule cannot cover every host by omission; write `hosts = [".*"]` for every host. Each pattern is anchored to the whole hostname, so `.*github\.com` matches `api.github.com` and `github.com` but **not** `github.com.evil.com`. Applies to both rule types. Listing `.*` anywhere in the list makes the rule match every host.
 
 Matching follows DNS rather than byte equality, so one upstream cannot be reached under a spelling that carries a different rule set. Patterns are matched **case-insensitively** (`api\.github\.com` and `API\.GITHUB\.COM` both match `API.github.com`), and a single trailing dot on the requested hostname is ignored, since it only marks the name as already absolute (`github.com.` matches `github\.com`).
 
@@ -552,6 +570,11 @@ between two ranges is invisible to both.
 
 Hosts no rule targets are unaffected: their responses are forwarded byte for
 byte, in whatever coding they arrived, with nothing decoded or re-encoded.
+
+On every response, whether rules target its host or not, the connector drops
+any `X-Traversal-*` header the destination sent. Those headers are the
+connector's and Traversal's own (`X-Traversal-Redacted`, `X-Traversal-Reason`),
+and Traversal cannot tell a forged one from the connector's.
 
 Two response headers change when the connector rewrites a body. It sets
 `X-Traversal-Redacted: true`, and it strips the headers that fingerprint the

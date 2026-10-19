@@ -11,6 +11,9 @@ image:
 
 replicaCount: 5
 
+# limits.memory also sets Go's soft memory limit (GOMEMLIMIT) to 90% of it,
+# through TRAVERSAL_MEMORY_LIMIT_BYTES, so the connector collects garbage
+# before the kernel kills it. Without a memory limit Go's default stays.
 resources:
   requests:
     cpu: 500m
@@ -27,20 +30,20 @@ controllerURL: ""
 # Optional curl --connect-to-style host:port override for the controller. Only
 # the TCP connection destination changes; controllerURL still supplies the
 # scheme, path, HTTP/2 :authority, TLS SNI, and certificate verification.
-# Cannot be combined with proxyURL.
+# Tunnels follow it too unless pipes.tunnelsConnectTo is set. Cannot be
+# combined with proxyURL.
 controllerConnectTo: ""  # TRAVERSAL_CONTROLLER_CONNECT_TO
-# Unique identifier for this connector deployment, provided to you by Traversal.
-# Maps to TRAVERSAL_CONNECTOR_ID.
+# Unique identifier for this connector deployment, provided to you by Traversal:
+# a lower-case UUID, or the chart fails at render. Maps to TRAVERSAL_CONNECTOR_ID.
 connectorID: ""
 
 # ─── Optional connection tuning ──────────────────────────────────────────────
 # All values left blank fall back to connector built-in defaults.
 envLevel: ""               # ENV_LEVEL: production | development
+# proxyURL is not supported by connector 0.10.x: tunnels cannot run through a
+# forward proxy yet, so the chart refuses to render with it set. Stay on 0.9.x
+# if you need it.
 proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
-maxTunnelsAllowed: ""      # MAX_TUNNELS_ALLOWED (default 2)
-maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 10)
-reconnectInterval: ""      # RECONNECT_INTERVAL (default 5s)
-maxBackoffDelay: ""        # MAX_BACKOFF_DELAY (default 60s)
 requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
 maxRequestBodySizeMB: ""   # MAX_REQUEST_BODY_SIZE_MB (default 32)
 # Ceilings on an upstream response, both enforced so redaction always scans the
@@ -51,14 +54,13 @@ maxResponseBodySizeMB: ""  # MAX_RESPONSE_BODY_SIZE_MB (default 32)
 maxDecodedResponseBodySizeMB: ""  # MAX_DECODED_RESPONSE_BODY_SIZE_MB (default 256)
 httpPort: ""               # HTTP_PORT (default 8080)
 
-# ─── Raw pipes (preview) ─────────────────────────────────────────────────────
-# Lets Traversal reach databases, kubectl exec, git and other non-HTTP
-# destinations through this connector, over tunnels to the controller's host
-# on port 443 (TLS ALPN x-traversal-tunnel; a TLS-intercepting proxy breaks
-# them). Each pipe carries a Traversal-signed capability the connector checks
-# before it dials. Needs controllerTLS and a lower-case UUID connectorID.
+# ─── Tunnels and pipes ───────────────────────────────────────────────────────
+# The connector holds tunnels to the controller's host on port 443 (TLS ALPN
+# x-traversal-tunnel; a TLS-intercepting proxy breaks them). Traversal opens a
+# pipe on a tunnel for each destination, carrying a Traversal-signed capability
+# the connector checks before it dials. Needs controllerTLS and a lower-case
+# UUID connectorID, and capability trust: trustedRoots, or capabilityKeys.
 pipes:
-  enabled: false           # TRAVERSAL_PIPES
   # Traversal's capability root certificates (PEM), the current root and,
   # during a root rotation, the next. Rendered together as
   # TRAVERSAL_CAPABILITY_ROOTS. With roots the connector trusts every
@@ -76,11 +78,20 @@ pipes:
   maxPipes: ""             # TRAVERSAL_PIPES_MAX (default 200)
   maxLifetime: ""          # TRAVERSAL_PIPES_MAX_LIFETIME (default 4h)
   idleTimeout: ""          # TRAVERSAL_PIPES_IDLE_TIMEOUT (default 15m)
+  # HTTP/2 inside one pipe: concurrent requests, and the flow-control windows
+  # per request and per pipe (KiB). They nest inside the tunnel's own.
+  pipeMaxStreams: ""       # TRAVERSAL_PIPES_MAX_STREAMS (default 100)
+  pipeStreamWindowKB: ""   # TRAVERSAL_PIPES_STREAM_WINDOW_KB (default 256)
+  pipeConnectionWindowKB: ""  # TRAVERSAL_PIPES_CONNECTION_WINDOW_KB (default 1024)
   tunnelCount: ""          # TRAVERSAL_TUNNELS_COUNT (default 2, at most 8)
   # host:port to dial instead of <controller host>:443, such as a PrivateLink
   # endpoint; SNI and certificate checks still use the controller's host.
+  # Unset, tunnels follow controllerConnectTo.
   tunnelsConnectTo: ""     # TRAVERSAL_TUNNELS_CONNECT_TO
-  # An http:// forward proxy pipes reach their destinations through.
+  # An http:// forward proxy pipes reach their destinations through. Unset,
+  # HTTPS_PROXY/HTTP_PROXY and NO_PROXY in the pod are used instead, for
+  # backwards compatibility with #67, and that proxy resolves hostnames unless
+  # egressProxyResolves is set; this is the documented setting.
   egressProxy: ""          # TRAVERSAL_PIPES_EGRESS_PROXY
   # Send hostnames to egressProxy, which resolves them. Off, only IP
   # literals go through it. Turn on only if the proxy refuses loopback,
@@ -88,15 +99,15 @@ pipes:
   egressProxyResolves: ""  # TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES
   # Comma-separated CIDRs pipes may never reach, beside the built-in list
   # (loopback, link-local, metadata and the connector's own addresses), which
-  # cannot be removed. An entry that does not parse stops raw pipes starting.
+  # cannot be removed. An entry that does not parse stops the connector starting.
   forbiddenCIDRs: ""       # TRAVERSAL_PIPES_FORBIDDEN_CIDRS
-  # Refuse every raw TCP pipe while keeping tunnels (redacted HTTP still
-  # flows). For a connector that must never carry raw TCP.
-  refuseTCP: ""            # TRAVERSAL_PIPES_REFUSE_TCP
 
-# ─── mTLS to the Traversal control plane (optional) ──────────────────────────
-# Either provide PEM strings inline (chart will render a Secret) or reference
-# an existing Secret with keys: tls.crt, tls.key, ca.crt.
+# ─── mTLS to the Traversal control plane (required) ──────────────────────────
+# The connector's client certificate: its tunnels cannot open without one, so
+# the chart fails at render unless existingSecret, or certPEM and keyPEM, are
+# set. Either provide PEM strings inline (chart will render a Secret) or
+# reference an existing Secret with keys: tls.crt, tls.key, ca.crt (ca.crt is
+# optional; without it the system roots verify the controller).
 # Since v0.3.0, this same cert + key are also presented for mTLS to the OTLP
 # telemetry endpoints when those endpoints are TLS-enabled.
 controllerTLS:
@@ -190,12 +201,32 @@ otel:
 configUpdates:
   enabled: false
   refreshInterval: "30s"
+  # Traversal's config signing keys, a Key-ID PEM bundle (the install command
+  # sets it). Set, only configs Traversal signed for this connector apply,
+  # while within their signed validity window (5 minutes' clock skew
+  # allowed), each at a version above the config applied and issued no
+  # earlier (the applied one re-sent is a no-op); empty, configs apply
+  # unsigned. The floor is in memory only: after a restart the connector
+  # accepts any validly signed config that has not expired, including an
+  # older one, until it applies one, so the window bounds that replay.
+  signingKeys: ""
 
 # ─── Local-file redaction (opt-in) ───────────────────────────────────────────
 # Set enabled: true and exactly one source. Cannot be combined with configUpdates.
 # See the repository README for the local TOML format.
 redaction:
   enabled: false
+  # How many responses from covered hosts the connector buffers and redacts at
+  # once, each holding up to maxResponseBodySizeMB plus
+  # maxDecodedResponseBodySizeMB in memory. One that waits its whole
+  # requestTimeout for a slot is refused (capacity). Applies to OTA rules too.
+  maxConcurrent: ""  # TRAVERSAL_REDACTION_MAX_CONCURRENT (default 8, 1 to 1024)
+  # While any rules exist, how long a long-lived response from a host no rule
+  # covers (an event stream, a gRPC stream, a WebSocket) may run before it is
+  # ended cleanly and its client reopens it under the rules then current. An
+  # OTA rule added for the host otherwise reaches an open stream only when it
+  # ends, which could be up to pipes.maxLifetime. "0s" turns the cap off.
+  uncoveredStreamMaxLifetime: ""  # TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME (default 15m)
   reloadInterval: "10s"
   # Inline TOML; the chart creates a ConfigMap.
   rulesContent: ""

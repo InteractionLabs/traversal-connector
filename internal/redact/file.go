@@ -63,6 +63,9 @@ func (l *FileLoader) refresh() error {
 			)
 		}
 	}
+	if err := rules.CheckHosts(); err != nil {
+		return fmt.Errorf("local redaction rules: %w", err)
+	}
 	if err := l.redactor.Update(&rules); err != nil {
 		return errors.New(
 			"local redaction rules failed to compile; retaining last-known-good rules",

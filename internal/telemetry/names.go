@@ -1,30 +1,25 @@
+// Package telemetry is the connector's own telemetry: its span and metric
+// names and how errors are reduced before they reach a span. Exporter
+// setup is connector-lib/telemetry.
 package telemetry
 
 // Span names emitted by the traversal connector.
 const (
-	SpanConnectorHandleHTTP  = "connector.handle_http_request"
-	SpanExecutorUpstreamHTTP = "executor.upstream_http"
+	SpanUpstreamHTTP = "executor.upstream_http"
 )
 
 // Metric names emitted by the traversal connector.
 const (
-	MetricConfigRefreshTotal               = "connector.config_refresh_total"
-	MetricConfigRuleCount                  = "connector.config_rule_count"
-	MetricConfigStaleness                  = "connector.config_staleness_seconds"
-	MetricStreamsActive                    = "connector.streams_active"
-	MetricUpstreamRequestsTotal            = "connector.upstream_requests_total"
-	MetricUpstreamLatency                  = "connector.upstream_latency"
-	MetricReconnectsTotal                  = "connector.reconnects_total"
-	MetricUpstreamRequestBodySize          = "connector.upstream_request_body_size"
-	MetricUpstreamResponseBodySize         = "connector.upstream_response_body_size"
-	MetricConcurrentRequests               = "connector.concurrent_requests"
-	MetricResponseSendWaitLatency          = "connector.response_send_wait_latency"
-	MetricRequestBodySizeLimitHitConnector = "connector.request_body_size_limit_hit_total"
-	MetricRedactionLatencyPerByte          = "connector.redaction_latency_per_byte"
-	MetricRedactionHitsTotal               = "connector.redaction_hits_total"
-	MetricResponseContentEncodingTotal     = "connector.response_content_encoding_total"
-	MetricResponseRefusalsTotal            = "connector.response_refusals_total"
-	MetricDecodedResponseBodySize          = "connector.decoded_response_body_size"
+	MetricConfigRefreshTotal           = "connector.config_refresh_total"
+	MetricConfigRuleCount              = "connector.config_rule_count"
+	MetricConfigStaleness              = "connector.config_staleness_seconds"
+	MetricUpstreamRequestsTotal        = "connector.upstream_requests_total"
+	MetricUpstreamLatency              = "connector.upstream_latency"
+	MetricRedactionLatencyPerByte      = "connector.redaction_latency_per_byte"
+	MetricRedactionHitsTotal           = "connector.redaction_hits_total"
+	MetricResponseContentEncodingTotal = "connector.response_content_encoding_total"
+	MetricResponseRefusalsTotal        = "connector.response_refusals_total"
+	MetricDecodedResponseBodySize      = "connector.decoded_response_body_size"
 	// Raw pipes (internal/pipeserver).
 	MetricRawTunnelsUp       = "connector.raw_tunnels_up"
 	MetricRawTunnelDialTotal = "connector.raw_tunnel_dial_total"
@@ -33,4 +28,8 @@ const (
 	MetricRawPipeEndTotal    = "connector.raw_pipe_end_total"
 	MetricRawPipeBytes       = "connector.raw_pipe_bytes_total"
 	MetricCapabilityTrust    = "connector.capability_trust"
+	// MetricEgressProxyUnresolvedDialTotal counts dials handed to the egress
+	// proxy, by target_kind: hostname (the proxy resolves it, so the
+	// connector's address floor did not see its addresses) or ip.
+	MetricEgressProxyUnresolvedDialTotal = "connector.egress_proxy_unresolved_dial_total"
 )

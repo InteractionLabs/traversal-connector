@@ -1,6 +1,6 @@
 envName: ci
 controllerURL: https://controller.example.invalid
-connectorID: ci
+connectorID: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 
 controllerTLS:
   existingSecret: ci-controller-tls
@@ -11,3 +11,8 @@ otel:
   metricsEndpoint: https://telemetry.example.invalid:4317
   tracesEndpoint: https://telemetry.example.invalid:4317
   logsEndpoint: https://telemetry.example.invalid:4317
+
+# Synthetic capability trust: a throwaway P-256 public key that signs nothing.
+pipes:
+  capabilityIssuer: traversal-raw-tunnel/ci
+  capabilityKeys: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KS2V5LUlEOiBjaQoKTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFM3pmTm5vZjM1ODJaaDBPeDFEbmgxV0lnTkt1Kwo0RVNQSmZ5M2hUY0pMK21MbkZ0SHhVZFgyLzVZeUl4WjNaUmdlOHRWSUpWNGNiOUFnRmpzM1h0UTB3PT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==

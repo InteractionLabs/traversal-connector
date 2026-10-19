@@ -19,19 +19,17 @@ import (
 // and writes with that error, so neither side mistakes it for an end.
 type StreamConn struct {
 	net.Conn
-	closeOnce sync.Once
-	closed    chan struct{}
-	failOnce  sync.Once
-	failed    chan struct{} // closed once err is set
-	err       error
-	copies    sync.WaitGroup
-	in, out   int64
+	failOnce sync.Once
+	failed   chan struct{} // closed once err is set
+	err      error
+	copies   sync.WaitGroup
+	in, out  int64
 }
 
 // NewStreamConn starts copying between e and the returned conn.
 func NewStreamConn(e End) *StreamConn {
 	near, far := net.Pipe()
-	c := &StreamConn{Conn: near, closed: make(chan struct{}), failed: make(chan struct{})}
+	c := &StreamConn{Conn: near, failed: make(chan struct{})}
 	fail := func(err error) {
 		c.failOnce.Do(func() {
 			c.err = &streamError{err}
@@ -128,16 +126,6 @@ func (c *StreamConn) failure() error {
 		return nil
 	}
 }
-
-// Close closes the conn; Closed then reports it.
-func (c *StreamConn) Close() error {
-	err := c.Conn.Close()
-	c.closeOnce.Do(func() { close(c.closed) })
-	return err
-}
-
-// Closed is closed once Close has run.
-func (c *StreamConn) Closed() <-chan struct{} { return c.closed }
 
 // Wait returns once both copies with e have stopped, with the bytes read
 // from e and written to it. After Close, the copy toward e ends e

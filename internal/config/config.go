@@ -16,27 +16,36 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 )
 
 const (
 	// Default configuration values.
-	defaultMaxTunnelsAllowed = 2
-	defaultBodySizeMB        = 32
+	// DefaultBodySizeMB is each body limit's default, and what bounds a
+	// buffered (redacted) response configured with no limit (0).
+	DefaultBodySizeMB = 32
 	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
 	// deliberately far above the wire ceiling rather than equal to it.
-	defaultDecodedBodySizeMB     = 256
-	defaultHTTPPort              = "8080"
-	defaultMaxConcurrentRequests = 10
-	defaultUpstreamTLSVerify     = true
+	DefaultDecodedBodySizeMB = 256
+	// DefaultMaxConcurrentRedactions is how many covered responses the
+	// connector holds in memory at once, and what bounds it when configured
+	// as none (0 or less).
+	DefaultMaxConcurrentRedactions = 8
+	// DefaultUncoveredStreamMaxLifetime is how long a long-lived response from
+	// a host no redaction rule covers may run while any rules exist.
+	DefaultUncoveredStreamMaxLifetime = 15 * time.Minute
+	// maxConcurrentRedactions bounds TRAVERSAL_REDACTION_MAX_CONCURRENT.
+	maxConcurrentRedactions  = 1024
+	defaultHTTPPort          = "8080"
+	defaultUpstreamTLSVerify = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
-	// Default timeout and interval durations.
-	defaultReconnectInterval       = 5 * time.Second
-	defaultMaxBackoffDelay         = 60 * time.Second
-	defaultRequestTimeout          = 60 * time.Second
+	// DefaultRequestTimeout is REQUEST_TIMEOUT's default, and what bounds an
+	// upstream request configured with none (0 or less).
+	DefaultRequestTimeout = 60 * time.Second
+	// Default interval durations.
 	defaultConfigRefreshInterval   = 30 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
 )
@@ -61,15 +70,6 @@ type Config struct {
 	// Container image builds bake in "production"; falls back to "development"
 	// when ENV_LEVEL is unset.
 	EnvLevel env.EnvLevel
-	// MaxTunnelsAllowed is the maximum number of concurrent gRPC
-	// tunnels this traversal connector creates.
-	MaxTunnelsAllowed int
-	// ReconnectInterval is the interval for periodic connection rebalancing,
-	// distributing tunnels across available Traversal control plane pods.
-	ReconnectInterval time.Duration
-	// MaxBackoffDelay is the maximum delay cap for exponential backoff on
-	// reconnection attempts.
-	MaxBackoffDelay time.Duration
 	// RequestTimeout is the timeout for individual upstream HTTP requests
 	// executed within the customer network.
 	RequestTimeout time.Duration
@@ -87,6 +87,19 @@ type Config struct {
 	// cannot supply it either: ISIZE sits at the end of the stream, is modulo
 	// 2^32, and is written by the same upstream whose output is in question.
 	MaxDecodedResponseBodySizeMB int64
+	// MaxConcurrentRedactions is how many covered responses the whole
+	// connector buffers and redacts at once: each may hold
+	// MaxResponseBodySizeMB on the wire and MaxDecodedResponseBodySizeMB
+	// decoded. Read strictly from TRAVERSAL_REDACTION_MAX_CONCURRENT, 1 to
+	// 1024.
+	MaxConcurrentRedactions int64
+	// UncoveredStreamMaxLifetime caps, while any redaction rules exist, a
+	// long-lived response (an event stream, a gRPC stream, an upgraded
+	// connection) from a host none covers. Coverage is decided when a request
+	// is sent, so a rule added for the host later reaches such a stream only
+	// once it ends and its client reopens it. 0 is no cap. Read strictly from
+	// TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME.
+	UncoveredStreamMaxLifetime time.Duration
 	// EgressProxyURL is the optional HTTP forward proxy URL used for any
 	// connector-initiated egress to the Traversal SaaS — both the bidi
 	// control-plane tunnel and OTLP telemetry export. Read from
@@ -142,9 +155,6 @@ type Config struct {
 	// is strongly discouraged: with it set, Traversal cannot diagnose or assist
 	// with issues in this deployment. applyTelemetryPolicy enforces its inverse.
 	DisableTelemetry bool
-	// MaxConcurrentRequests is the maximum number of concurrent HTTP requests
-	// this traversal connector can handle per tunnel when multiplexing is active.
-	MaxConcurrentRequests int
 	// UpstreamTLSVerify controls whether TLS certificates are validated when
 	// making HTTPS requests to upstream observability platforms.
 	// When true, certificates must be valid and signed by a trusted CA.
@@ -245,6 +255,7 @@ func Load() (Config, error) {
 		}
 	}
 
+	var strict env.Reader
 	cfg := Config{
 		HTTPPort:                     env.GetEnvString("HTTP_PORT", defaultHTTPPort),
 		TraversalControllerURL:       *traversalControllerURL,
@@ -253,22 +264,23 @@ func Load() (Config, error) {
 		EnvLevel: env.EnvLevel(
 			env.GetEnvString("ENV_LEVEL", string(env.EnvLevelDevelopment)),
 		),
-		MaxTunnelsAllowed: env.GetEnvInt("MAX_TUNNELS_ALLOWED", defaultMaxTunnelsAllowed),
-		ReconnectInterval: env.GetEnvDuration("RECONNECT_INTERVAL", defaultReconnectInterval),
-		MaxBackoffDelay:   env.GetEnvDuration("MAX_BACKOFF_DELAY", defaultMaxBackoffDelay),
-		RequestTimeout:    env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
+		RequestTimeout: env.GetEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_RESPONSE_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxDecodedResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
-			defaultDecodedBodySizeMB,
+			DefaultDecodedBodySizeMB,
 		),
+		MaxConcurrentRedactions: int64(strict.Int("TRAVERSAL_REDACTION_MAX_CONCURRENT",
+			DefaultMaxConcurrentRedactions, maxConcurrentRedactions)),
+		UncoveredStreamMaxLifetime: strict.Duration("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
+			DefaultUncoveredStreamMaxLifetime),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
@@ -287,12 +299,8 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
-		OTLPConnectTo:    otlpConnectTo,
-		DisableTelemetry: disableTelemetry,
-		MaxConcurrentRequests: env.GetEnvInt(
-			"MAX_CONCURRENT_REQUESTS",
-			defaultMaxConcurrentRequests,
-		),
+		OTLPConnectTo:     otlpConnectTo,
+		DisableTelemetry:  disableTelemetry,
 		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
 		UpstreamTLSCA:     upstreamTLSCA,
 		ConfigEnabled:     configEnabled,
@@ -303,6 +311,9 @@ func Load() (Config, error) {
 		RedactionReloadInterval: defaultRedactionReloadInterval,
 	}
 
+	if err := strict.Err(); err != nil {
+		return Config{}, err
+	}
 	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {
 		return Config{}, errors.New(
 			"TRAVERSAL_CONFIG_ENDPOINT is no longer supported; OTA uses the controller origin",
@@ -558,20 +569,25 @@ func BuildClientTLSConfig(cfg *Config) (*tls.Config, error) {
 	}
 
 	if cfg.TLSCA != nil && *cfg.TLSCA != "" {
-		caCertPool, err := systemCertPool()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to load system certificate pool for controller TLS: %w",
-				err,
-			)
+		if tlsConfig.RootCAs, err = SystemPoolWith(*cfg.TLSCA, "controller"); err != nil {
+			return nil, err
 		}
-		if !caCertPool.AppendCertsFromPEM([]byte(*cfg.TLSCA)) {
-			return nil, errors.New("failed to parse controller CA certificate")
-		}
-		tlsConfig.RootCAs = caCertPool
 	}
 
 	return tlsConfig, nil
+}
+
+// SystemPoolWith is the system roots plus the PEM CA certificates in caPEM,
+// for the TLS that what names (controller, upstream).
+func SystemPoolWith(caPEM, what string) (*x509.CertPool, error) {
+	pool, err := systemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load system certificate pool for %s TLS: %w", what, err)
+	}
+	if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+		return nil, fmt.Errorf("failed to parse %s CA certificate", what)
+	}
+	return pool, nil
 }
 
 // Both set is rejected rather than resolved by precedence, so no CA is silently ignored.

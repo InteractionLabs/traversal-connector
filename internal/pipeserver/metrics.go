@@ -3,6 +3,7 @@ package pipeserver
 import (
 	"context"
 	"errors"
+	"net/netip"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -12,6 +13,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/halfconn"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
+	"github.com/InteractionLabs/traversal-connector/internal/upstream"
 )
 
 // InstrumentationName is the OTel meter name for raw pipes.
@@ -46,6 +48,34 @@ func newMetrics() (*metrics, error) {
 	m.bytes, errs[5] = meter.Int64Counter(telemetry.MetricRawPipeBytes, metric.WithUnit("By"),
 		metric.WithDescription("Raw pipe bytes, by direction"))
 	return &m, errors.Join(errs[:]...)
+}
+
+// countProxyDials wraps dial, which reaches destinations through the egress
+// proxy, to count each dial handed to the proxy in
+// connector.egress_proxy_unresolved_dial_total by target_kind: hostname, which
+// the proxy resolves past the connector's address floor, or ip. A dial the
+// dial policy refuses never reaches the proxy and is not counted.
+func countProxyDials(dial upstream.Dialer) (upstream.Dialer, error) {
+	dials, err := otel.Meter(InstrumentationName).Int64Counter(
+		telemetry.MetricEgressProxyUnresolvedDialTotal,
+		metric.WithDescription("Dials handed to the egress proxy, by target_kind: "+
+			"hostname (the proxy resolves it) or ip"))
+	if err != nil {
+		return nil, err
+	}
+	hostname, ip := metric.WithAttributes(attribute.String("target_kind", "hostname")),
+		metric.WithAttributes(attribute.String("target_kind", "ip"))
+	return func(ctx context.Context, host string, port uint16) (halfconn.Conn, string, error) {
+		conn, via, err := dial(ctx, host, port)
+		if rawpipe.ReasonOf(err, "") != rawpipe.ForbiddenAddress {
+			kind := hostname
+			if _, parseErr := netip.ParseAddr(host); parseErr == nil {
+				kind = ip
+			}
+			dials.Add(ctx, 1, kind)
+		}
+		return conn, via, err
+	}, nil
 }
 
 // observeTrust reports the capability trust the connector has loaded, one
@@ -85,8 +115,8 @@ func (m *metrics) opened(reason rawpipe.Reason) {
 	m.opens.Add(context.Background(), 1, outcome(o))
 }
 
-// acceptFailed records the open of a pipe admitted and dialed whose stream
-// could not be accepted, so no refusal reason reached the edge controller.
+// acceptFailed records the open of a pipe admitted whose stream could not be
+// accepted, so no refusal reason reached the edge controller.
 func (m *metrics) acceptFailed() {
 	m.opens.Add(context.Background(), 1, outcome("accept_failed"))
 }

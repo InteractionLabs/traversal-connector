@@ -2,22 +2,25 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/capability"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/logging"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/telemetry"
 	"github.com/InteractionLabs/traversal-connector/internal/client"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
-	"github.com/InteractionLabs/traversal-connector/internal/logging"
 	"github.com/InteractionLabs/traversal-connector/internal/pipeserver"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
-	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -25,89 +28,28 @@ const (
 	readHeaderTimeout      = 5 * time.Second
 )
 
-// exporterShutdown is one telemetry exporter's shutdown, named for its log line.
-type exporterShutdown struct {
-	name     string
-	shutdown func(context.Context) error
-}
-
-// shutdownExporters runs every exporter's shutdown at once under one
-// shutdownContextTimeout, so together they add one timeout, not one each, to
-// a stopping pod's budget.
-func shutdownExporters(exporters []exporterShutdown) {
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownContextTimeout)
-	defer cancel()
-	var wg sync.WaitGroup
-	for _, e := range exporters {
-		wg.Go(func() {
-			if err := e.shutdown(ctx); err != nil {
-				slog.ErrorContext(ctx, "failed to shutdown "+e.name, "err", err)
-			}
-		})
-	}
-	wg.Wait()
-}
-
 func main() {
 	cfg, loadErr := config.Load()
 	if loadErr != nil {
-		slog.Error("failed to load config", "err", loadErr)
+		slog.Error("failed to load config", "error", loadErr)
 		os.Exit(1)
 	}
-
 	// Reuse the control-plane mTLS credentials for the OTLP exporters. Nil when
 	// no client cert/key is configured, leaving exporters on their default
 	// transport.
 	otlpTLS, tlsErr := config.BuildClientTLSConfig(&cfg)
 	if tlsErr != nil {
-		slog.Error("failed to build OTLP mTLS config", "err", tlsErr)
+		slog.Error("failed to build OTLP mTLS config", "error", tlsErr)
 		os.Exit(1)
 	}
-
-	// Forward proxy for OTLP egress, applied alongside otlpTLS. Only used
-	// by the exporters when both mTLS is configured and the OTLP endpoint
-	// is TLS — same egress path as the bidi controller tunnel.
-	otlpEgressProxyURL := parseOTLPEgressProxyURL(cfg.EgressProxyURL)
-
-	// Deferred first, so it runs last: after the HTTP server and pipes stop.
-	var exporters []exporterShutdown
-	defer func() { shutdownExporters(exporters) }()
-
-	// --- Logging ---
-	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
-	// Non-local              → stdout JSON
-	// Local                  → pretty text
-	switch {
-	case cfg.OTLPLogsEndpoint != "":
-		logger, shutdownLogs, logErr := telemetry.InitLogging(
-			context.Background(),
-			cfg.OTELServiceName,
-			cfg.OTLPLogsEndpoint,
-			cfg.OTLPProtocol,
-			cfg.EnvName,
-			otlpTLS,
-			otlpEgressProxyURL,
-			cfg.OTLPConnectTo,
-		)
-		if logErr != nil {
-			slog.Error("failed to initialize OTLP log export",
-				"err", logErr)
-			return
-		}
-		if shutdownLogs != nil {
-			exporters = append(exporters, exporterShutdown{"log exporter", shutdownLogs})
-		}
-		slog.SetDefault(logger)
-	case !cfg.EnvLevel.IsDev():
-		slog.SetDefault(slog.New(
-			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-				AddSource: true,
-			}),
-		))
-	default:
-		slog.SetDefault(slog.New(logging.NewTextHandler(os.Stdout)))
+	flush, err := setupTelemetry(&cfg, otlpTLS)
+	if err != nil {
+		slog.Error("failed to initialize telemetry", "error", err)
+		flush() // os.Exit runs no defers
+		os.Exit(1)
 	}
-
+	defer flush()
+	setMemoryLimit()
 	// Emitted here rather than where the opt-out is read, so the one line saying
 	// this deployment is unobservable lands on the same stream, in the same
 	// format, as everything an operator reads after it.
@@ -118,125 +60,30 @@ func main() {
 		)
 	}
 
-	// --- Metrics ---
-	shutdownMetrics, err := telemetry.InitMetrics(
-		context.Background(),
-		cfg.OTELServiceName,
-		cfg.OTLPMetricsEndpoint,
-		cfg.OTLPProtocol,
-		cfg.EnvName,
-		otlpTLS,
-		otlpEgressProxyURL,
-		cfg.OTLPConnectTo,
-	)
-	if err != nil {
-		slog.Error("failed to initialize metrics", "err", err)
-		return
-	}
-	if shutdownMetrics != nil {
-		exporters = append(exporters, exporterShutdown{"metrics", shutdownMetrics})
-	}
-
-	if err = telemetry.StartRuntimeMetricsCollector(); err != nil {
-		slog.Error("failed to start runtime metrics collector",
-			"err", err)
-		return
-	}
-
-	// --- Tracing ---
-	shutdownTracing, err := telemetry.InitTracing(
-		context.Background(),
-		cfg.OTELServiceName,
-		cfg.OTLPTracesEndpoint,
-		cfg.OTLPProtocol,
-		cfg.EnvName,
-		otlpTLS,
-		otlpEgressProxyURL,
-		cfg.OTLPConnectTo,
-	)
-	if err != nil {
-		slog.Error("failed to initialize tracing", "err", err)
-		return
-	}
-	if shutdownTracing != nil {
-		exporters = append(exporters, exporterShutdown{"tracing", shutdownTracing})
-	}
-
-	// --- Application ---
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP,
 	)
 	defer cancel()
 
-	redactor := redact.NewRedactor()
-	if cfg.RedactionRulesFile != nil {
-		loader := redact.NewFileLoader(
-			*cfg.RedactionRulesFile, redactor, cfg.RedactionReloadInterval,
-		)
-		if err := loader.LoadInitial(); err != nil {
-			slog.Error(
-				"failed to load local redaction rules; refusing to start unredacted",
-				"error",
-				err,
-			)
-			os.Exit(1)
-		}
-		go func() {
-			if err := loader.Run(ctx); err != nil {
-				slog.Error("local redaction reload failed; exiting", "error", err)
-				os.Exit(1)
-			}
-		}()
-	} else if cfg.ConfigEnabled {
-		httpClient, clientErr := client.NewConfigHTTPClient(&cfg)
-		if clientErr != nil {
-			slog.Error("failed to build config transport", "error", clientErr)
-			os.Exit(1)
-		}
-		endpoint, endpointErr := cfg.ConfigURL()
-		if endpointErr != nil {
-			slog.Error("invalid config endpoint", "error", endpointErr)
-			os.Exit(1)
-		}
-		loader, loaderErr := redact.NewRemoteLoader(
-			httpClient,
-			endpoint,
-			redactor,
-			cfg.ConfigRefreshInterval,
-		)
-		if loaderErr == nil {
-			loaderErr = loader.LoadInitial(ctx)
-		}
-		if loaderErr != nil {
-			slog.Error(
-				"failed to load initial remote config; refusing to start unredacted",
-				"error",
-				loaderErr,
-			)
-			os.Exit(1)
-		}
-		go loader.Run(ctx)
-	}
-
-	cm, err := client.NewConnectionManager(&cfg, redactor)
+	redactor, err := startRedaction(ctx, &cfg)
 	if err != nil {
-		slog.Error("failed to create connection manager", "err", err)
-		return
+		slog.Error("refusing to start unredacted", "error", err)
+		os.Exit(1)
 	}
 
-	var rawTunnels router.RawTunnels
-	if os.Getenv("TRAVERSAL_PIPES") == "enabled" {
-		if tunnels, err := pipeserver.New(&cfg, redactor.RequiresInspection); err != nil {
-			// Raw pipes never stop the legacy transport.
-			slog.ErrorContext(ctx, "raw pipes cannot start; serving the legacy transport only",
-				"error", err)
-		} else {
-			rawTunnels = tunnels
-			done := tunnels.Start(ctx)
-			defer func() { <-done }()
-		}
+	// Probes answer with the tunnels' readiness, so the handler reads them
+	// once New has returned.
+	var tunnels *pipeserver.Tunnels
+	tunnels, err = pipeserver.New(&cfg, redactor,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			router.Readiness(tunnels).ServeHTTP(w, r)
+		}))
+	if err != nil {
+		slog.ErrorContext(ctx, "tunnels cannot start", "error", err)
+		os.Exit(1)
 	}
+	done := tunnels.Start(ctx)
 
 	slog.InfoContext(ctx, "traversal connector service starting",
 		"controller_logical_url", cfg.TraversalControllerURL,
@@ -244,45 +91,119 @@ func main() {
 		"controller_effective_address", effectiveAddress(
 			cfg.TraversalControllerConnectTo, cfg.TraversalControllerURL,
 		),
-		"max_tunnels", cfg.MaxTunnelsAllowed,
+		"tunnels", tunnels.Count,
 		"env", cfg.EnvName)
 
-	// Run a TLS connectivity test (equivalent to grpcurl -insecure -cert -key ... list).
-	if err = client.TestConnectivity(&cfg); err != nil {
-		slog.Error("connectivity test failed", "err", err)
+	if err = client.CheckConnectivity(&cfg); err != nil {
+		slog.Error("connectivity test failed", "error", err)
 	}
 
-	// Start HTTP server for health and readiness endpoints.
-	ginRouter := router.NewRouter(cfg, cm, rawTunnels)
+	defer serveProbes(&cfg, tunnels)()
+	<-done
+	slog.InfoContext(ctx, "traversal connector service shutting down")
+}
+
+// setupTelemetry starts log, metric and trace export over otlpTLS, and
+// returns what flushes them at exit. Local runs log text; others log JSON to
+// stdout, and to OTLP when its endpoint is set.
+func setupTelemetry(cfg *config.Config, otlpTLS *tls.Config) (flush func(), err error) {
+	var localLogs slog.Handler
+	if cfg.EnvLevel.IsDev() {
+		localLogs = logging.NewTextHandler(os.Stdout)
+	}
+	flushTelemetry, err := telemetry.Setup(context.Background(), telemetry.Config{
+		ServiceName:     cfg.OTELServiceName,
+		Env:             cfg.EnvName,
+		Protocol:        cfg.OTLPProtocol,
+		LogsEndpoint:    cfg.OTLPLogsEndpoint,
+		MetricsEndpoint: cfg.OTLPMetricsEndpoint,
+		TracesEndpoint:  cfg.OTLPTracesEndpoint,
+		TLS:             otlpTLS,
+		// EGRESS_PROXY_URL, the exporters' forward proxy: used only when
+		// mTLS is configured and the endpoint is TLS.
+		EgressProxy: parseOTLPEgressProxyURL(cfg.EgressProxyURL),
+		ConnectTo:   cfg.OTLPConnectTo,
+		Fallback:    localLogs,
+	})
+	return func() { flushTelemetry(shutdownContextTimeout) }, err
+}
+
+// startRedaction loads the redaction rules, from a local file or Traversal's
+// config endpoint, and keeps them current until ctx is done. A connector
+// whose first load fails must not start: it would forward unredacted.
+func startRedaction(ctx context.Context, cfg *config.Config) (*redact.Redactor, error) {
+	redactor := redact.NewRedactor()
+	switch {
+	case cfg.RedactionRulesFile != nil:
+		loader := redact.NewFileLoader(
+			*cfg.RedactionRulesFile, redactor, cfg.RedactionReloadInterval,
+		)
+		if err := loader.LoadInitial(); err != nil {
+			return nil, fmt.Errorf("local redaction rules: %w", err)
+		}
+		go func() {
+			if err := loader.Run(ctx); err != nil {
+				slog.Error("local redaction reload failed; exiting", "error", err)
+				os.Exit(1)
+			}
+		}()
+	case cfg.ConfigEnabled:
+		httpClient, err := client.NewConfigHTTPClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("config transport: %w", err)
+		}
+		endpoint, err := cfg.ConfigURL()
+		if err != nil {
+			return nil, fmt.Errorf("config endpoint: %w", err)
+		}
+		loader, err := redact.NewRemoteLoader(
+			httpClient,
+			endpoint,
+			redactor,
+			cfg.ConfigRefreshInterval,
+		)
+		if raw := os.Getenv("TRAVERSAL_CONFIG_KEYS"); err == nil && raw != "" {
+			// Installed keys: only configs Traversal signed for this
+			// connector apply. A bundle that does not parse refuses to start,
+			// rather than running with unsigned configs.
+			keys, keysErr := capability.ParseKeys([]byte(config.DecodePEM(raw)))
+			if keysErr != nil {
+				return nil, fmt.Errorf("TRAVERSAL_CONFIG_KEYS: %w", keysErr)
+			}
+			loader.RequireSignature(cfg.ConnectorID, keys)
+		}
+		if err == nil {
+			err = loader.LoadInitial(ctx)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("initial remote config: %w", err)
+		}
+		go loader.Run(ctx)
+	}
+	return redactor, nil
+}
+
+// serveProbes serves /healthz and /readyz on HTTP_PORT, and returns what
+// shuts the server down.
+func serveProbes(cfg *config.Config, tunnels router.Tunnels) (shutdown func()) {
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
-		Handler:           ginRouter,
+		Handler:           router.NewRouter(*cfg, tunnels),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	go func() {
 		slog.Info("HTTP server starting", "port", cfg.HTTPPort)
-		if serveErr := srv.ListenAndServe(); serveErr != nil &&
-			serveErr != http.ErrServerClosed {
-			slog.Error("HTTP server error", "err", serveErr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("HTTP server error", "error", err)
 		}
 	}()
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(
-			context.Background(), shutdownContextTimeout,
-		)
-		defer shutdownCancel()
-		if shutdownErr := srv.Shutdown(shutdownCtx); shutdownErr != nil {
-			slog.Error("failed to shutdown HTTP server",
-				"err", shutdownErr)
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownContextTimeout)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Error("failed to shutdown HTTP server", "error", err)
 		}
-	}()
-
-	if err = cm.Run(ctx); err != nil {
-		slog.ErrorContext(ctx,
-			"connection manager exited with error", "err", err)
 	}
-
-	slog.InfoContext(ctx, "traversal connector service shutting down")
 }
 
 func effectiveAddress(connectTo, logicalURL string) string {

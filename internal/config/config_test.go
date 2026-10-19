@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/connector-lib/env"
 )
 
 func ptrTo[T any](v T) *T { return &v }
@@ -79,17 +79,15 @@ func TestLoad(t *testing.T) {
 				EnvName:                      "test",
 				EnvLevel:                     env.EnvLevelDevelopment,
 				ConnectorID:                  "connector-1",
-				MaxTunnelsAllowed:            2,
-				ReconnectInterval:            5 * time.Second,
-				MaxBackoffDelay:              60 * time.Second,
 				RequestTimeout:               60 * time.Second,
 				MaxRequestBodySizeMB:         32,
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
+				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
-				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
@@ -108,17 +106,15 @@ func TestLoad(t *testing.T) {
 				EnvName:                      "test",
 				EnvLevel:                     env.EnvLevelDevelopment,
 				ConnectorID:                  "connector-1",
-				MaxTunnelsAllowed:            2,
-				ReconnectInterval:            5 * time.Second,
-				MaxBackoffDelay:              60 * time.Second,
 				RequestTimeout:               60 * time.Second,
 				MaxRequestBodySizeMB:         32,
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
+				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
-				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
@@ -131,13 +127,11 @@ func TestLoad(t *testing.T) {
 				"ENV_NAME":                            "production",
 				"TRAVERSAL_CONNECTOR_ID":              "connector-prod",
 				"ENV_LEVEL":                           "production",
-				"MAX_TUNNELS_ALLOWED":                 "10",
-				"RECONNECT_INTERVAL":                  "10m",
-				"MAX_BACKOFF_DELAY":                   "120s",
 				"REQUEST_TIMEOUT":                     "25s",
 				"MAX_REQUEST_BODY_SIZE_MB":            "16",
 				"MAX_RESPONSE_BODY_SIZE_MB":           "64",
 				"MAX_DECODED_RESPONSE_BODY_SIZE_MB":   "512",
+				"TRAVERSAL_REDACTION_MAX_CONCURRENT":  "4",
 				"TLS_CERT_BASE64":                     certPEM,
 				"TLS_KEY_BASE64":                      keyPEM,
 				"OTEL_SERVICE_NAME":                   "custom-traversal-connector",
@@ -152,13 +146,12 @@ func TestLoad(t *testing.T) {
 				EnvName:                      "production",
 				ConnectorID:                  "connector-prod",
 				EnvLevel:                     env.EnvLevelProduction,
-				MaxTunnelsAllowed:            10,
-				ReconnectInterval:            10 * time.Minute,
-				MaxBackoffDelay:              120 * time.Second,
 				RequestTimeout:               25 * time.Second,
 				MaxRequestBodySizeMB:         16,
 				MaxResponseBodySizeMB:        64,
 				MaxDecodedResponseBodySizeMB: 512,
+				MaxConcurrentRedactions:      4,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      &certPEM,
 				TLSKey:                       &keyPEM,
 				OTELServiceName:              "custom-traversal-connector",
@@ -166,7 +159,6 @@ func TestLoad(t *testing.T) {
 				OTLPTracesEndpoint:           "https://otlp.example.com:4317",
 				OTLPLogsEndpoint:             "https://otlp.example.com:4317",
 				OTLPProtocol:                 "grpc",
-				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
@@ -185,17 +177,15 @@ func TestLoad(t *testing.T) {
 				EnvName:                      "staging",
 				ConnectorID:                  "connector-staging",
 				EnvLevel:                     env.EnvLevelDevelopment,
-				MaxTunnelsAllowed:            2,
-				ReconnectInterval:            5 * time.Second,
-				MaxBackoffDelay:              60 * time.Second,
 				RequestTimeout:               60 * time.Second,
 				MaxRequestBodySizeMB:         32,
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
+				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
-				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
@@ -207,8 +197,6 @@ func TestLoad(t *testing.T) {
 				"ENV_NAME":                 "test",
 				"TRAVERSAL_CONTROLLER_URL": "http://localhost:9080",
 				"TRAVERSAL_CONNECTOR_ID":   "connector-1",
-				"RECONNECT_INTERVAL":       "invalid",
-				"MAX_BACKOFF_DELAY":        "also-invalid",
 				"REQUEST_TIMEOUT":          "nope",
 			},
 			expected: Config{
@@ -217,17 +205,15 @@ func TestLoad(t *testing.T) {
 				EnvName:                      "test",
 				ConnectorID:                  "connector-1",
 				EnvLevel:                     env.EnvLevelDevelopment,
-				MaxTunnelsAllowed:            2,
-				ReconnectInterval:            5 * time.Second,
-				MaxBackoffDelay:              60 * time.Second,
 				RequestTimeout:               60 * time.Second,
 				MaxRequestBodySizeMB:         32,
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
+				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
-				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
 				RedactionReloadInterval:      10 * time.Second,
@@ -384,6 +370,55 @@ func TestLoad_RejectsMalformedCert(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() returned nil error for malformed cert; expected parse error")
+	}
+}
+
+// TestLoad_RedactionConcurrencyIsStrict: TRAVERSAL_REDACTION_MAX_CONCURRENT
+// that is set but not a count from 1 to 1024 stops Load, naming the setting,
+// rather than running the default.
+func TestLoad_RedactionConcurrencyIsStrict(t *testing.T) {
+	for _, v := range []string{"eight", "0", "-1", "1025", "4.5"} {
+		t.Run(v, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_REDACTION_MAX_CONCURRENT", v)
+			_, err := Load()
+			if err == nil ||
+				!strings.HasPrefix(err.Error(), "TRAVERSAL_REDACTION_MAX_CONCURRENT:") {
+				t.Fatalf("Load() = %v, want a TRAVERSAL_REDACTION_MAX_CONCURRENT error", err)
+			}
+		})
+	}
+}
+
+// TestLoad_UncoveredStreamMaxLifetime: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME
+// is 15 minutes unset, the duration set, and stops Load when set but invalid.
+func TestLoad_UncoveredStreamMaxLifetime(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+		fails bool
+	}{{"", 15 * time.Minute, false}, {"5m", 5 * time.Minute, false}, {"0s", 0, false},
+		{"fifteen", 0, true}, {"-1m", 0, true}} {
+		t.Run(c.value, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME", c.value)
+			cfg, err := Load()
+			switch {
+			case c.fails && (err == nil ||
+				!strings.HasPrefix(err.Error(), "TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME:")):
+				t.Fatalf("Load() = %v, want a TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME error", err)
+			case !c.fails && (err != nil || cfg.UncoveredStreamMaxLifetime != c.want):
+				t.Fatalf("Load() = %v, %v; want %v", cfg.UncoveredStreamMaxLifetime, err, c.want)
+			}
+		})
 	}
 }
 
@@ -1017,13 +1052,14 @@ func assertCertificateTrusted(t *testing.T, cert *x509.Certificate, roots *x509.
 
 func clearEnv() {
 	envVars := []string{
-		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE", "MAX_TUNNELS_ALLOWED",
+		"HTTP_PORT", "TRAVERSAL_CONTROLLER_URL", "TRAVERSAL_CONNECTOR_ID", "ENV_NAME", "ENV_LEVEL", "ENV_FILE",
 		"TRAVERSAL_CONTROLLER_CONNECT_TO", "EGRESS_PROXY_URL",
 		"TRAVERSAL_CONFIG_ENABLED", "TRAVERSAL_CONFIG_ENDPOINT", "TRAVERSAL_CONFIG_REFRESH_INTERVAL",
 		"REDACTION_RULES_FILE", "REDACTION_RELOAD_INTERVAL",
-		"RECONNECT_INTERVAL", "MAX_BACKOFF_DELAY", "REQUEST_TIMEOUT",
+		"REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "MAX_RESPONSE_BODY_SIZE_MB",
-		"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
+		"MAX_DECODED_RESPONSE_BODY_SIZE_MB", "TRAVERSAL_REDACTION_MAX_CONCURRENT",
+		"TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
 		"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
 		"OTEL_SERVICE_NAME",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
