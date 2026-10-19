@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -39,20 +40,10 @@ type Config struct {
 // Setup starts the exporters cfg names and installs them as the global
 // providers and the default slog logger, then Go runtime metrics. The
 // returned flush is never nil, even with an error: defer it at once. It
-// drains each exporter started, traces and metrics before logs, giving each
-// up to timeout.
+// drains every exporter started at once, all within timeout.
 func Setup(ctx context.Context, cfg Config) (flush func(timeout time.Duration), err error) {
 	var shutdowns []func(context.Context) error
-	flush = func(timeout time.Duration) {
-		// In reverse, so logs written while metrics and traces flush ship.
-		for i := len(shutdowns) - 1; i >= 0; i-- {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			if err := shutdowns[i](ctx); err != nil {
-				slog.ErrorContext(ctx, "failed to flush telemetry", "error", err)
-			}
-			cancel()
-		}
-	}
+	flush = func(timeout time.Duration) { flushAll(shutdowns, timeout) }
 
 	if cfg.LogsEndpoint == "" {
 		handler := cfg.Fallback
@@ -87,4 +78,21 @@ func Setup(ctx context.Context, cfg Config) (flush func(timeout time.Duration), 
 	}
 	shutdowns = append(shutdowns, shutdown)
 	return flush, nil
+}
+
+// flushAll drains every exporter at once under one timeout, so together they
+// add one timeout, not one each, to a stopping pod's budget. A flush error is
+// logged to the default logger, which may be the exporter being drained.
+func flushAll(shutdowns []func(context.Context) error, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, shutdown := range shutdowns {
+		wg.Go(func() {
+			if err := shutdown(ctx); err != nil {
+				slog.ErrorContext(ctx, "failed to flush telemetry", "error", err)
+			}
+		})
+	}
+	wg.Wait()
 }

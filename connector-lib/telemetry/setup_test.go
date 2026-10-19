@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,5 +61,25 @@ func TestSetupFlushExports(t *testing.T) {
 		}
 	default:
 		t.Fatal("flush exported no metrics")
+	}
+}
+
+// TestFlushSharesOneDeadline: exporters that each take the whole timeout
+// flush in about one timeout, not one each, so a stopping pod's budget holds,
+// and every one of them runs.
+func TestFlushSharesOneDeadline(t *testing.T) {
+	var ran atomic.Int32
+	stall := func(ctx context.Context) error {
+		<-ctx.Done()
+		ran.Add(1)
+		return ctx.Err()
+	}
+	start := time.Now()
+	flushAll([]func(context.Context) error{stall, stall, stall}, 200*time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Errorf("flush took %v for a 200ms timeout", elapsed)
+	}
+	if ran.Load() != 3 {
+		t.Errorf("%d of 3 exporters flushed", ran.Load())
 	}
 }
