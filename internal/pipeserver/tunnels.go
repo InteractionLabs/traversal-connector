@@ -104,7 +104,10 @@ func (t *Tunnels) hold(ctx context.Context) {
 		}
 		wait := retry.NextBackOff()
 		if err == nil {
-			wait = 0 // the edge controller asked for a replacement
+			// The edge controller asked for a replacement: not a failure, so
+			// the next failure's wait starts over.
+			retry.Reset()
+			wait = 0
 		}
 		slog.InfoContext(ctx, "tunnel down; redialing", "error", err, "in", wait)
 		select {

@@ -282,6 +282,24 @@ func TestPipes(t *testing.T) {
 	<-done
 }
 
+// nextTunnel is the next tunnel accept takes, failing t if none comes within.
+func nextTunnel(
+	t *testing.T,
+	accept func() *http.ClientConn,
+	within time.Duration,
+) *http.ClientConn {
+	t.Helper()
+	got := make(chan *http.ClientConn, 1)
+	go func() { got <- accept() }()
+	select {
+	case cc := <-got:
+		return cc
+	case <-time.After(within):
+		t.Fatalf("no tunnel within %v", within)
+		return nil
+	}
+}
+
 // TestRedial: a tunnel the edge controller drops is redialed, and a drain
 // request gets a replacement at once while the old tunnel stays open.
 func TestRedial(t *testing.T) {
@@ -291,18 +309,7 @@ func TestRedial(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	tunnels.Start(ctx)
-	next := func(within time.Duration) *http.ClientConn {
-		t.Helper()
-		got := make(chan *http.ClientConn, 1)
-		go func() { got <- accept() }()
-		select {
-		case cc := <-got:
-			return cc
-		case <-time.After(within):
-			t.Fatalf("no tunnel within %v", within)
-			return nil
-		}
-	}
+	next := func(within time.Duration) *http.ClientConn { return nextTunnel(t, accept, within) }
 	first := next(5 * time.Second)
 	_ = first.Close() // the edge controller drops the tunnel
 	second := next(5 * time.Second)
@@ -317,6 +324,31 @@ func TestRedial(t *testing.T) {
 	if second.Available() == 0 {
 		t.Error("the replaced tunnel closed before the edge controller closed it")
 	}
+}
+
+// TestRedialAfterReplacements: replacements the edge controller asks for do
+// not grow the redial backoff, so a tunnel that then fails is redialed after
+// the initial 0.5-1 s, not the 4-8 s three earlier waits would have grown it to.
+func TestRedialAfterReplacements(t *testing.T) {
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1,
+		Server: &Server{ConnectorID: connector, metrics: testMetrics(t)}}
+	accept := controller(t, tunnels)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tunnels.Start(ctx)
+	next := func(within time.Duration) *http.ClientConn { return nextTunnel(t, accept, within) }
+	cc := next(5 * time.Second)
+	for range 3 {
+		req, _ := http.NewRequest(rawpipe.DrainMethod, "http://tunnel/", http.NoBody)
+		resp, err := cc.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		cc = next(500 * time.Millisecond)
+	}
+	_ = cc.Close() // a genuine failure
+	next(1500 * time.Millisecond)
 }
 
 // TestRedialBackoff: redial waits double from 0.5-1 s and stay within
