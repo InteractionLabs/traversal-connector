@@ -528,7 +528,12 @@ func TestUncoveredStreamCap(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		ended := make(chan error, 1)
 		go func() {
-			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://events.internal/", nil)
+			req, _ := http.NewRequestWithContext(
+				ctx,
+				http.MethodGet,
+				"http://events.internal/",
+				nil,
+			)
 			resp, err := h.client("events.internal:80", false).Do(req)
 			if err == nil {
 				_, err = io.ReadAll(resp.Body)
