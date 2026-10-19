@@ -18,6 +18,15 @@ const (
 	attrRefusalReason   = "refusal_reason"
 )
 
+// upstreamLatencyBucketsMs are the upstream latency histogram boundaries in
+// milliseconds. The highest finite bucket matches config.DefaultRequestTimeout
+// (60s) so slow and timed-out requests stay visible instead of all landing in
+// +Inf above the SDK default ceiling of 10s.
+var upstreamLatencyBucketsMs = []float64{
+	5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+	10000, 15000, 20000, 30000, 45000, 60000,
+}
+
 type metrics struct {
 	requests    metric.Int64Counter
 	latency     metric.Float64Histogram
@@ -34,7 +43,8 @@ func newMetrics() (*metrics, error) {
 		metric.WithDescription("Upstream HTTP requests, by status"))
 	m.latency, errs[1] = meter.Float64Histogram(telemetry.MetricUpstreamLatency,
 		metric.WithDescription("Time to an upstream response's headers"),
-		metric.WithUnit(connector.UnitMilliseconds))
+		metric.WithUnit(connector.UnitMilliseconds),
+		metric.WithExplicitBucketBoundaries(upstreamLatencyBucketsMs...))
 	m.encodings, errs[2] = meter.Int64Counter(telemetry.MetricResponseContentEncodingTotal,
 		metric.WithDescription("Upstream responses by content encoding, per target host"))
 	m.refusals, errs[3] = meter.Int64Counter(telemetry.MetricResponseRefusalsTotal,
