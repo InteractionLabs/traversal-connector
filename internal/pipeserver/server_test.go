@@ -3,8 +3,12 @@ package pipeserver
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +43,60 @@ func TestPipeRefusals(t *testing.T) {
 	h.tunnels.Server.pipes.Drain()
 	if r := refusal("db.internal:443", h.token("db.internal", 443)); r != rawpipe.Draining {
 		t.Errorf("draining: %s", r)
+	}
+}
+
+// logBuffer is a goroutine-safe log sink.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestPipeOpenedLog: the audit line naming a pipe's capability is logged only
+// for a pipe that opens, never for one refused after its capability verified.
+func TestPipeOpenedLog(t *testing.T) {
+	logs := &logBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	h := newHarness(t, nil, nil, "127.0.0.1:1")
+
+	// Verified, then refused: the probe name on another port.
+	_, err := rawpipe.Connect(t.Context(), h.cc, "tunnel", rawpipe.ProbeHost+":80",
+		http.Header{rawpipe.HeaderCapability: {h.token(rawpipe.ProbeHost, 80)}}, 5*time.Second)
+	if _, ok := errors.AsType[*rawpipe.Refusal](err); !ok {
+		t.Fatalf("probe host on port 80: %v, want a refusal", err)
+	}
+	if got := logs.String(); strings.Contains(got, "jti=") {
+		t.Errorf("a refused pipe's capability was logged:\n%s", got)
+	}
+
+	if _, err := h.open("db.internal:443", nil); err != nil {
+		t.Fatal(err)
+	}
+	opened := regexp.MustCompile(`msg="pipe opened" .*jti=.*consumer_id=consumer`)
+	deadline := time.Now().Add(5 * time.Second)
+	for !opened.MatchString(logs.String()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := logs.String()
+	if !opened.MatchString(got) {
+		t.Errorf("no pipe opened line with the capability:\n%s", got)
+	}
+	if n := strings.Count(got, "jti="); n != 1 {
+		t.Errorf("%d capability lines for one opened pipe and one refused:\n%s", n, got)
 	}
 }
 

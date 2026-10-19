@@ -123,7 +123,7 @@ func (s *Server) Drain(ctx context.Context) {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	log := slog.With("target", r.Host)
-	target, err := s.open(r)
+	target, claims, err := s.open(r)
 	if err != nil {
 		reason := rawpipe.ReasonOf(err, rawpipe.ProtocolError)
 		s.metrics.opened(reason)
@@ -138,6 +138,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		log.Info("pipe", "outcome", "accept_failed", "error", err)
 		return
 	}
+	// The audit line: logged only for a pipe admitted and accepted, so a pipe
+	// refused after its capability verified is never taken for one that ran.
+	log.Info("pipe opened", "jti", claims.JTI, "organization_id", claims.OrganizationID,
+		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
+		"session_id", claims.SessionID)
 	s.metrics.opened("")
 	s.metrics.pipes.Add(context.Background(), 1)
 	start := time.Now()
@@ -152,33 +157,31 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	stream.Finish()
 }
 
-// open checks and admits the pipe, and returns its destination.
-func (s *Server) open(r *http.Request) (*url.URL, error) {
+// open checks and admits the pipe, and returns its destination and its
+// verified capability.
+func (s *Server) open(r *http.Request) (*url.URL, *capability.Claims, error) {
 	host, port, ok := capability.SplitAuthority(r.Host)
 	switch {
 	case s.pipes.Draining():
-		return nil, rawpipe.Errorf(rawpipe.Draining, "draining")
+		return nil, nil, rawpipe.Errorf(rawpipe.Draining, "draining")
 	case r.Method != http.MethodConnect || !ok:
-		return nil, rawpipe.Errorf(rawpipe.ProtocolError,
+		return nil, nil, rawpipe.Errorf(rawpipe.ProtocolError,
 			"expected CONNECT to a canonical host:port")
 	}
 	claims, err := s.Verifier.Verify(r.Header.Get(rawpipe.HeaderCapability), s.ConnectorID,
 		host, port)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
-		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
-		"session_id", claims.SessionID, "target", r.Host)
 	authority := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	if host == rawpipe.ProbeHost && authority != rawpipe.ProbeAuthority {
 		// Never dialed: a customer resolver might answer for the name.
-		return nil, rawpipe.Errorf(rawpipe.WrongDestination, "probes are on port 443")
+		return nil, nil, rawpipe.Errorf(rawpipe.WrongDestination, "probes are on port 443")
 	}
 	if !s.pipes.Add(s.MaxPipes) {
-		return nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
+		return nil, nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
-	return &url.URL{Host: authority}, nil
+	return &url.URL{Host: authority}, claims, nil
 }
 
 // servePipe runs the pipe's TLS and serves the protocol it negotiated until
