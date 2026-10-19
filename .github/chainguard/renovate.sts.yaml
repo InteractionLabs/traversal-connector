@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
+# Lets the Renovate CronJob on the shared-resources cluster (helm/renovate)
+# push update branches and open PRs in this repo. The issuer changes if the
+# cluster is recreated.
+issuer: https://oidc.eks.us-west-2.amazonaws.com/id/6A0050026B709636C47806AD2E2DE60E
+subject: system:serviceaccount:renovate:renovate
+
+permissions:
+  contents: write
+  pull_requests: write
+  # Renovate reads issues on every run and the check and commit statuses of its
+  # own PRs. The Dependency Dashboard is off, so it never needs to write issues.
+  issues: read
+  checks: read
+  statuses: read
