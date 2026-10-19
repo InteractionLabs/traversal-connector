@@ -7,11 +7,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -225,6 +228,79 @@ func TestAcceptFailedCounted(t *testing.T) {
 	}
 	if !s.pipes.Add(s.MaxPipes) {
 		t.Error("the failed pipe still holds its slot")
+	}
+}
+
+// logBuffer is a goroutine-safe log sink.
+type logBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+// take returns what was logged since the last take.
+func (l *logBuffer) take() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := l.b.String()
+	l.b.Reset()
+	return s
+}
+
+// captureLogs redirects the default logger for the test.
+func captureLogs(t *testing.T) *logBuffer {
+	t.Helper()
+	logs := &logBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+// TestPipeOpenedLog: the audit line naming a pipe's capability is logged only
+// for a pipe that opens, never for one refused after its capability verified.
+func TestPipeOpenedLog(t *testing.T) {
+	logs := captureLogs(t)
+	verifier, token := testCapability(t)
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1, Kids: []string{"k"}, Server: &Server{
+		ConnectorID: connector, Verifier: verifier, Policy: loopback(echo(t)), MaxPipes: 1,
+		metrics: testMetrics(t),
+	}}
+	accept := controller(t, tunnels)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tunnels.Start(ctx)
+	cc := accept()
+
+	tunnels.Server.RequiresInspection = func(string) bool { return true }
+	if status, _, _ := open(t, cc, token(), "", nil); status != 403 {
+		t.Fatalf("redacted host: %d", status)
+	}
+	tunnels.Server.RequiresInspection = nil
+	if got := logs.take(); strings.Contains(got, "jti=") ||
+		!strings.Contains(got, "reason=inspection_required") {
+		t.Errorf("a refused pipe's logs:\n%s", got)
+	}
+
+	hold := make(chan struct{})
+	_, _, held := open(t, cc, token(), "held", hold)
+	if status, _, _ := open(t, cc, token(), "", nil); status != 503 {
+		t.Fatalf("over capacity: %d", status)
+	}
+	close(hold)
+	_ = read(held)
+	got := logs.take()
+	if n := strings.Count(got, "jti="); n != 1 {
+		t.Errorf("%d capability lines for one opened pipe and one refused:\n%s", n, got)
+	}
+	opened := regexp.MustCompile(`msg="pipe opened" .*jti=.*consumer_id=consumer`)
+	if !opened.MatchString(got) {
+		t.Errorf("no pipe opened line with the capability:\n%s", got)
 	}
 }
 

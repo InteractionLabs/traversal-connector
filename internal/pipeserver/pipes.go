@@ -114,7 +114,7 @@ func (s *Server) Drain(ctx context.Context) {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	log := slog.With("target", r.Host)
-	conn, upstream, err := s.open(r)
+	conn, upstream, claims, err := s.open(r)
 	if err != nil {
 		reason := rawpipe.ReasonOf(err, rawpipe.DialFailed)
 		s.metrics.opened(reason)
@@ -128,8 +128,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = conn.Close()
 		s.metrics.acceptFailed()
+		log.Info("pipe", "upstream", upstream, "outcome", "accept_failed", "error", err)
 		return
 	}
+	// The audit line: logged only for a pipe admitted and accepted, so a pipe
+	// refused after its capability verified is never taken for one that ran.
+	log.Info("pipe opened", "jti", claims.JTI, "organization_id", claims.OrganizationID,
+		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
+		"session_id", claims.SessionID, "upstream", upstream)
 	s.metrics.opened("")
 	s.metrics.pipes.Add(context.Background(), 1)
 	sent, received, outcome := halfconn.Splice(stream, halfconn.ConnEnd(conn),
@@ -142,39 +148,39 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	stream.Finish()
 }
 
-// open checks and admits the pipe and dials its destination.
-func (s *Server) open(r *http.Request) (halfconn.Conn, string, error) {
+// open checks and admits the pipe and dials its destination. It returns the
+// pipe's verified capability with its connection.
+func (s *Server) open(r *http.Request) (halfconn.Conn, string, *capability.Claims, error) {
 	host, port, ok := capability.SplitAuthority(r.Host)
 	switch {
 	case s.pipes.Draining():
-		return nil, "", rawpipe.Errorf(rawpipe.Draining, "draining")
+		return nil, "", nil, rawpipe.Errorf(rawpipe.Draining, "draining")
 	case r.Method != http.MethodConnect || !ok:
-		return nil, "", rawpipe.Errorf(rawpipe.ProtocolError,
+		return nil, "", nil, rawpipe.Errorf(rawpipe.ProtocolError,
 			"expected CONNECT to a canonical host:port")
 	case s.RefuseTCP:
-		return nil, "", rawpipe.Errorf(rawpipe.TCPRefused,
+		return nil, "", nil, rawpipe.Errorf(rawpipe.TCPRefused,
 			"raw TCP pipes are off on this connector")
 	}
 	claims, err := s.Verifier.Verify(r.Header.Get(rawpipe.HeaderCapability), s.ConnectorID,
 		host, port)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	slog.Info("pipe authorized", "jti", claims.JTI, "organization_id", claims.OrganizationID,
-		"integration_id", claims.IntegrationID, "consumer_id", claims.ConsumerID,
-		"session_id", claims.SessionID, "target", r.Host)
 	if !s.pipes.Add(s.MaxPipes) {
-		return nil, "", rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
+		return nil, "", nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")
 	}
 	if s.RequiresInspection != nil && s.RequiresInspection(host) {
 		s.pipes.Done()
-		return nil, "", rawpipe.Errorf(rawpipe.InspectionRequired, "redaction rules cover the host")
+		return nil, "", nil, rawpipe.Errorf(rawpipe.InspectionRequired,
+			"redaction rules cover the host")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), destinationDialTimeout)
 	defer cancel()
 	conn, upstream, err := s.Policy.Dial(ctx, host, port)
 	if err != nil {
 		s.pipes.Done()
+		return nil, "", nil, err
 	}
-	return conn, upstream, err
+	return conn, upstream, claims, nil
 }
