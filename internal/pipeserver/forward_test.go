@@ -287,9 +287,11 @@ func TestRedaction(t *testing.T) {
 		switch {
 		case resp.StatusCode != c.status:
 			t.Errorf("%s: %d %q, want %d", c.path, resp.StatusCode, body, c.status)
-		case c.status == 200 && (string(body) != c.body || resp.Header.Get("X-Traversal-Redacted") != "true"):
+		case c.status == 200 &&
+			(string(body) != c.body || resp.Header.Get("X-Traversal-Redacted") != "true"):
 			t.Errorf("%s: %q %v", c.path, body, resp.Header)
-		case c.status == 502 && resp.Header.Get(rawpipe.HeaderReason) != string(rawpipe.RedactionUnsupported):
+		case c.status == 502 &&
+			resp.Header.Get(rawpipe.HeaderReason) != string(rawpipe.RedactionUnsupported):
 			t.Errorf("%s: reason %q", c.path, resp.Header.Get(rawpipe.HeaderReason))
 		case strings.Contains(string(body), "user@example.com"):
 			t.Errorf("%s: unredacted %q", c.path, body)
