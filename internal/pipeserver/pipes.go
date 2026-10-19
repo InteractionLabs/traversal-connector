@@ -158,14 +158,16 @@ func (s *Server) open(r *http.Request) (halfconn.Conn, string, *capability.Claim
 	case r.Method != http.MethodConnect || !ok:
 		return nil, "", nil, rawpipe.Errorf(rawpipe.ProtocolError,
 			"expected CONNECT to a canonical host:port")
-	case s.RefuseTCP:
-		return nil, "", nil, rawpipe.Errorf(rawpipe.TCPRefused,
-			"raw TCP pipes are off on this connector")
 	}
 	claims, err := s.Verifier.Verify(r.Header.Get(rawpipe.HeaderCapability), s.ConnectorID,
 		host, port)
 	if err != nil {
 		return nil, "", nil, err
+	}
+	// After verification, so only a valid capability learns the policy.
+	if s.RefuseTCP {
+		return nil, "", nil, rawpipe.Errorf(rawpipe.TCPRefused,
+			"raw TCP pipes are off on this connector")
 	}
 	if !s.pipes.Add(s.MaxPipes) {
 		return nil, "", nil, rawpipe.Errorf(rawpipe.Capacity, "pipe cap reached")

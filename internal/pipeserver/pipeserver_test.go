@@ -331,6 +331,11 @@ func TestPipes(t *testing.T) {
 		reason != string(rawpipe.TCPRefused) {
 		t.Fatalf("refused: %d %s", status, reason)
 	}
+	// Only a verified capability learns the switch is on.
+	if status, reason, _ := open(t, cc, "bogus", "", nil); status != 401 ||
+		reason != string(rawpipe.InvalidCapability) {
+		t.Fatalf("bad capability with raw TCP refused: %d %s", status, reason)
+	}
 	tunnels.Server.RefuseTCP = false
 	// A raw pipe to a host redaction rules cover is refused before any dial.
 	tunnels.Server.RequiresInspection = func(h string) bool { return h == "db.internal" }
