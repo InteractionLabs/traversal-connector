@@ -25,4 +25,12 @@ const (
 	MetricResponseContentEncodingTotal     = "connector.response_content_encoding_total"
 	MetricResponseRefusalsTotal            = "connector.response_refusals_total"
 	MetricDecodedResponseBodySize          = "connector.decoded_response_body_size"
+	// Raw pipes (internal/pipeserver).
+	MetricRawTunnelsUp       = "connector.raw_tunnels_up"
+	MetricRawTunnelDialTotal = "connector.raw_tunnel_dial_total"
+	MetricRawPipeOpenTotal   = "connector.raw_pipe_open_total"
+	MetricRawPipes           = "connector.raw_pipes"
+	MetricRawPipeEndTotal    = "connector.raw_pipe_end_total"
+	MetricRawPipeBytes       = "connector.raw_pipe_bytes_total"
+	MetricCapabilityTrust    = "connector.capability_trust"
 )

@@ -174,6 +174,44 @@ assert_render_fails both-sources 'mutually exclusive' \
   "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
 assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
 
+# Raw pipes: off by default; on, each set value becomes its setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_PIPES'
+render raw "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+  --set-string pipes.capabilityIssuer=traversal-raw-tunnel/ci \
+  --set-string pipes.capabilityKeys=a2V5cw== \
+  --set pipes.tunnelCount=4 --set pipes.egressProxyResolves=true \
+  --set pipes.refuseTCP=true \
+  --set-string 'pipes.forbiddenCIDRs=10.9.0.0/16\,fd00:1::/32'
+for want in 'TRAVERSAL_PIPES\n              value: "enabled"' \
+  'TRAVERSAL_CAPABILITY_ISSUER\n              value: "traversal-raw-tunnel/ci"' \
+  'TRAVERSAL_CAPABILITY_KEYS\n              value: "a2V5cw=="' \
+  'TRAVERSAL_TUNNELS_COUNT\n              value: "4"' \
+  'TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES\n              value: "true"' \
+  'TRAVERSAL_PIPES_REFUSE_TCP\n              value: "true"' \
+  'TRAVERSAL_PIPES_FORBIDDEN_CIDRS\n              value: "10.9.0.0/16,fd00:1::/32"'; do
+  assert_contains "$tmp_dir/raw.yaml" "$(printf "            - name: $want")"
+done
+assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_PIPES_MAX'
+assert_render_fails raw-boolean 'pipes.enabled must be a boolean' "${common[@]}" --set-string pipes.enabled=false
+
+# Capability roots: current, then next, as one PEM bundle; none, no setting.
+assert_not_contains "$tmp_dir/raw.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
+current_root=$'-----BEGIN CERTIFICATE-----\nY3VycmVudA==\n-----END CERTIFICATE-----\n'
+next_root=$'-----BEGIN CERTIFICATE-----\nbmV4dA==\n-----END CERTIFICATE-----\n'
+capability_roots() {
+  awk '/name: TRAVERSAL_CAPABILITY_ROOTS/ { getline; gsub(/.*value: "|"$/, ""); print }' "$1" | base64 -d
+}
+render raw-roots "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+  --set-string pipes.trustedRoots.current="$current_root"
+[[ "$(capability_roots "$tmp_dir/raw-roots.yaml")" == "${current_root%$'\n'}" ]] ||
+  fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root"
+assert_not_contains "$tmp_dir/raw-roots.yaml" 'TRAVERSAL_CAPABILITY_KEYS'
+render raw-roots-rotation "$fixtures/direct-export-values.yaml" --set pipes.enabled=true \
+  --set-string pipes.trustedRoots.current="$current_root" \
+  --set-string pipes.trustedRoots.next="$next_root"
+[[ "$(capability_roots "$tmp_dir/raw-roots-rotation.yaml")" == "$current_root${next_root%$'\n'}" ]] ||
+  fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
+
 render config-disabled "$fixtures/direct-export-values.yaml" --set configUpdates.enabled=false
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'TRAVERSAL_CONFIG_ENABLED'
 assert_not_contains "$tmp_dir/config-disabled.yaml" 'REDACTION_RULES_FILE'
@@ -196,6 +234,12 @@ for scenario in direct sidecar disabled; do
   assert_contains "$tmp_dir/$scenario.yaml" $'          securityContext:\n            allowPrivilegeEscalation: false\n            capabilities:\n              drop:\n              - ALL\n            readOnlyRootFilesystem: true\n            runAsGroup: 65532\n            runAsNonRoot: true\n            runAsUser: 65532\n            seccompProfile:\n              type: RuntimeDefault\n          env:'
 done
 assert_contains "$tmp_dir/sidecar.yaml" 'mountPath: /var/lib/telemetry-sidecar'
+
+# The pod's grace covers the connector's stop: up to 5 s of HTTP shutdown, 20 s
+# of pipe drain, and 5 s of exporter shutdown.
+assert_contains "$tmp_dir/direct.yaml" $'      terminationGracePeriodSeconds: 40\n'
+render grace "$fixtures/direct-export-values.yaml" --set terminationGracePeriodSeconds=90
+assert_contains "$tmp_dir/grace.yaml" $'      terminationGracePeriodSeconds: 90\n'
 
 render security-overrides "$fixtures/direct-export-values.yaml" \
   --set podSecurityContext.runAsGroup=10001 \
