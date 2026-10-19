@@ -353,6 +353,12 @@ applies either way. As in #67, that proxy resolves hostnames unless
 `TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES` is set. When both are set, `TRAVERSAL_PIPES_EGRESS_PROXY` wins
 and the connector logs that the environment proxy is ignored.
 
+Whenever the proxy resolves hostnames, the connector warns once at start, as
+its address floor then covers only IP literals. Each dial handed to the proxy
+is counted in `connector.egress_proxy_unresolved_dial_total`, by `target_kind`:
+`hostname` (resolved by the proxy, not checked by the connector) or `ip`. A
+dial the dial policy refuses never reaches the proxy and is not counted.
+
 ### Redaction
 
 Choose either a local TOML rules file or S3-backed remote (OTA) configuration.

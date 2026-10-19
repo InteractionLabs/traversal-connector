@@ -118,13 +118,19 @@ func newPolicy(e *env.Reader) (upstream.Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Proxy != nil && cfg.ProxyResolves {
-		slog.Warn("the egress proxy resolves destination hostnames: the connector's " +
-			"loopback, link-local and metadata floor applies only to IP literals, and the " +
-			"proxy must refuse those addresses itself (TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES)")
+	viaProxy := proxied.Dial
+	if cfg.Proxy != nil {
+		if cfg.ProxyResolves {
+			slog.Warn("the egress proxy resolves destination hostnames: the connector's " +
+				"loopback, link-local and metadata floor applies only to IP literals, and the " +
+				"proxy must refuse those addresses itself (TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES)")
+		}
+		if viaProxy, err = countProxyDials(proxied.Dial); err != nil {
+			return nil, err
+		}
 	}
 	if direct == nil {
-		return proxied.Dial, nil
+		return viaProxy, nil
 	}
 	cfg.Proxy = nil
 	unproxied, err := dialpolicy.New(cfg)
@@ -135,7 +141,7 @@ func newPolicy(e *env.Reader) (upstream.Dialer, error) {
 		if direct(host, port) {
 			return unproxied.Dial(ctx, host, port)
 		}
-		return proxied.Dial(ctx, host, port)
+		return viaProxy(ctx, host, port)
 	}, nil
 }
 

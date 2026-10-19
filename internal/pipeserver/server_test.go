@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -117,16 +118,16 @@ func TestTunnelServerLimits(t *testing.T) {
 	}
 }
 
-// captureOpens installs a collectable meter provider for the test; it must
-// run before newMetrics. The returned func is the raw_pipe_open_total count
-// with outcome o.
-func captureOpens(t *testing.T) (opens func(o string) int64) {
+// captureCounter installs a collectable meter provider for the test; it must
+// run before the instruments are created. The returned func is the count of
+// the counter name with attribute key set to v.
+func captureCounter(t *testing.T, name, key string) (count func(v string) int64) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	previous := otel.GetMeterProvider()
 	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	t.Cleanup(func() { otel.SetMeterProvider(previous) })
-	return func(o string) int64 {
+	return func(v string) int64 {
 		t.Helper()
 		var rm metricdata.ResourceMetrics
 		if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -136,11 +137,11 @@ func captureOpens(t *testing.T) (opens func(o string) int64) {
 		for _, scope := range rm.ScopeMetrics {
 			for _, m := range scope.Metrics {
 				sum, ok := m.Data.(metricdata.Sum[int64])
-				if m.Name != telemetry.MetricRawPipeOpenTotal || !ok {
+				if m.Name != name || !ok {
 					continue
 				}
 				for _, p := range sum.DataPoints {
-					if v, _ := p.Attributes.Value("outcome"); v.AsString() == o {
+					if got, _ := p.Attributes.Value(attribute.Key(key)); got.AsString() == v {
 						n += p.Value
 					}
 				}
@@ -154,7 +155,7 @@ func captureOpens(t *testing.T) (opens func(o string) int64) {
 // accepted (here a ResponseRecorder, which cannot run full duplex) is counted
 // as accept_failed, and frees its slot.
 func TestAcceptFailedCounted(t *testing.T) {
-	opens := captureOpens(t)
+	opens := captureCounter(t, telemetry.MetricRawPipeOpenTotal, "outcome")
 	h := newHarness(t, nil, nil, "127.0.0.1:1")
 	s := &Server{ConnectorID: connector, Verifier: h.tunnels.Server.Verifier, MaxPipes: 1,
 		metrics: testMetrics(t)}

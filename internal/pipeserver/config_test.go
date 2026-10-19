@@ -29,6 +29,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/internal/config"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // connectorConfig is a connector config whose client certificate names
@@ -326,6 +327,39 @@ func TestEgressProxyFromEnvironment(t *testing.T) {
 				t.Fatalf("went %s, want %s (proxy saw %v)", got, c.via, connects())
 			}
 		})
+	}
+}
+
+// TestUnresolvedProxyDials: every dial handed to the egress proxy is counted
+// by whether it names a hostname, which the proxy resolves, or an IP; a
+// refused or direct dial is not.
+func TestUnresolvedProxyDials(t *testing.T) {
+	dials := captureCounter(t, telemetry.MetricEgressProxyUnresolvedDialTotal, "target_kind")
+	proxyURL, _ := recordingProxy(t)
+	for _, k := range []string{"TRAVERSAL_PIPES_EGRESS_PROXY",
+		"TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
+		"http_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("HTTPS_PROXY", proxyURL)
+	t.Setenv("NO_PROXY", "direct.internal")
+	dial, err := newPolicy(&env.Reader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"db.internal", "api.internal", "192.0.2.10", "169.254.169.254",
+		"direct.internal"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		if conn, _, err := dial(ctx, host, 443); err == nil {
+			_ = conn.Close()
+		}
+		cancel()
+	}
+	if got := dials("hostname"); got != 2 {
+		t.Errorf("hostname dials = %d, want 2", got)
+	}
+	if got := dials("ip"); got != 1 {
+		t.Errorf("ip dials = %d, want 1 (the forbidden one is refused before the proxy)", got)
 	}
 }
 

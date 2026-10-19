@@ -28,4 +28,8 @@ const (
 	MetricRawPipeEndTotal    = "connector.raw_pipe_end_total"
 	MetricRawPipeBytes       = "connector.raw_pipe_bytes_total"
 	MetricCapabilityTrust    = "connector.capability_trust"
+	// MetricEgressProxyUnresolvedDialTotal counts dials handed to the egress
+	// proxy, by target_kind: hostname (the proxy resolves it, so the
+	// connector's address floor did not see its addresses) or ip.
+	MetricEgressProxyUnresolvedDialTotal = "connector.egress_proxy_unresolved_dial_total"
 )
