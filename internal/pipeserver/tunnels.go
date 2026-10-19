@@ -35,8 +35,10 @@ type Tunnels struct {
 }
 
 const (
-	// drainGrace is how long a stopping connector lets open pipes finish; it
-	// stays under the pod's 30 s termination grace period.
+	// drainGrace is how long a stopping connector lets open pipes finish. With
+	// the HTTP server's shutdown (up to 5 s, overlapping the drain) and the
+	// telemetry exporters' shared 5 s shutdown after it, a stop takes at most
+	// about 30 s: under the chart's 40 s terminationGracePeriodSeconds.
 	drainGrace = 20 * time.Second
 	// dialTimeout bounds a tunnel's dial and TLS handshake.
 	dialTimeout = 15 * time.Second

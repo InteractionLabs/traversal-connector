@@ -235,6 +235,12 @@ for scenario in direct sidecar disabled; do
 done
 assert_contains "$tmp_dir/sidecar.yaml" 'mountPath: /var/lib/telemetry-sidecar'
 
+# The pod's grace covers the connector's stop: up to 5 s of HTTP shutdown, 20 s
+# of pipe drain, and 5 s of exporter shutdown.
+assert_contains "$tmp_dir/direct.yaml" $'      terminationGracePeriodSeconds: 40\n'
+render grace "$fixtures/direct-export-values.yaml" --set terminationGracePeriodSeconds=90
+assert_contains "$tmp_dir/grace.yaml" $'      terminationGracePeriodSeconds: 90\n'
+
 render security-overrides "$fixtures/direct-export-values.yaml" \
   --set podSecurityContext.runAsGroup=10001 \
   --set securityContext.runAsUser=10001

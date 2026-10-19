@@ -227,6 +227,11 @@ probes:
     periodSeconds: 10
 
 # ─── Pod / scheduling ────────────────────────────────────────────────────────
+# A stopping connector takes at most about 30 s: up to 20 s for open pipes to
+# finish, up to 5 s of HTTP shutdown, and 5 s for telemetry to flush. Keep this
+# above that, or the pod is killed mid-drain.
+terminationGracePeriodSeconds: 40
+
 podSecurityContext:
   fsGroup: 65532
   seccompProfile:

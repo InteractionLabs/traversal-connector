@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,29 @@ const (
 	shutdownContextTimeout = 5 * time.Second
 	readHeaderTimeout      = 5 * time.Second
 )
+
+// exporterShutdown is one telemetry exporter's shutdown, named for its log line.
+type exporterShutdown struct {
+	name     string
+	shutdown func(context.Context) error
+}
+
+// shutdownExporters runs every exporter's shutdown at once under one
+// shutdownContextTimeout, so together they add one timeout, not one each, to
+// a stopping pod's budget.
+func shutdownExporters(exporters []exporterShutdown) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownContextTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, e := range exporters {
+		wg.Go(func() {
+			if err := e.shutdown(ctx); err != nil {
+				slog.ErrorContext(ctx, "failed to shutdown "+e.name, "err", err)
+			}
+		})
+	}
+	wg.Wait()
+}
 
 func main() {
 	cfg, loadErr := config.Load()
@@ -44,6 +68,10 @@ func main() {
 	// by the exporters when both mTLS is configured and the OTLP endpoint
 	// is TLS — same egress path as the bidi controller tunnel.
 	otlpEgressProxyURL := parseOTLPEgressProxyURL(cfg.EgressProxyURL)
+
+	// Deferred first, so it runs last: after the HTTP server and pipes stop.
+	var exporters []exporterShutdown
+	defer func() { shutdownExporters(exporters) }()
 
 	// --- Logging ---
 	// OTLP logs endpoint set → fanout (stdout JSON + OTLP)
@@ -67,17 +95,7 @@ func main() {
 			return
 		}
 		if shutdownLogs != nil {
-			defer func() {
-				ctx, cancel := context.WithTimeout(
-					context.Background(), shutdownContextTimeout,
-				)
-				defer cancel()
-				if err := shutdownLogs(ctx); err != nil {
-					slog.ErrorContext(ctx,
-						"failed to shutdown log exporter",
-						"err", err)
-				}
-			}()
+			exporters = append(exporters, exporterShutdown{"log exporter", shutdownLogs})
 		}
 		slog.SetDefault(logger)
 	case !cfg.EnvLevel.IsDev():
@@ -116,16 +134,7 @@ func main() {
 		return
 	}
 	if shutdownMetrics != nil {
-		defer func() {
-			ctx, cancel := context.WithTimeout(
-				context.Background(), shutdownContextTimeout,
-			)
-			defer cancel()
-			if shutdownErr := shutdownMetrics(ctx); shutdownErr != nil {
-				slog.ErrorContext(ctx,
-					"failed to shutdown metrics", "err", shutdownErr)
-			}
-		}()
+		exporters = append(exporters, exporterShutdown{"metrics", shutdownMetrics})
 	}
 
 	if err = telemetry.StartRuntimeMetricsCollector(); err != nil {
@@ -150,16 +159,7 @@ func main() {
 		return
 	}
 	if shutdownTracing != nil {
-		defer func() {
-			ctx, cancel := context.WithTimeout(
-				context.Background(), shutdownContextTimeout,
-			)
-			defer cancel()
-			if shutdownErr := shutdownTracing(ctx); shutdownErr != nil {
-				slog.ErrorContext(ctx,
-					"failed to shutdown tracing", "err", shutdownErr)
-			}
-		}()
+		exporters = append(exporters, exporterShutdown{"tracing", shutdownTracing})
 	}
 
 	// --- Application ---

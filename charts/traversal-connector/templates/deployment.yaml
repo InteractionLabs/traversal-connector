@@ -110,6 +110,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "traversal-connector.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
