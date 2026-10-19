@@ -84,6 +84,7 @@ func TestLoad(t *testing.T) {
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
 				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
@@ -110,6 +111,7 @@ func TestLoad(t *testing.T) {
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
 				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
@@ -149,6 +151,7 @@ func TestLoad(t *testing.T) {
 				MaxResponseBodySizeMB:        64,
 				MaxDecodedResponseBodySizeMB: 512,
 				MaxConcurrentRedactions:      4,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      &certPEM,
 				TLSKey:                       &keyPEM,
 				OTELServiceName:              "custom-traversal-connector",
@@ -179,6 +182,7 @@ func TestLoad(t *testing.T) {
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
 				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
@@ -206,6 +210,7 @@ func TestLoad(t *testing.T) {
 				MaxResponseBodySizeMB:        32,
 				MaxDecodedResponseBodySizeMB: 256,
 				MaxConcurrentRedactions:      DefaultMaxConcurrentRedactions,
+				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
@@ -384,6 +389,34 @@ func TestLoad_RedactionConcurrencyIsStrict(t *testing.T) {
 			if err == nil ||
 				!strings.HasPrefix(err.Error(), "TRAVERSAL_REDACTION_MAX_CONCURRENT:") {
 				t.Fatalf("Load() = %v, want a TRAVERSAL_REDACTION_MAX_CONCURRENT error", err)
+			}
+		})
+	}
+}
+
+// TestLoad_UncoveredStreamMaxLifetime: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME
+// is 15 minutes unset, the duration set, and stops Load when set but invalid.
+func TestLoad_UncoveredStreamMaxLifetime(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+		fails bool
+	}{{"", 15 * time.Minute, false}, {"5m", 5 * time.Minute, false}, {"0s", 0, false},
+		{"fifteen", 0, true}, {"-1m", 0, true}} {
+		t.Run(c.value, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			_ = os.Setenv("ENV_NAME", "test")
+			_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+			_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+			_ = os.Setenv("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME", c.value)
+			cfg, err := Load()
+			switch {
+			case c.fails && (err == nil ||
+				!strings.HasPrefix(err.Error(), "TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME:")):
+				t.Fatalf("Load() = %v, want a TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME error", err)
+			case !c.fails && (err != nil || cfg.UncoveredStreamMaxLifetime != c.want):
+				t.Fatalf("Load() = %v, %v; want %v", cfg.UncoveredStreamMaxLifetime, err, c.want)
 			}
 		})
 	}
@@ -1026,6 +1059,7 @@ func clearEnv() {
 		"REQUEST_TIMEOUT",
 		"MAX_REQUEST_BODY_SIZE_MB", "MAX_RESPONSE_BODY_SIZE_MB",
 		"MAX_DECODED_RESPONSE_BODY_SIZE_MB", "TRAVERSAL_REDACTION_MAX_CONCURRENT",
+		"TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
 		"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
 		"OTEL_SERVICE_NAME",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",

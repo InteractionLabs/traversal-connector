@@ -183,6 +183,11 @@ assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_REDACTION_MAX_CONCURRENT'
 render redaction-concurrency "$fixtures/direct-export-values.yaml" --set redaction.maxConcurrent=3
 assert_contains "$tmp_dir/redaction-concurrency.yaml" $'            - name: TRAVERSAL_REDACTION_MAX_CONCURRENT\n              value: "3"'
 
+# The uncovered-stream cap: unset, the connector's 15 minutes; set, the setting.
+assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME'
+render stream-cap "$fixtures/direct-export-values.yaml" --set-string redaction.uncoveredStreamMaxLifetime=5m
+assert_contains "$tmp_dir/stream-cap.yaml" $'            - name: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME\n              value: "5m"'
+
 render local-legacy "$fixtures/direct-export-values.yaml" \
   --set configUpdates.enabled=false --set-string redactionRules='rules=[]'
 assert_contains "$tmp_dir/local-legacy.yaml" 'REDACTION_RULES_FILE'

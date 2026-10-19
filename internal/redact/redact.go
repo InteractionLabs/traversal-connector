@@ -204,6 +204,9 @@ func (r *Redactor) HasRulesForHost(host string) bool {
 	return false
 }
 
+// HasRules reports whether any rule is loaded, for any host.
+func (r *Redactor) HasRules() bool { return len(*r.rules.Load()) > 0 }
+
 // hasPathPrefixInSet reports whether field, or any of its pipe-delimited
 // ancestor paths, appears in set. "" never matches unless "" is in set.
 // E.g. for field="body|message|inner" the prefixes checked are "body",

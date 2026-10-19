@@ -85,6 +85,7 @@ func (c *Client) respond(
 		attribute.String(connector.AttrTargetHost, target),
 		attribute.String(attrContentEncoding, string(coding))))
 	if !covered {
+		c.capStream(resp)
 		return nil
 	}
 	resp.Header.Del(headerAcceptRanges)

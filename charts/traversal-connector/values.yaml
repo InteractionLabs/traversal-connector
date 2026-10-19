@@ -221,6 +221,12 @@ redaction:
   # maxDecodedResponseBodySizeMB in memory. One that waits its whole
   # requestTimeout for a slot is refused (capacity). Applies to OTA rules too.
   maxConcurrent: ""  # TRAVERSAL_REDACTION_MAX_CONCURRENT (default 8, 1 to 1024)
+  # While any rules exist, how long a long-lived response from a host no rule
+  # covers (an event stream, a gRPC stream, a WebSocket) may run before it is
+  # ended cleanly and its client reopens it under the rules then current. An
+  # OTA rule added for the host otherwise reaches an open stream only when it
+  # ends, which could be up to pipes.maxLifetime. "0s" turns the cap off.
+  uncoveredStreamMaxLifetime: ""  # TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME (default 15m)
   reloadInterval: "10s"
   # Inline TOML; the chart creates a ConfigMap.
   rulesContent: ""

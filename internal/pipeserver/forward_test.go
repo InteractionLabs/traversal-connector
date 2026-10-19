@@ -11,14 +11,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe/rawpipetest"
@@ -470,4 +473,146 @@ func TestBodyLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUncoveredStreamCap: while any redaction rules exist, a long-lived
+// response from a host none covers (an event stream, a gRPC stream, an
+// upgraded connection) ends cleanly at UncoveredStreamMaxLifetime, so the
+// client reopens it under the rules then current; with no rules it runs on.
+func TestUncoveredStreamCap(t *testing.T) {
+	const capped = 300 * time.Millisecond
+	events := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(events.Close)
+	rules := func(t *testing.T, any bool) *redact.Redactor {
+		r := redact.NewRedactor()
+		if any {
+			if err := r.Update(&redact.RulesFile{Version: "v1", Rules: []redact.Rule{{
+				Name: "email", Type: "regex", Pattern: `[a-z]+@[a-z.]+`,
+				Replacement: "[REDACTED]", Hosts: []string{`other\.internal`}}}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return r
+	}
+	cfg := func() *config.Config {
+		return &config.Config{RequestTimeout: 5 * time.Second, MaxResponseBodySizeMB: 1,
+			MaxDecodedResponseBodySizeMB: 4, UncoveredStreamMaxLifetime: capped}
+	}
+
+	t.Run("event stream", func(t *testing.T) {
+		h := newHarness(t, cfg(), rules(t, true), events.Listener.Addr().String())
+		resp, err := h.client("events.internal:80", false).Get("http://events.internal/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		start := time.Now()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || string(body) != "data: first\n\n" {
+			t.Fatalf("event stream ended with %q, %v; want a clean end", body, err)
+		}
+		if took := time.Since(start); took > 3*time.Second {
+			t.Fatalf("event stream ran %v past a %v cap", took, capped)
+		}
+	})
+
+	t.Run("no rules, no cap", func(t *testing.T) {
+		h := newHarness(t, cfg(), rules(t, false), events.Listener.Addr().String())
+		ctx, cancel := context.WithCancel(t.Context())
+		ended := make(chan error, 1)
+		go func() {
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://events.internal/", nil)
+			resp, err := h.client("events.internal:80", false).Do(req)
+			if err == nil {
+				_, err = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+			}
+			ended <- err
+		}()
+		select {
+		case err := <-ended:
+			t.Fatalf("an event stream ended with no rules: %v", err)
+		case <-time.After(4 * capped):
+		}
+		cancel()
+		<-ended
+	})
+
+	t.Run("gRPC stream", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		gs := grpc.NewServer()
+		testpb.RegisterTestServiceServer(gs, echoService{})
+		go func() { _ = gs.Serve(ln) }()
+		t.Cleanup(gs.Stop)
+		h := newHarness(t, cfg(), rules(t, true), ln.Addr().String())
+		cc, err := grpc.NewClient("passthrough:///grpc.internal:80",
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+				return h.open("grpc.internal:80", nil)
+			}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cc.Close() })
+		ctx := metadata.AppendToOutgoingContext(t.Context(),
+			strings.ToLower(rawpipe.HeaderUpstreamScheme), "http")
+		stream, err := testpb.NewTestServiceClient(cc).FullDuplexCall(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.Send(&testpb.StreamingOutputCallRequest{
+			Payload: &testpb.Payload{Body: []byte("one")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+		_, err = stream.Recv()
+		if st := status.Convert(err); st.Code() != codes.Unavailable ||
+			!strings.Contains(st.Message(), "TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME") {
+			t.Fatalf("a capped gRPC stream ended with %v, want the cap's Unavailable trailers", err)
+		}
+	})
+
+	t.Run("upgrade", func(t *testing.T) {
+		ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			c, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			_, _ = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"+
+				"Connection: Upgrade\r\n\r\n")
+			_, _ = io.Copy(io.Discard, c)
+		}))
+		t.Cleanup(ws.Close)
+		h := newHarness(t, cfg(), rules(t, true), ws.Listener.Addr().String())
+		tlsCfg := rawpipe.PipeClientTLS(h.tenant.Pool(), org, connector)
+		tlsCfg.NextProtos = []string{rawpipe.ALPNHTTP1}
+		conn, err := h.open("ws.internal:80", tlsCfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(conn, "GET http://ws.internal/ HTTP/1.1\r\nHost: ws.internal\r\n"+
+			"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"+
+			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+		br := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("upgrade: %v %v", resp, err)
+		}
+		defer resp.Body.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if _, err := br.ReadByte(); errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatal("an upgraded connection ran past its cap")
+		}
+	})
 }

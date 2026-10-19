@@ -31,6 +31,9 @@ const (
 	// connector holds in memory at once, and what bounds it when configured
 	// as none (0 or less).
 	DefaultMaxConcurrentRedactions = 8
+	// DefaultUncoveredStreamMaxLifetime is how long a long-lived response from
+	// a host no redaction rule covers may run while any rules exist.
+	DefaultUncoveredStreamMaxLifetime = 15 * time.Minute
 	// maxConcurrentRedactions bounds TRAVERSAL_REDACTION_MAX_CONCURRENT.
 	maxConcurrentRedactions  = 1024
 	defaultHTTPPort          = "8080"
@@ -90,6 +93,13 @@ type Config struct {
 	// decoded. Read strictly from TRAVERSAL_REDACTION_MAX_CONCURRENT, 1 to
 	// 1024.
 	MaxConcurrentRedactions int64
+	// UncoveredStreamMaxLifetime caps, while any redaction rules exist, a
+	// long-lived response (an event stream, a gRPC stream, an upgraded
+	// connection) from a host none covers. Coverage is decided when a request
+	// is sent, so a rule added for the host later reaches such a stream only
+	// once it ends and its client reopens it. 0 is no cap. Read strictly from
+	// TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME.
+	UncoveredStreamMaxLifetime time.Duration
 	// EgressProxyURL is the optional HTTP forward proxy URL used for any
 	// connector-initiated egress to the Traversal SaaS — both the bidi
 	// control-plane tunnel and OTLP telemetry export. Read from
@@ -269,6 +279,8 @@ func Load() (Config, error) {
 		),
 		MaxConcurrentRedactions: int64(strict.Int("TRAVERSAL_REDACTION_MAX_CONCURRENT",
 			DefaultMaxConcurrentRedactions, maxConcurrentRedactions)),
+		UncoveredStreamMaxLifetime: strict.Duration("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
+			DefaultUncoveredStreamMaxLifetime),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
 		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),

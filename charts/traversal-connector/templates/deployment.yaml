@@ -191,6 +191,10 @@ spec:
             - name: TRAVERSAL_REDACTION_MAX_CONCURRENT
               value: {{ . | toString | quote }}
             {{- end }}
+            {{- with .Values.redaction.uncoveredStreamMaxLifetime }}
+            - name: TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME
+              value: {{ . | toString | quote }}
+            {{- end }}
             {{- range $key, $name := dict "capabilityIssuer" "TRAVERSAL_CAPABILITY_ISSUER" "capabilityKeys" "TRAVERSAL_CAPABILITY_KEYS" "maxPipes" "TRAVERSAL_PIPES_MAX" "maxLifetime" "TRAVERSAL_PIPES_MAX_LIFETIME" "idleTimeout" "TRAVERSAL_PIPES_IDLE_TIMEOUT" "tunnelCount" "TRAVERSAL_TUNNELS_COUNT" "tunnelsConnectTo" "TRAVERSAL_TUNNELS_CONNECT_TO" "egressProxy" "TRAVERSAL_PIPES_EGRESS_PROXY" "egressProxyResolves" "TRAVERSAL_PIPES_EGRESS_PROXY_RESOLVES" "forbiddenCIDRs" "TRAVERSAL_PIPES_FORBIDDEN_CIDRS" "pipeMaxStreams" "TRAVERSAL_PIPES_MAX_STREAMS" "pipeStreamWindowKB" "TRAVERSAL_PIPES_STREAM_WINDOW_KB" "pipeConnectionWindowKB" "TRAVERSAL_PIPES_CONNECTION_WINDOW_KB" }}
             {{- with get $.Values.pipes $key }}
             - name: {{ $name }}

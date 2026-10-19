@@ -52,6 +52,8 @@ type Client struct {
 	// are always finite; bufferFor bounds how long it may take to end.
 	maxRequest, maxBody, maxDecoded int64
 	bufferFor                       time.Duration
+	// streamCap is config.Config.UncoveredStreamMaxLifetime.
+	streamCap time.Duration
 	// redactions holds a slot for each covered response buffered at once,
 	// across the connector: each may hold maxBody and maxDecoded in memory.
 	redactions chan struct{}
@@ -87,6 +89,7 @@ func New(cfg *config.Config, r *redact.Redactor, dial Dialer) (*Client, error) {
 		maxBody:    finite(cfg.MaxResponseBodySizeMB, config.DefaultBodySizeMB),
 		maxDecoded: finite(cfg.MaxDecodedResponseBodySizeMB, config.DefaultDecodedBodySizeMB),
 		bufferFor:  timeout,
+		streamCap:  cfg.UncoveredStreamMaxLifetime,
 		redactions: make(chan struct{}, positive(cfg.MaxConcurrentRedactions,
 			config.DefaultMaxConcurrentRedactions)),
 		tracer:  otel.Tracer(InstrumentationName),
