@@ -16,6 +16,24 @@ const (
 	attrRefusalReason   = "refusal_reason"
 )
 
+// upstreamLatencyBucketsMs are the upstream latency histogram boundaries in
+// milliseconds. The highest finite bucket matches config.DefaultRequestTimeout
+// (60s) so slow and timed-out requests stay visible instead of all landing in
+// +Inf above the SDK default ceiling of 10s.
+var upstreamLatencyBucketsMs = []float64{
+	5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+	10000, 15000, 20000, 30000, 45000, 60000,
+}
+
+// bodySizeBucketsBytes are the body size histogram boundaries in bytes. They
+// include config.DefaultBodySizeMB (wire limit) and end at
+// config.DefaultDecodedBodySizeMB (decoded limit); the SDK default ceiling of
+// 10000 would put almost every body in +Inf.
+var bodySizeBucketsBytes = []float64{
+	1 << 10, 4 << 10, 16 << 10, 64 << 10, 256 << 10,
+	1 << 20, 4 << 20, 16 << 20, 32 << 20, 64 << 20, 256 << 20,
+}
+
 // executorMetrics holds all OTel metrics for the HTTP executor.
 type executorMetrics struct {
 	upstreamRequestsTotal         metric.Int64Counter
@@ -50,6 +68,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Latency of upstream HTTP requests in milliseconds",
 		),
 		metric.WithUnit(connector.UnitMilliseconds),
+		metric.WithExplicitBucketBoundaries(upstreamLatencyBucketsMs...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -63,6 +82,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP request bodies in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -76,6 +96,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP response bodies in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -125,6 +146,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP response bodies after decoding, in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(

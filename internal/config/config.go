@@ -22,10 +22,12 @@ import (
 const (
 	// Default configuration values.
 	defaultMaxTunnelsAllowed = 2
-	defaultBodySizeMB        = 32
-	// A gzip body can expand by orders of magnitude, so the decoded ceiling is
+	// DefaultBodySizeMB is the default request and wire response body limit.
+	DefaultBodySizeMB = 32
+	// DefaultDecodedBodySizeMB is the default decoded response body limit. A
+	// gzip body can expand by orders of magnitude, so the decoded ceiling is
 	// deliberately far above the wire ceiling rather than equal to it.
-	defaultDecodedBodySizeMB     = 256
+	DefaultDecodedBodySizeMB     = 256
 	defaultHTTPPort              = "8080"
 	defaultMaxConcurrentRequests = 10
 	defaultUpstreamTLSVerify     = true
@@ -34,9 +36,10 @@ const (
 	// maxTCPPort is the highest port an endpoint URL can name.
 	maxTCPPort = 65535
 	// Default timeout and interval durations.
-	defaultReconnectInterval       = 5 * time.Second
-	defaultMaxBackoffDelay         = 60 * time.Second
-	defaultRequestTimeout          = 60 * time.Second
+	defaultReconnectInterval = 5 * time.Second
+	defaultMaxBackoffDelay   = 60 * time.Second
+	// DefaultRequestTimeout is REQUEST_TIMEOUT's default.
+	DefaultRequestTimeout          = 60 * time.Second
 	defaultConfigRefreshInterval   = 30 * time.Second
 	defaultRedactionReloadInterval = 10 * time.Second
 )
@@ -256,18 +259,18 @@ func Load() (Config, error) {
 		MaxTunnelsAllowed: env.GetEnvInt("MAX_TUNNELS_ALLOWED", defaultMaxTunnelsAllowed),
 		ReconnectInterval: env.GetEnvDuration("RECONNECT_INTERVAL", defaultReconnectInterval),
 		MaxBackoffDelay:   env.GetEnvDuration("MAX_BACKOFF_DELAY", defaultMaxBackoffDelay),
-		RequestTimeout:    env.GetEnvDuration("REQUEST_TIMEOUT", defaultRequestTimeout),
+		RequestTimeout:    env.GetEnvDuration("REQUEST_TIMEOUT", DefaultRequestTimeout),
 		MaxRequestBodySizeMB: env.GetEnvInt64(
 			"MAX_REQUEST_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_RESPONSE_BODY_SIZE_MB",
-			defaultBodySizeMB,
+			DefaultBodySizeMB,
 		),
 		MaxDecodedResponseBodySizeMB: env.GetEnvInt64(
 			"MAX_DECODED_RESPONSE_BODY_SIZE_MB",
-			defaultDecodedBodySizeMB,
+			DefaultDecodedBodySizeMB,
 		),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
 		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
