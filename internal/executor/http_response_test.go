@@ -1103,7 +1103,7 @@ func TestBuildResponse_HostSpellingCannotSkipDecoding(t *testing.T) {
 				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
 			}
 
-			protoResp, err := exec.buildResponse(
+			protoResp, _, err := exec.buildResponse(
 				context.Background(), resp, targetURL, "example.com",
 			)
 			if err != nil {
@@ -1156,7 +1156,7 @@ func TestBuildResponse_NonASCIIHostScannedByEncodedRule(t *testing.T) {
 				Body: io.NopCloser(bytes.NewReader(gzipped(t, []byte(upstream)))),
 			}
 
-			protoResp, err := exec.buildResponse(
+			protoResp, _, err := exec.buildResponse(
 				context.Background(), resp, targetURL, "xn--bcher-kva.example",
 			)
 			if err != nil {

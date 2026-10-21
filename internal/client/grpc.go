@@ -422,7 +422,8 @@ func (cm *ConnectionManager) handleMessage(
 
 	case *pb.ControllerMessage_HttpRequest:
 		targetHost := telemetry.HostFromURL(m.HttpRequest.Url)
-		reqCtx, span := cm.tracer.Start(ctx, telemetry.SpanConnectorHandleHTTP,
+		reqCtx, span := cm.tracer.Start(telemetry.WithRequestID(ctx, msg.RequestId),
+			telemetry.SpanConnectorHandleHTTP,
 			trace.WithAttributes(
 				attribute.String(connector.AttrRequestID, msg.RequestId),
 				attribute.String(connector.AttrMethod, m.HttpRequest.Method),
