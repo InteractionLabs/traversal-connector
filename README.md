@@ -268,7 +268,7 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 | `TRAVERSAL_CONTROLLER_URL` | **required** | ConnectRPC URL of the Traversal control plane. `https://` requires mTLS (see below). `http://` is rejected when `ENV_LEVEL=production`. Startup fails if unset or if the scheme/level combination is rejected. |
 | `TRAVERSAL_CONTROLLER_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override for the controller, for example `edge-istio.traversal-gateways.svc.cluster.local:443`. Only the TCP connection destination changes; the logical controller URL still supplies the scheme, path, HTTP/2 `:authority`, TLS SNI, and certificate verification identity. Cannot be combined with `EGRESS_PROXY_URL`. |
 | `MAX_TUNNELS_ALLOWED` | `2` | Maximum number of concurrent gRPC tunnels this connector opens. |
-| `MAX_CONCURRENT_REQUESTS` | `10` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
+| `MAX_CONCURRENT_REQUESTS` | `100` | Maximum concurrent in-flight HTTP requests per tunnel when multiplexing is active. |
 | `RECONNECT_INTERVAL` | `5s` | Interval for periodic connection rebalancing across control-plane pods. |
 | `MAX_BACKOFF_DELAY` | `60s` | Cap for exponential backoff on reconnection attempts. |
 | `REQUEST_TIMEOUT` | `60s` | Timeout for individual upstream HTTP requests. |

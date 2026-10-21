@@ -27,7 +27,7 @@ const (
 	// deliberately far above the wire ceiling rather than equal to it.
 	defaultDecodedBodySizeMB     = 256
 	defaultHTTPPort              = "8080"
-	defaultMaxConcurrentRequests = 10
+	defaultMaxConcurrentRequests = 100
 	defaultUpstreamTLSVerify     = true
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
