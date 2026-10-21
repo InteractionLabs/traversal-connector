@@ -179,7 +179,11 @@ func (e *fatalConfigError) Unwrap() error { return e.err }
 
 // startRemoteRedaction loads the first config from Traversal's config
 // endpoint into redactor and, if it loaded, keeps it current.
-func startRemoteRedaction(ctx context.Context, cfg *config.Config, redactor *redact.Redactor) error {
+func startRemoteRedaction(
+	ctx context.Context,
+	cfg *config.Config,
+	redactor *redact.Redactor,
+) error {
 	httpClient, err := client.NewConfigHTTPClient(cfg)
 	if err != nil {
 		return fmt.Errorf("config transport: %w", err)

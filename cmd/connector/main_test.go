@@ -133,14 +133,16 @@ func TestRedactionSourceFallback(t *testing.T) {
 	// controller answers the connector's config path with status and body.
 	controller := func(t *testing.T, status int, body string) string {
 		t.Helper()
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/config/"+self {
-				http.NotFound(w, r)
-				return
-			}
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(body))
-		}))
+		srv := httptest.NewUnstartedServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/config/"+self {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+			}),
+		)
 		srv.Config.Protocols = new(http.Protocols)
 		srv.Config.Protocols.SetUnencryptedHTTP2(true)
 		srv.Start()
