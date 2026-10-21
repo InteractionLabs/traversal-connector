@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -327,4 +328,56 @@ func TestExecute_BodyTooLargeKeepsRequestPathOutOfTelemetry(t *testing.T) {
 
 	assertNoCanary(t, "span", spanText(spans.Ended()))
 	assertNoCanary(t, "log", logs.text())
+}
+
+// The completion line is what an operator filters on to find large responses,
+// so it must name the request and both body sizes while still carrying only the
+// origin of the URL.
+func TestExecute_CompletionLogNamesRequestAndBodySizes(t *testing.T) {
+	plaintext := []byte("contact user@example.com for help")
+	server := gzipServer(t, "text/plain", plaintext)
+	defer server.Close()
+
+	exec := newExecutor(t, responseTestConfig(), newRedactor(t, emailRule()))
+	logs := captureLogs(t)
+
+	req := getWithAcceptEncoding(canaryURL(server.URL), "gzip")
+	resp, err := exec.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logText := logs.text()
+	for _, want := range []string{
+		"upstream request completed",
+		"method=GET",
+		"origin=" + server.URL,
+		"response_body_size=" + strconv.Itoa(len(resp.Body)),
+		"decoded_body_size=" + strconv.Itoa(len(plaintext)),
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("completion log lacks %q:\n%s", want, logText)
+		}
+	}
+	assertNoCanary(t, "log", logText)
+}
+
+// A body the connector never decodes has no decoded size to report, and a zero
+// would read as an empty body.
+func TestExecute_CompletionLogOmitsDecodedSizeWhenNotDecoded(t *testing.T) {
+	server := gzipServer(t, "text/plain", []byte("nothing to redact"))
+	defer server.Close()
+
+	exec := newExecutor(t, responseTestConfig(), newRedactor(t))
+	logs := captureLogs(t)
+
+	if _, err := exec.Execute(
+		context.Background(), getWithAcceptEncoding(server.URL, "gzip"),
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if logText := logs.text(); strings.Contains(logText, "decoded_body_size") {
+		t.Errorf("completion log reports a decoded size for an undecoded body:\n%s", logText)
+	}
 }

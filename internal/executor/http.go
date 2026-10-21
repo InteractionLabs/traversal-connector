@@ -32,6 +32,8 @@ const (
 
 	bytesPerKB = 1024
 	kbPerMB    = 1024
+	bytesPerMB = bytesPerKB * kbPerMB
+	bytesPerGB = bytesPerMB * 1024
 
 	headerContentLength   = "Content-Length"
 	headerContentType     = "Content-Type"
@@ -108,14 +110,13 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 	}
 
 	return &Executor{
-		client:                   httpClient,
-		maxRequestBodySizeBytes:  cfg.MaxRequestBodySizeMB * bytesPerKB * kbPerMB,
-		maxResponseBodySizeBytes: cfg.MaxResponseBodySizeMB * bytesPerKB * kbPerMB,
-		maxDecodedResponseBodySizeBytes: cfg.MaxDecodedResponseBodySizeMB *
-			bytesPerKB * kbPerMB,
-		tracer:   otel.Tracer(InstrumentationName),
-		metrics:  metrics,
-		redactor: r,
+		client:                          httpClient,
+		maxRequestBodySizeBytes:         cfg.MaxRequestBodySizeMB * bytesPerMB,
+		maxResponseBodySizeBytes:        cfg.MaxResponseBodySizeMB * bytesPerMB,
+		maxDecodedResponseBodySizeBytes: cfg.MaxDecodedResponseBodySizeMB * bytesPerMB,
+		tracer:                          otel.Tracer(InstrumentationName),
+		metrics:                         metrics,
+		redactor:                        r,
 	}, nil
 }
 
@@ -226,7 +227,7 @@ func (e *Executor) Execute(
 	}
 	defer resp.Body.Close()
 
-	protoResp, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
+	protoResp, decodedSize, err := e.buildResponse(ctx, resp, protoReq.Url, targetHost)
 	if err != nil {
 		_ = telemetry.RecordError(span, err)
 		return nil, err
@@ -240,17 +241,25 @@ func (e *Executor) Execute(
 	span.SetAttributes(attribute.Int(connector.AttrHTTPStatusCode, resp.StatusCode))
 
 	duration := time.Since(startTime)
-	slog.InfoContext(ctx, "upstream request completed",
+	logAttrs := []any{
+		"method", protoReq.Method,
+		"origin", telemetry.OriginFromURL(protoReq.Url),
 		"target_host", targetHost,
 		"status", resp.StatusCode,
 		"duration_ms", duration.Milliseconds(),
-		"response_body_size", len(protoResp.Body))
+		"response_body_size", len(protoResp.Body),
+	}
+	if decodedSize > 0 {
+		logAttrs = append(logAttrs, "decoded_body_size", decodedSize)
+	}
+	slog.InfoContext(ctx, "upstream request completed", logAttrs...)
 
 	return protoResp, nil
 }
 
 // buildResponse turns an upstream response into the one that leaves the customer
-// network.
+// network. It also returns the decoded body size when the connector decoded the
+// body to redact it, and 0 otherwise.
 //
 // The connector forwards the caller's Accept-Encoding unchanged, so Go's
 // transport does not decompress on its own and the body arrives in whatever
@@ -266,11 +275,11 @@ func (e *Executor) buildResponse(
 	resp *http.Response,
 	targetURL string,
 	targetHost string,
-) (*pb.HttpResponse, error) {
+) (*pb.HttpResponse, int, error) {
 	body, err := readLimited(resp.Body, e.maxResponseBodySizeBytes)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			return nil, e.refuse(ctx, targetHost, refusalBodyTooLarge,
+			return nil, 0, e.refuse(ctx, targetHost, refusalBodyTooLarge,
 				connector.ErrorCodeUpstreamError,
 				fmt.Errorf("upstream response body exceeds %d bytes",
 					e.maxResponseBodySizeBytes))
@@ -278,7 +287,7 @@ func (e *Executor) buildResponse(
 		slog.ErrorContext(ctx, "upstream request failed: cannot read response body",
 			"error", telemetry.SanitizeError(err),
 			"target_host", targetHost)
-		return nil, fmt.Errorf("failed to read upstream response body: %w", err)
+		return nil, 0, fmt.Errorf("failed to read upstream response body: %w", err)
 	}
 
 	// Recorded before the rules check so the metric answers what the whole fleet
@@ -293,7 +302,7 @@ func (e *Executor) buildResponse(
 	if !e.redactor.HasRulesForHost(redactHost) {
 		// Nothing to scan, so nothing is decoded or re-encoded and the feature
 		// costs a host with no rules only the classification above.
-		return finalizeResponse(resp, body, responseDisposition{}), nil
+		return finalizeResponse(resp, body, responseDisposition{}), 0, nil
 	}
 
 	// A rule applies, so a range request against this host would be refused
@@ -303,19 +312,19 @@ func (e *Executor) buildResponse(
 	// 204, 304, and a HEAD reply carry no body, so there is nothing to decode
 	// and nothing that could leak.
 	if len(body) == 0 {
-		return finalizeResponse(resp, body, responseDisposition{}), nil
+		return finalizeResponse(resp, body, responseDisposition{}), 0, nil
 	}
 
 	// A pattern straddling a chunk boundary is invisible to both halves, so a
 	// partial body cannot be redacted soundly.
 	if resp.StatusCode == http.StatusPartialContent {
-		return nil, e.refuse(ctx, targetHost, refusalPartialContent,
+		return nil, 0, e.refuse(ctx, targetHost, refusalPartialContent,
 			connector.ErrorCodeUpstreamError,
 			errors.New("partial response cannot be redacted"))
 	}
 
 	if !coding.canDecode() {
-		return nil, e.refuse(ctx, targetHost, refusalUnsupportedEncoding,
+		return nil, 0, e.refuse(ctx, targetHost, refusalUnsupportedEncoding,
 			connector.ErrorCodeUnsupportedEncoding,
 			fmt.Errorf("response content encoding %q cannot be redacted",
 				resp.Header.Get(headerContentEncoding)))
@@ -329,7 +338,7 @@ func (e *Executor) buildResponse(
 			if errors.Is(err, errBodyTooLarge) {
 				reason = refusalDecodedTooLarge
 			}
-			return nil, e.refuse(ctx, targetHost, reason,
+			return nil, 0, e.refuse(ctx, targetHost, reason,
 				connector.ErrorCodeUpstreamError, err)
 		}
 		e.metrics.decodedResponseBodySizeBytes.Record(ctx, int64(len(plaintext)),
@@ -342,26 +351,30 @@ func (e *Executor) buildResponse(
 	// forwarded uncompressed and refused compressed, and no rule can find
 	// anything to remove in either.
 	if len(plaintext) == 0 {
-		return finalizeResponse(resp, body, responseDisposition{}), nil
+		return finalizeResponse(resp, body, responseDisposition{}), 0, nil
 	}
 
 	redacted, changed, err := e.redactBody(
 		ctx, redactHost, resp.Header.Get(headerContentType), plaintext,
 	)
 	if err != nil {
-		return nil, e.refuse(ctx, targetHost, refusalMalformedJSON,
+		return nil, 0, e.refuse(ctx, targetHost, refusalMalformedJSON,
 			connector.ErrorCodeUpstreamError, err)
 	}
 
 	finalBody := redacted
 	if coding == codingGzip {
 		if finalBody, err = encodeGzip(redacted); err != nil {
-			return nil, fmt.Errorf("failed to re-encode upstream response body: %w", err)
+			return nil, 0, fmt.Errorf("failed to re-encode upstream response body: %w", err)
 		}
 		// Normalizes a header the upstream may have spelled with different case.
 		resp.Header.Set(headerContentEncoding, string(codingGzip))
 	}
 
+	decodedSize := 0
+	if coding == codingGzip {
+		decodedSize = len(plaintext)
+	}
 	return finalizeResponse(resp, finalBody, responseDisposition{
 		redacted: changed,
 		// On the gzip path the connector produced the wire bytes itself, so the
@@ -371,7 +384,7 @@ func (e *Executor) buildResponse(
 		// byte difference is the test, which is what catches a JSON body that came
 		// back re-serialized with nothing redacted.
 		representationChanged: coding == codingGzip || !bytes.Equal(finalBody, body),
-	}), nil
+	}), decodedSize, nil
 }
 
 // responseDisposition records what the connector did to a body. Each fact

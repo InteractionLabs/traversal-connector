@@ -10,6 +10,15 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
+// responseSendWaitBucketsMs are the send queue wait histogram boundaries in
+// milliseconds. They match the upstream latency buckets, ending at
+// config.DefaultRequestTimeout (60s), so a backed-up queue stays visible
+// instead of all landing in +Inf above the SDK default ceiling of 10s.
+var responseSendWaitBucketsMs = []float64{
+	5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+	10000, 15000, 20000, 30000, 45000, 60000,
+}
+
 // connectionMetrics holds all OTel metrics for the connection manager.
 type connectionMetrics struct {
 	streamsActive           metric.Int64UpDownCounter
@@ -64,6 +73,7 @@ func initConnectionMetrics() (*connectionMetrics, error) {
 			"Time a response waits in the send queue before stream write",
 		),
 		metric.WithUnit(connector.UnitMilliseconds),
+		metric.WithExplicitBucketBoundaries(responseSendWaitBucketsMs...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(

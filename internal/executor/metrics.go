@@ -16,6 +16,27 @@ const (
 	attrRefusalReason   = "refusal_reason"
 )
 
+// upstreamLatencyBucketsMs are the upstream latency histogram boundaries in
+// milliseconds. The highest finite bucket matches config.DefaultRequestTimeout
+// (60s) so slow and timed-out requests stay visible instead of all landing in
+// +Inf above the SDK default ceiling of 10s.
+var upstreamLatencyBucketsMs = []float64{
+	5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000,
+	10000, 15000, 20000, 30000, 45000, 60000,
+}
+
+// bodySizeBucketsBytes are the body size histogram boundaries in bytes. They
+// include the default wire and decoded limits (config.DefaultBodySizeMB,
+// config.DefaultDecodedBodySizeMB) and continue in doubling steps to 8 GB for
+// deployments that raise or disable those limits; the SDK default ceiling of
+// 10000 would put almost every body in +Inf.
+var bodySizeBucketsBytes = []float64{
+	1 * bytesPerKB, 4 * bytesPerKB, 16 * bytesPerKB, 64 * bytesPerKB, 256 * bytesPerKB,
+	1 * bytesPerMB, 4 * bytesPerMB, 16 * bytesPerMB, 32 * bytesPerMB, 64 * bytesPerMB,
+	128 * bytesPerMB, 256 * bytesPerMB, 512 * bytesPerMB,
+	1 * bytesPerGB, 2 * bytesPerGB, 4 * bytesPerGB, 8 * bytesPerGB,
+}
+
 // executorMetrics holds all OTel metrics for the HTTP executor.
 type executorMetrics struct {
 	upstreamRequestsTotal         metric.Int64Counter
@@ -50,6 +71,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Latency of upstream HTTP requests in milliseconds",
 		),
 		metric.WithUnit(connector.UnitMilliseconds),
+		metric.WithExplicitBucketBoundaries(upstreamLatencyBucketsMs...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -63,6 +85,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP request bodies in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -76,6 +99,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP response bodies in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -125,6 +149,7 @@ func initExecutorMetrics() (*executorMetrics, error) {
 			"Size of upstream HTTP response bodies after decoding, in bytes",
 		),
 		metric.WithUnit(connector.UnitBytes),
+		metric.WithExplicitBucketBoundaries(bodySizeBucketsBytes...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf(

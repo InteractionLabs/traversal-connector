@@ -70,7 +70,7 @@ func SanitizeError(err error) error {
 	// nothing for the shorter pass to reach into, whichever position it held.
 	slices.SortStableFunc(targets, func(a, b string) int { return len(b) - len(a) })
 	for _, requestURL := range targets {
-		origin := originOf(requestURL)
+		origin := OriginFromURL(requestURL)
 		// url.Error renders its URL with %q, so a target holding a control
 		// character reaches the message escaped and never matches its own raw
 		// bytes. Both spellings are substituted, quoted form first so the
@@ -148,10 +148,10 @@ func requestURLsIn(err error) []string {
 	return found
 }
 
-// originOf reduces a URL to scheme://host, the most an exported message may
+// OriginFromURL reduces a URL to scheme://host, the most exported telemetry may
 // carry. Reading the host back off the parse also drops any embedded
 // credentials, which are no more exportable than the path.
-func originOf(rawURL string) string {
+func OriginFromURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {
 		return unknownTarget
