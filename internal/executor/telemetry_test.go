@@ -18,7 +18,6 @@ import (
 	"github.com/InteractionLabs/traversal-connector/connector-lib/connector"
 	pb "github.com/InteractionLabs/traversal-connector/connector-lib/gen/connector/v1"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
-	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 // queryCanary appears only inside a request's query string, so finding it
@@ -343,8 +342,7 @@ func TestExecute_CompletionLogNamesRequestAndBodySizes(t *testing.T) {
 	logs := captureLogs(t)
 
 	req := getWithAcceptEncoding(canaryURL(server.URL), "gzip")
-	ctx := telemetry.WithRequestID(context.Background(), "req-42")
-	resp, err := exec.Execute(ctx, req)
+	resp, err := exec.Execute(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -352,7 +350,6 @@ func TestExecute_CompletionLogNamesRequestAndBodySizes(t *testing.T) {
 	logText := logs.text()
 	for _, want := range []string{
 		"upstream request completed",
-		"request_id=req-42",
 		"method=GET",
 		"origin=" + server.URL,
 		"response_body_size=" + strconv.Itoa(len(resp.Body)),

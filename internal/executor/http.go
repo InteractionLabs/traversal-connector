@@ -242,7 +242,6 @@ func (e *Executor) Execute(
 
 	duration := time.Since(startTime)
 	logAttrs := []any{
-		"request_id", telemetry.RequestIDFromContext(ctx),
 		"method", protoReq.Method,
 		"origin", telemetry.OriginFromURL(protoReq.Url),
 		"target_host", targetHost,
