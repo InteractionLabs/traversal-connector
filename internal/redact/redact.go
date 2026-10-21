@@ -57,8 +57,8 @@ type Rule struct {
 	SkipFields []string `toml:"skip_fields"`
 	// Hosts is the allowlist of RE2 patterns matched against the request
 	// hostname (port stripped). The rule only fires when the hostname fully
-	// matches at least one pattern. A loaded rule must have one (CheckHosts):
-	// [".*"] matches every host. Each pattern is anchored to the whole hostname, so
+	// matches at least one pattern. A rule with no hosts covers every host, as
+	// in v0.9 (WarnHostless says so at load). Each pattern is anchored to the whole hostname, so
 	// ".*github.com" matches "api.github.com" and "github.com" but not
 	// "github.com.evil.com". Matching follows DNS rather than byte equality:
 	// patterns are case-insensitive and the hostname is compared without a
@@ -81,22 +81,19 @@ type RulesFile struct {
 	Rules              []Rule `toml:"rules"`
 }
 
-// ErrNoHosts is a loaded rule with no hosts. Such a rule covered every
-// host, so one meant for a single destination, its hosts forgotten, made the
-// connector buffer and redact every response it carried; a rule for every
-// host now says so with hosts = [".*"]. It names no rule content.
-var ErrNoHosts = errors.New(`a redaction rule has no hosts: list the hosts it covers, ` +
-	`or hosts = [".*"] for every host`)
-
-// CheckHosts refuses a rules file with a rule that has no hosts
-// (ErrNoHosts), naming the rule by its place only.
-func (f *RulesFile) CheckHosts() error {
+// WarnHostless logs, once per load, each rule that has no hosts. Such a rule
+// covers every host, as it did in v0.9, so the connector buffers and redacts
+// every response it carries; one meant for a single destination with its
+// hosts forgotten costs that silently. It names the rule by its place only:
+// rule content stays out of logs.
+func (f *RulesFile) WarnHostless(source string) {
 	for i := range f.Rules {
 		if len(f.Rules[i].Hosts) == 0 {
-			return fmt.Errorf("rule %d of %d: %w", i+1, len(f.Rules), ErrNoHosts)
+			slog.Warn("redaction rule has no hosts and covers every host; "+
+				`list the hosts it covers, or hosts = [".*"] to say so`,
+				"source", source, "rule", i+1, "rules", len(f.Rules))
 		}
 	}
-	return nil
 }
 
 // compiledRule is a Rule with its regex pre-compiled and replacement as bytes.
