@@ -91,9 +91,25 @@ func New(cfg *config.Config, r *redact.Redactor, ready http.Handler) (*Tunnels, 
 		t.Addr = cfg.TraversalControllerConnectTo
 	}
 	if cfg.EgressProxyURL != nil {
-		return nil, errors.New("EGRESS_PROXY_URL: tunnels through it are not supported yet")
+		if os.Getenv("TRAVERSAL_TUNNELS_CONNECT_TO") != "" {
+			return nil, errors.New(
+				"EGRESS_PROXY_URL cannot be combined with TRAVERSAL_TUNNELS_CONNECT_TO")
+		}
+		if t.Proxy, err = tunnelProxy(*cfg.EgressProxyURL); err != nil {
+			return nil, err
+		}
 	}
 	return t, e.Err()
+}
+
+// tunnelProxy parses EGRESS_PROXY_URL, the http:// forward proxy tunnels
+// reach the controller through. config.Load refuses it beside a connect-to.
+func tunnelProxy(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return nil, errors.New("EGRESS_PROXY_URL: must be an http:// URL with a host")
+	}
+	return u, nil
 }
 
 // newPolicy is how every request a pipe carries reaches its destination:
