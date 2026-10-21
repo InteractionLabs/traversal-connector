@@ -199,9 +199,12 @@ assert_render_fails local-disabled 'require redaction.enabled=true' \
   "${common[@]}" --set-string redaction.existingConfigMap=rules
 assert_render_fails local-multiple-sources 'requires exactly one source' \
   "${local_values[@]}" --set-string redaction.rulesContent=rules --set-string redaction.existingSecret=rules
-assert_render_fails both-sources 'mutually exclusive' \
-  "${local_values[@]}" --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
-assert_render_fails both-legacy 'mutually exclusive' "${common[@]}" --set configUpdates.enabled=true --set-string redactionRules=rules
+# Both: OTA first, the local rules as the fallback when its first fetch fails.
+# Both settings render.
+render both-sources "$fixtures/direct-export-values.yaml" --set redaction.enabled=true \
+  --set configUpdates.enabled=true --set-string redaction.rulesContent=rules
+assert_contains "$tmp_dir/both-sources.yaml" 'name: TRAVERSAL_CONFIG_ENABLED'
+assert_contains "$tmp_dir/both-sources.yaml" 'name: REDACTION_RULES_FILE'
 
 # Tunnels: each set pipes value becomes its setting; unset, none renders.
 assert_not_contains "$tmp_dir/direct.yaml" 'TRAVERSAL_PIPES'

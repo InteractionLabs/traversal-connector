@@ -7,9 +7,6 @@
 {{- end -}}
 {{- $sources := list .Values.redaction.rulesContent .Values.redactionRules .Values.redaction.existingConfigMap .Values.redaction.existingSecret | compact -}}
 {{- $enabled := or .Values.redaction.enabled (not (empty .Values.redactionRules)) -}}
-{{- if and .Values.configUpdates.enabled (or $enabled (gt (len $sources) 0)) -}}
-{{- fail "Local redaction and configUpdates.enabled=true are mutually exclusive" -}}
-{{- end -}}
 {{- if and (not $enabled) (gt (len $sources) 0) -}}
 {{- fail "Local redaction sources require redaction.enabled=true" -}}
 {{- end -}}

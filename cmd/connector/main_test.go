@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,6 +110,109 @@ func TestRedactionRequiresSignatureWithKeys(t *testing.T) {
 			}
 			if c.starts && !redactor.HasRulesForHost("api.internal") {
 				t.Fatal("started without the config's rules")
+			}
+		})
+	}
+}
+
+// TestRedactionSourceFallback: startRedaction uses one source, never a merge.
+// OTA wins when its first fetch succeeds (an explicit rules=[] included: the
+// local rules do not apply); a first fetch that fails falls back to the local
+// file when one is set, and refuses to start when none is; with neither
+// configured there are no rules. A key bundle that does not parse is a
+// misconfiguration and refuses to start even with a file to fall back to.
+func TestRedactionSourceFallback(t *testing.T) {
+	const (
+		self   = "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
+		otaDoc = "schema_version = 1\n[redaction]\n[[redaction.rules]]\nname = \"ota\"\n" +
+			"type = \"regex\"\npattern = 'secret'\nhosts = ['ota\\.internal']\n"
+		emptyOTA  = "schema_version = 1\n[redaction]\nrules = []\n"
+		fileRules = "version = \"v1\"\n[[rules]]\nname = \"file\"\ntype = \"regex\"\n" +
+			"pattern = 'secret'\nhosts = ['file\\.internal']\n"
+	)
+	// controller answers the connector's config path with status and body.
+	controller := func(t *testing.T, status int, body string) string {
+		t.Helper()
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/config/"+self {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+		srv.Config.Protocols = new(http.Protocols)
+		srv.Config.Protocols.SetUnencryptedHTTP2(true)
+		srv.Start()
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	for _, c := range []struct {
+		name        string
+		ota         bool
+		status      int
+		body        string
+		unreachable bool
+		file        bool
+		keys        string
+		starts      bool
+		otaRules    bool
+		fileRules   bool
+	}{
+		{name: "OTA ok, no file", ota: true, status: 200, body: otaDoc, starts: true, otaRules: true},
+		{name: "OTA ok wins over the file", ota: true, status: 200, body: otaDoc, file: true,
+			starts: true, otaRules: true},
+		{name: "OTA's explicit empty rules win over the file", ota: true, status: 200, body: emptyOTA,
+			file: true, starts: true},
+		{name: "OTA unpublished falls back to the file", ota: true, status: 404, file: true,
+			starts: true, fileRules: true},
+		{name: "OTA unreachable falls back to the file", ota: true, unreachable: true, file: true,
+			starts: true, fileRules: true},
+		{name: "OTA invalid falls back to the file", ota: true, status: 200, body: "not toml [",
+			file: true, starts: true, fileRules: true},
+		{name: "OTA unpublished, no file: refuses", ota: true, status: 404},
+		{name: "OTA unreachable, no file: refuses", ota: true, unreachable: true},
+		{name: "file only", file: true, starts: true, fileRules: true},
+		{name: "neither: no rules", starts: true},
+		{name: "unparseable keys refuse despite a file", ota: true, status: 200, body: otaDoc,
+			file: true, keys: "not a bundle"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("TRAVERSAL_CONFIG_KEYS", c.keys)
+			cfg := &config.Config{
+				ConnectorID:             self,
+				ConfigEnabled:           c.ota,
+				ConfigRefreshInterval:   time.Hour,
+				RedactionReloadInterval: time.Hour,
+				TraversalControllerURL:  "http://unused.invalid",
+			}
+			switch {
+			case c.unreachable:
+				cfg.TraversalControllerURL = down.URL
+			case c.ota:
+				cfg.TraversalControllerURL = controller(t, c.status, c.body)
+			}
+			if c.file {
+				path := filepath.Join(t.TempDir(), "rules.toml")
+				if err := os.WriteFile(path, []byte(fileRules), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg.RedactionRulesFile = &path
+			}
+			redactor, err := startRedaction(t.Context(), cfg)
+			if (err == nil) != c.starts {
+				t.Fatalf("startRedaction: %v, want it to start: %v", err, c.starts)
+			}
+			if !c.starts {
+				return
+			}
+			if got := redactor.HasRulesForHost("ota.internal"); got != c.otaRules {
+				t.Errorf("OTA rules applied: %v, want %v", got, c.otaRules)
+			}
+			if got := redactor.HasRulesForHost("file.internal"); got != c.fileRules {
+				t.Errorf("file rules applied: %v, want %v", got, c.fileRules)
 			}
 		})
 	}

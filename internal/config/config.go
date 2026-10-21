@@ -169,7 +169,8 @@ type Config struct {
 	ConfigEnabled bool
 	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
 	ConfigRefreshInterval time.Duration
-	// RedactionRulesFile selects local TOML rules instead of OTA configuration.
+	// RedactionRulesFile selects local TOML rules: on their own, or as the
+	// fallback when OTA is enabled and its first fetch fails.
 	RedactionRulesFile *string
 	// RedactionReloadInterval controls local-file polling. Defaults to 10s.
 	RedactionReloadInterval time.Duration
@@ -320,11 +321,8 @@ func Load() (Config, error) {
 		)
 	}
 	if cfg.RedactionRulesFile != nil {
-		if cfg.ConfigEnabled {
-			return Config{}, errors.New(
-				"REDACTION_RULES_FILE and TRAVERSAL_CONFIG_ENABLED=true are mutually exclusive",
-			)
-		}
+		// With TRAVERSAL_CONFIG_ENABLED too, the file is the fallback used
+		// only when the first OTA fetch fails (startRedaction).
 		if raw := os.Getenv("REDACTION_RELOAD_INTERVAL"); raw != "" {
 			cfg.RedactionReloadInterval, err = time.ParseDuration(raw)
 			if err != nil || cfg.RedactionReloadInterval <= 0 {

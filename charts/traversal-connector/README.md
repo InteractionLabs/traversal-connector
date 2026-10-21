@@ -14,8 +14,16 @@ containers.
 
 ## Redaction configuration
 
-Choose one source, or leave both disabled to run without redaction.
-Local sources and `configUpdates.enabled: true` are mutually exclusive.
+Enable OTA (`configUpdates.enabled: true`), a local source, both, or neither.
+The connector uses one source, never a merge of two:
+
+1. **OTA**, when its first fetch at start succeeds;
+2. else the **local rules**, when a local source is enabled;
+3. else **no redaction**.
+
+With OTA alone, a failed first fetch stops the connector from starting, so it
+never runs unredacted. With a local source as well, it starts on the local
+rules and logs a warning instead.
 
 For remote (S3-backed OTA) configuration, the config document should be published
 before enabling polling:
