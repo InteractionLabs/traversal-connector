@@ -38,7 +38,7 @@ connectorID: ""
 envLevel: ""               # ENV_LEVEL: production | development
 proxyURL: ""               # EGRESS_PROXY_URL: http forward proxy for SaaS egress
 maxTunnelsAllowed: ""      # MAX_TUNNELS_ALLOWED (default 2)
-maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 10)
+maxConcurrentRequests: ""  # MAX_CONCURRENT_REQUESTS (default 100)
 reconnectInterval: ""      # RECONNECT_INTERVAL (default 5s)
 maxBackoffDelay: ""        # MAX_BACKOFF_DELAY (default 60s)
 requestTimeout: ""         # REQUEST_TIMEOUT (default 60s)
