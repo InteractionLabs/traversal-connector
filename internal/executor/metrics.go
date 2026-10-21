@@ -26,12 +26,15 @@ var upstreamLatencyBucketsMs = []float64{
 }
 
 // bodySizeBucketsBytes are the body size histogram boundaries in bytes. They
-// include config.DefaultBodySizeMB (wire limit) and end at
-// config.DefaultDecodedBodySizeMB (decoded limit); the SDK default ceiling of
+// include the default wire and decoded limits (config.DefaultBodySizeMB,
+// config.DefaultDecodedBodySizeMB) and continue in doubling steps to 8 GB for
+// deployments that raise or disable those limits; the SDK default ceiling of
 // 10000 would put almost every body in +Inf.
 var bodySizeBucketsBytes = []float64{
 	1 * bytesPerKB, 4 * bytesPerKB, 16 * bytesPerKB, 64 * bytesPerKB, 256 * bytesPerKB,
-	1 * bytesPerMB, 4 * bytesPerMB, 16 * bytesPerMB, 32 * bytesPerMB, 64 * bytesPerMB, 256 * bytesPerMB,
+	1 * bytesPerMB, 4 * bytesPerMB, 16 * bytesPerMB, 32 * bytesPerMB, 64 * bytesPerMB,
+	128 * bytesPerMB, 256 * bytesPerMB, 512 * bytesPerMB,
+	1 * bytesPerGB, 2 * bytesPerGB, 4 * bytesPerGB, 8 * bytesPerGB,
 }
 
 // executorMetrics holds all OTel metrics for the HTTP executor.

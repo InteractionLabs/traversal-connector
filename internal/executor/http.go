@@ -33,6 +33,7 @@ const (
 	bytesPerKB = 1024
 	kbPerMB    = 1024
 	bytesPerMB = bytesPerKB * kbPerMB
+	bytesPerGB = bytesPerMB * 1024
 
 	headerContentLength   = "Content-Length"
 	headerContentType     = "Content-Type"
