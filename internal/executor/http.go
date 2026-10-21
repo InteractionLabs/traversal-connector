@@ -32,6 +32,7 @@ const (
 
 	bytesPerKB = 1024
 	kbPerMB    = 1024
+	bytesPerMB = bytesPerKB * kbPerMB
 
 	headerContentLength   = "Content-Length"
 	headerContentType     = "Content-Type"
@@ -108,14 +109,13 @@ func NewExecutor(cfg *config.Config, r *redact.Redactor) (*Executor, error) {
 	}
 
 	return &Executor{
-		client:                   httpClient,
-		maxRequestBodySizeBytes:  cfg.MaxRequestBodySizeMB * bytesPerKB * kbPerMB,
-		maxResponseBodySizeBytes: cfg.MaxResponseBodySizeMB * bytesPerKB * kbPerMB,
-		maxDecodedResponseBodySizeBytes: cfg.MaxDecodedResponseBodySizeMB *
-			bytesPerKB * kbPerMB,
-		tracer:   otel.Tracer(InstrumentationName),
-		metrics:  metrics,
-		redactor: r,
+		client:                          httpClient,
+		maxRequestBodySizeBytes:         cfg.MaxRequestBodySizeMB * bytesPerMB,
+		maxResponseBodySizeBytes:        cfg.MaxResponseBodySizeMB * bytesPerMB,
+		maxDecodedResponseBodySizeBytes: cfg.MaxDecodedResponseBodySizeMB * bytesPerMB,
+		tracer:                          otel.Tracer(InstrumentationName),
+		metrics:                         metrics,
+		redactor:                        r,
 	}, nil
 }
 

@@ -30,8 +30,8 @@ var upstreamLatencyBucketsMs = []float64{
 // config.DefaultDecodedBodySizeMB (decoded limit); the SDK default ceiling of
 // 10000 would put almost every body in +Inf.
 var bodySizeBucketsBytes = []float64{
-	1 << 10, 4 << 10, 16 << 10, 64 << 10, 256 << 10,
-	1 << 20, 4 << 20, 16 << 20, 32 << 20, 64 << 20, 256 << 20,
+	1 * bytesPerKB, 4 * bytesPerKB, 16 * bytesPerKB, 64 * bytesPerKB, 256 * bytesPerKB,
+	1 * bytesPerMB, 4 * bytesPerMB, 16 * bytesPerMB, 32 * bytesPerMB, 64 * bytesPerMB, 256 * bytesPerMB,
 }
 
 // executorMetrics holds all OTel metrics for the HTTP executor.

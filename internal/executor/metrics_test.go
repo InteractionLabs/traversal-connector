@@ -28,12 +28,12 @@ func TestBodySizeBucketsCoverBodyLimits(t *testing.T) {
 	if !slices.IsSorted(bodySizeBucketsBytes) {
 		t.Fatalf("buckets must be sorted ascending: %v", bodySizeBucketsBytes)
 	}
-	wireLimit := float64(config.DefaultBodySizeMB * bytesPerKB * kbPerMB)
+	wireLimit := float64(config.DefaultBodySizeMB * bytesPerMB)
 	if !slices.Contains(bodySizeBucketsBytes, wireLimit) {
 		t.Fatalf("buckets %v lack %v bytes (DefaultBodySizeMB)", bodySizeBucketsBytes, wireLimit)
 	}
 	got := bodySizeBucketsBytes[len(bodySizeBucketsBytes)-1]
-	want := float64(config.DefaultDecodedBodySizeMB * bytesPerKB * kbPerMB)
+	want := float64(config.DefaultDecodedBodySizeMB * bytesPerMB)
 	if got != want {
 		t.Fatalf("highest finite bucket = %v bytes, want %v (DefaultDecodedBodySizeMB)", got, want)
 	}
