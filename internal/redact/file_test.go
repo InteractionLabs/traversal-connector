@@ -275,7 +275,16 @@ func TestHostlessRuleCoversEveryHost(t *testing.T) {
 	if n := strings.Count(logs.String(), "redaction rule has no hosts"); n != 1 {
 		t.Errorf("want one warning for the one hostless rule, got %d:\n%s", n, logs.String())
 	}
-	if !strings.Contains(logs.String(), "rule=1") || strings.Contains(logs.String(), "secret") {
-		t.Errorf("warning should name the rule by place only:\n%s", logs.String())
+	// It names the rule and its position, and says what it costs, but never
+	// the rule's pattern ('secret') or replacement ('[LOCAL]').
+	for _, want := range []string{"rule=token", "position=1", "rules=2", "every response"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("warning lacks %q:\n%s", want, logs.String())
+		}
+	}
+	for _, content := range []string{"secret", "[LOCAL]"} {
+		if strings.Contains(logs.String(), content) {
+			t.Errorf("warning leaks rule content %q:\n%s", content, logs.String())
+		}
 	}
 }

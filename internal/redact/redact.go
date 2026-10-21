@@ -82,16 +82,19 @@ type RulesFile struct {
 }
 
 // WarnHostless logs, once per load, each rule that has no hosts. Such a rule
-// covers every host, as it did in v0.9, so the connector buffers and redacts
-// every response it carries; one meant for a single destination with its
-// hosts forgotten costs that silently. It names the rule by its place only:
-// rule content stays out of logs.
+// applies to every host, as it did in v0.9, so the connector buffers and
+// redacts every response it carries; one meant for a single destination with
+// its hosts forgotten costs that silently. It names the rule by its name (a
+// label the config author chose; local rules may leave it empty) and its
+// position, never by its pattern or replacement.
 func (f *RulesFile) WarnHostless(source string) {
 	for i := range f.Rules {
 		if len(f.Rules[i].Hosts) == 0 {
-			slog.Warn("redaction rule has no hosts and covers every host; "+
-				`list the hosts it covers, or hosts = [".*"] to say so`,
-				"source", source, "rule", i+1, "rules", len(f.Rules))
+			slog.Warn("redaction rule has no hosts, so it applies to every host and the "+
+				"connector buffers and redacts every response; add hosts to scope it, "+
+				`or hosts = [".*"] if every host is intended`,
+				"source", source, "rule", f.Rules[i].Name, "position", i+1,
+				"rules", len(f.Rules))
 		}
 	}
 }
