@@ -89,6 +89,7 @@ func TestLoad(t *testing.T) {
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
+				OTLPProtocol:                 "http/json",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
@@ -118,6 +119,7 @@ func TestLoad(t *testing.T) {
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
+				OTLPProtocol:                 "http/json",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
@@ -195,6 +197,7 @@ func TestLoad(t *testing.T) {
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
+				OTLPProtocol:                 "http/json",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
@@ -227,6 +230,7 @@ func TestLoad(t *testing.T) {
 				TLSCert:                      nil,
 				TLSKey:                       nil,
 				OTELServiceName:              "traversal-connector",
+				OTLPProtocol:                 "http/json",
 				MaxConcurrentRequests:        10,
 				UpstreamTLSVerify:            true,
 				ConfigRefreshInterval:        30 * time.Second,
@@ -598,8 +602,68 @@ func TestLoad_AllowsMissingOTLPEndpointsInDev(t *testing.T) {
 	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
 	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
 
-	if _, err := Load(); err != nil {
+	cfg, err := Load()
+	if err != nil {
 		t.Fatalf("Load() returned error with no endpoints in dev: %v", err)
+	}
+	// Local runs must never ship to the hosted ingest by default.
+	for name, got := range map[string]string{
+		"OTLPMetricsEndpoint": cfg.OTLPMetricsEndpoint,
+		"OTLPTracesEndpoint":  cfg.OTLPTracesEndpoint,
+		"OTLPLogsEndpoint":    cfg.OTLPLogsEndpoint,
+	} {
+		if got != "" {
+			t.Errorf("%s = %q, want empty", name, got)
+		}
+	}
+}
+
+func TestLoad_DefaultsOTLPEndpointsToHostedIngestInProduction(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	tests := []struct {
+		protocol                          string
+		wantProtocol                      string
+		wantMetrics, wantTraces, wantLogs string
+	}{
+		{
+			protocol:     "",
+			wantProtocol: "http/json",
+			wantMetrics:  "https://telemetry.traversal.com/v1/metrics",
+			wantTraces:   "https://telemetry.traversal.com/v1/traces",
+			wantLogs:     "https://telemetry.traversal.com/v1/logs",
+		},
+		{
+			protocol:     "grpc",
+			wantProtocol: "grpc",
+			wantMetrics:  "https://telemetry.traversal.com:4317",
+			wantTraces:   "https://telemetry.traversal.com:4317",
+			wantLogs:     "https://telemetry.traversal.com:4317",
+		},
+	}
+	for _, tt := range tests {
+		t.Run("protocol="+tt.protocol, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			setProductionEnv(t, certPEM, keyPEM)
+			if tt.protocol != "" {
+				_ = os.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", tt.protocol)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() returned error with no endpoints set: %v", err)
+			}
+			for name, pair := range map[string][2]string{
+				"OTLPProtocol":        {cfg.OTLPProtocol, tt.wantProtocol},
+				"OTLPMetricsEndpoint": {cfg.OTLPMetricsEndpoint, tt.wantMetrics},
+				"OTLPTracesEndpoint":  {cfg.OTLPTracesEndpoint, tt.wantTraces},
+				"OTLPLogsEndpoint":    {cfg.OTLPLogsEndpoint, tt.wantLogs},
+			} {
+				if pair[0] != pair[1] {
+					t.Errorf("%s = %q, want %q", name, pair[0], pair[1])
+				}
+			}
+		})
 	}
 }
 

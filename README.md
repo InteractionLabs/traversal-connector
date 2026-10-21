@@ -567,24 +567,25 @@ upstreams would be affected before configuring anything.
 The connector emits OpenTelemetry traces, metrics, and logs. Telemetry is the
 only view Traversal has into a connector running inside a customer network, so
 exporting all three signals is **required**. Outside `ENV_LEVEL=development`,
-the connector refuses to start without it.
+the connector exports to Traversal's hosted ingest at `telemetry.traversal.com`
+unless you point it elsewhere.
 
 | Variable | Default | Description |
 |---|---|---|
 | `OTEL_SERVICE_NAME` | `traversal-connector` | Service name reported on all signals. |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | (required) | OTLP endpoint for metrics. Must be an `https://` URL. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | (required) | OTLP endpoint for traces. Must be an `https://` URL. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | (required) | OTLP endpoint for logs. Must be an `https://` URL. Logs also always go to stdout. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | (empty) | `grpc` or `http/protobuf` selects gRPC; `http/json` (or empty) selects HTTP. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | hosted ingest | OTLP endpoint for metrics. Must be an `https://` URL. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | hosted ingest | OTLP endpoint for traces. Must be an `https://` URL. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | hosted ingest | OTLP endpoint for logs. Must be an `https://` URL. Logs also always go to stdout. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/json` | `grpc` or `http/protobuf` selects gRPC; `http/json` selects HTTP. |
 | `OTEL_EXPORTER_OTLP_CONNECT_TO` | (none) | Optional curl `--connect-to`-style `host:port` override shared by metrics, traces, and logs. Only the TCP connection destination changes; logical endpoint scheme and path, HTTP Host/gRPC `:authority`, TLS SNI, and certificate verification remain unchanged. All three endpoints must be reachable through the one socket. Cannot be combined with `EGRESS_PROXY_URL`; it is cleared when telemetry is disabled. |
 | `TRAVERSAL_DISABLE_TELEMETRY` | `false` | Opts out of all telemetry export. **Strongly discouraged**. Traversal cannot diagnose or assist with issues in a deployment that reports nothing. |
 
-Point all three endpoints either at a collector you operate or at the ingest
-endpoints supplied with your deployment. Their shape follows the protocol: `grpc`
-takes a host and port and names the signal in the request
-(`https://collector.example.com:4317`), while `http/*` names it in the path
-(`https://collector.example.com/v1/metrics`). The deployment chart fills these in;
-a deployment that sets the environment directly has to provide them.
+With all three endpoints unset, the connector uses the hosted ingest in the
+shape the protocol needs: `https://telemetry.traversal.com/v1/{metrics,traces,logs}`
+for HTTP, or `https://telemetry.traversal.com:4317` for gRPC. To use a collector
+you operate, set all three. Their shape follows the protocol: `grpc` takes a host
+and port and names the signal in the request (`https://collector.example.com:4317`),
+while `http/json` names it in the path (`https://collector.example.com/v1/metrics`).
 
 Connect-to overrides mirror curl `--connect-to` and support enterprise routing such as PrivateLink, split
 DNS, service-mesh gateways, Kubernetes Services, and tunnels without weakening
@@ -600,7 +601,7 @@ roots in both modes.
 Startup rejects a telemetry configuration that would export nothing or export in
 cleartext:
 
-- All three endpoints must be set. A partially configured exporter looks healthy
+- Set all three endpoints or none. A partially configured exporter looks healthy
   from the outside while leaving a gap nobody finds until an incident.
 - Each must be an `https://` URL naming a host. A scheme-less `host:port` is
   rejected with `http://`, because the exporters read the scheme to decide
