@@ -81,13 +81,30 @@ assert_contains "$tmp_dir/sidecar.yaml" 'name: telemetry-sidecar'
 assert_contains "$tmp_dir/sidecar.yaml" 'name: sidecar-traversal-connector-telemetry-sidecar'
 assert_contains "$tmp_dir/sidecar.yaml" 'name: ci-controller-tls'
 assert_contains "$tmp_dir/sidecar.yaml" 'value: "http://127.0.0.1:4318/v1/metrics"'
+# The exporter's :authority is the bare host, equal to its TLS server name:
+# grpc-go refuses to start an exporter whose two differ, as host:port did.
+sidecar_env() {
+  awk -v want="$2" '$0 ~ "- name: " want "$" { getline; sub(/.*value: /, ""); print; exit }' "$1"
+}
+[[ "$(sidecar_env "$tmp_dir/sidecar.yaml" OTLP_EGRESS_AUTHORITY)" == '"telemetry.example.invalid"' ]] ||
+  fail "OTLP_EGRESS_AUTHORITY is not the bare host"
+[[ "$(sidecar_env "$tmp_dir/sidecar.yaml" OTLP_EGRESS_SERVER_NAME)" == '"telemetry.example.invalid"' ]] ||
+  fail "OTLP_EGRESS_SERVER_NAME is not the bare host"
+[[ "$(sidecar_env "$tmp_dir/sidecar.yaml" OTLP_EGRESS_ENDPOINT)" == '"telemetry.example.invalid:4317"' ]] ||
+  fail "OTLP_EGRESS_ENDPOINT is not host:port"
+# The sidecar has probes on Alloy's own health endpoints, as policies such as
+# Kyverno's require-pod-probes ask of every container.
+assert_contains "$tmp_dir/sidecar.yaml" "GET /-/healthy HTTP/1.0"
+assert_contains "$tmp_dir/sidecar.yaml" "GET /-/ready HTTP/1.0"
 
 render sidecar-connect-to "$fixtures/sidecar-values.yaml" \
   --set-string otel.connectTo=telemetry-istio.traversal-gateways.svc.cluster.local:443
 assert_not_contains "$tmp_dir/sidecar-connect-to.yaml" 'OTEL_EXPORTER_OTLP_CONNECT_TO'
 assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'value: "telemetry-istio.traversal-gateways.svc.cluster.local:443"'
-assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'value: "telemetry.example.invalid:4317"'
-assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'value: "telemetry.example.invalid"'
+[[ "$(sidecar_env "$tmp_dir/sidecar-connect-to.yaml" OTLP_EGRESS_ENDPOINT)" == '"telemetry-istio.traversal-gateways.svc.cluster.local:443"' ]] ||
+  fail "otel.connectTo is not the sidecar's dial target"
+[[ "$(sidecar_env "$tmp_dir/sidecar-connect-to.yaml" OTLP_EGRESS_AUTHORITY)" == '"telemetry.example.invalid"' ]] ||
+  fail "OTLP_EGRESS_AUTHORITY is not the bare logical host with otel.connectTo"
 assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'authority = sys.env("OTLP_EGRESS_AUTHORITY")'
 assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'server_name = sys.env("OTLP_EGRESS_SERVER_NAME")'
 assert_contains "$tmp_dir/sidecar-connect-to.yaml" 'include_system_ca_certs_pool = true'
