@@ -150,7 +150,13 @@ assert_render_fails invalid-controller-connect-to 'controllerConnectTo must be a
 assert_render_fails invalid-otel-connect-to 'otel.connectTo port must be from 1 to 65535' "${common[@]}" --set-string otel.connectTo=route.internal:0
 # 0.10.x cannot run tunnels through a forward proxy: refused at render, not
 # at startup mid-rollout.
-assert_render_fails proxy-unsupported 'proxyURL is not supported by connector 0.10.x yet; stay on 0.9.x' "${common[@]}" --set-string proxyURL=http://proxy.internal:3128
+# proxyURL reaches the connector, which sends its tunnels through it.
+render proxied "$fixtures/direct-export-values.yaml" --set-string proxyURL=http://proxy.internal:3128
+assert_contains "$tmp_dir/proxied.yaml" 'name: EGRESS_PROXY_URL'
+assert_contains "$tmp_dir/proxied.yaml" 'value: "http://proxy.internal:3128"'
+assert_render_fails proxy-https 'proxyURL must be an http:// URL' "${common[@]}" --set-string proxyURL=https://proxy.internal:3128
+assert_render_fails proxy-tunnels-connect-to 'proxyURL cannot be combined with pipes.tunnelsConnectTo' \
+  "${common[@]}" --set-string proxyURL=http://proxy.internal:3128 --set-string pipes.tunnelsConnectTo=10.0.0.1:443
 
 assert_render_fails upstream-file-and-pem 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.caPEM=pem
 assert_render_fails upstream-file-and-secret 'upstreamTLS.caFile cannot be combined' "${common[@]}" --set-string upstreamTLS.caFile=/ca.crt --set-string upstreamTLS.existingSecret=supplied-upstream-ca

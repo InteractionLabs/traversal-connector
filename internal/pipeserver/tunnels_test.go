@@ -2,7 +2,12 @@ package pipeserver
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,5 +92,50 @@ func TestReady(t *testing.T) {
 	tunnels.everUp.Store(true)
 	if err := tunnels.Ready(t.Context()); err != nil {
 		t.Error("unready after tunnels flapped")
+	}
+}
+
+// TestTunnelThroughProxy: with EGRESS_PROXY_URL, a tunnel reaches the
+// controller host through the proxy's CONNECT, with the proxy's credentials,
+// and TLS (the tunnel ALPN included) runs end to end inside it.
+func TestTunnelThroughProxy(t *testing.T) {
+	tunnels := &Tunnels{ConnectorID: connector, Count: 1,
+		Server: &Server{ConnectorID: connector, metrics: testMetrics(t)}}
+	accept := controller(t, tunnels)
+	target := tunnels.Addr
+	tunnels.Addr = "edge.example.com:443" // only the proxy can reach it
+	var mu sync.Mutex
+	var connects []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		connects = append(connects, r.Method+" "+r.Host+" "+r.Header.Get("Proxy-Authorization"))
+		mu.Unlock()
+		up, err := net.Dial("tcp", target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		c, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			_ = up.Close()
+			return
+		}
+		_ = buf.Flush()
+		go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+		_, _ = io.Copy(c, up)
+		_ = c.Close()
+	}))
+	defer proxy.Close()
+	tunnels.Proxy, _ = url.Parse("http://u:pw@" + proxy.Listener.Addr().String())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tunnels.Start(ctx)
+	nextTunnel(t, accept, 5*time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if want := "CONNECT edge.example.com:443 Basic " + base64Of("u:pw"); len(connects) == 0 ||
+		connects[0] != want {
+		t.Fatalf("proxy saw %q, want %q", connects, want)
 	}
 }

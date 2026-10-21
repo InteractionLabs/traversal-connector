@@ -27,11 +27,11 @@
 {{- if $telemetryEnabled }}
 {{- include "traversal-connector.validateConnectTo" (dict "name" "otel.connectTo" "address" .Values.otel.connectTo) -}}
 {{- end }}
-{{- /* The connector refuses EGRESS_PROXY_URL at startup until tunnels can run
-       through it, so a release that set it fails here, before a rollout,
-       rather than crash-looping the new pods. */}}
-{{- if .Values.proxyURL }}
-{{- fail "proxyURL is not supported by connector 0.10.x yet; stay on 0.9.x" }}
+{{- if and .Values.proxyURL (not (hasPrefix "http://" (toString .Values.proxyURL))) }}
+{{- fail "proxyURL must be an http:// URL: tunnels to Traversal reach it with CONNECT." }}
+{{- end }}
+{{- if and .Values.proxyURL (.Values.pipes | default dict).tunnelsConnectTo }}
+{{- fail "proxyURL cannot be combined with pipes.tunnelsConnectTo." }}
 {{- end }}
 {{- if and .Values.proxyURL (or .Values.controllerConnectTo (and $telemetryEnabled .Values.otel.connectTo)) }}
 {{- fail "proxyURL cannot be combined with controllerConnectTo or otel.connectTo; fixed socket routing and forward proxy routing are mutually exclusive." }}

@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 
+	"github.com/InteractionLabs/traversal-connector/connector-lib/httpconnect"
 	"github.com/InteractionLabs/traversal-connector/connector-lib/rawpipe"
 )
 
@@ -20,7 +22,11 @@ type Tunnels struct {
 	ConnectorID string
 	// Addr is dialed; TLS carries the client certificate, the roots, and the
 	// controller host as ServerName.
-	Addr   string
+	Addr string
+	// Proxy, if set, is the http:// forward proxy (EGRESS_PROXY_URL) tunnels
+	// reach Addr through with CONNECT, as 0.9.x reached the controller; TLS
+	// then runs end to end inside it.
+	Proxy  *url.URL
 	TLS    *tls.Config
 	Count  int
 	Server *Server
@@ -118,18 +124,39 @@ func (t *Tunnels) hold(ctx context.Context) {
 	<-ctx.Done()
 }
 
+// dial opens one tunnel's TLS connection to Addr: direct, or through Proxy.
+func (t *Tunnels) dial(ctx context.Context) (*tls.Conn, error) {
+	if t.Proxy == nil {
+		c, err := (&tls.Dialer{Config: t.TLS}).DialContext(ctx, "tcp", t.Addr)
+		if err != nil {
+			return nil, err
+		}
+		return c.(*tls.Conn), nil //nolint:forcetypeassert,errcheck // tls.Dialer
+	}
+	raw, _, err := httpconnect.Dial(ctx, t.Proxy, t.Addr, nil) //nolint:bodyclose // Dial closes it
+	if err != nil {
+		return nil, fmt.Errorf("through EGRESS_PROXY_URL %s: %w", t.Proxy.Redacted(), err)
+	}
+	c := tls.Client(raw, t.TLS)
+	if err := c.HandshakeContext(ctx); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
 // serveOne dials one tunnel and serves it. It returns nil as soon as the
 // edge controller asks for a replacement, leaving the old tunnel serving
 // until the edge controller closes it, or the tunnel's error when it closes.
 func (t *Tunnels) serveOne(ctx context.Context) error {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	c, err := (&tls.Dialer{Config: t.TLS}).DialContext(dctx, "tcp", t.Addr)
+	c, err := t.dial(dctx)
 	if err != nil {
 		t.Server.metrics.dialed("failed")
 		return err
 	}
-	if c.(*tls.Conn).ConnectionState().NegotiatedProtocol != rawpipe.ALPN { //nolint:forcetypeassert,errcheck // tls.Dialer
+	if c.ConnectionState().NegotiatedProtocol != rawpipe.ALPN {
 		// Something between here and Traversal answered without the tunnel
 		// ALPN: most often a TLS-intercepting proxy.
 		t.Server.metrics.dialed("no_alpn")

@@ -146,8 +146,22 @@ func TestNew(t *testing.T) {
 			mutate: func(c *config.Config) { c.TraversalControllerURL = "http://edge" }, wantErr: "https://"},
 		{name: "bad connect-to", spiffeID: orgScoped, env: map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1"},
 			wantErr: "invalid TRAVERSAL_TUNNELS_CONNECT_TO: expected host:port"},
-		{name: "legacy egress proxy", spiffeID: orgScoped,
-			mutate: func(c *config.Config) { p := "http://p"; c.EgressProxyURL = &p }, wantErr: "EGRESS_PROXY_URL: "},
+		{name: "legacy egress proxy routes tunnels", spiffeID: orgScoped,
+			mutate: func(c *config.Config) { p := "http://u:pw@proxy.corp:3128"; c.EgressProxyURL = &p }, //nolint:gosec // G101: fake test credentials
+			check: func(tunnels *Tunnels) string {
+				if tunnels.Proxy == nil || tunnels.Proxy.Host != "proxy.corp:3128" ||
+					tunnels.Addr != "edge.example.com:443" {
+					return "EGRESS_PROXY_URL did not route tunnels"
+				}
+				return ""
+			}},
+		{name: "https legacy egress proxy", spiffeID: orgScoped,
+			mutate:  func(c *config.Config) { p := "https://proxy.corp:3128"; c.EgressProxyURL = &p },
+			wantErr: "EGRESS_PROXY_URL: must be an http:// URL"},
+		{name: "legacy egress proxy beside tunnel connect-to", spiffeID: orgScoped,
+			env:     map[string]string{"TRAVERSAL_TUNNELS_CONNECT_TO": "10.0.0.1:443"},
+			mutate:  func(c *config.Config) { p := "http://proxy.corp:3128"; c.EgressProxyURL = &p },
+			wantErr: "EGRESS_PROXY_URL cannot be combined with TRAVERSAL_TUNNELS_CONNECT_TO"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("TRAVERSAL_CAPABILITY_ISSUER", "traversal-raw-tunnel/test")
