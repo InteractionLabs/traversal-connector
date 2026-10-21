@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/InteractionLabs/traversal-connector/internal/env"
+	"github.com/InteractionLabs/traversal-connector/internal/telemetry"
 )
 
 const (
@@ -29,6 +30,11 @@ const (
 	defaultHTTPPort              = "8080"
 	defaultMaxConcurrentRequests = 10
 	defaultUpstreamTLSVerify     = true
+	defaultOTLPProtocol          = telemetry.OTLPProtocolHTTPJSON
+	// Traversal's hosted OTLP ingest. OTLP/HTTP names the signal in the path;
+	// OTLP/gRPC names it in the request and takes a bare authority.
+	defaultOTLPHTTPEndpointBase = "https://telemetry.traversal.com/v1/"
+	defaultOTLPGRPCEndpoint     = "https://telemetry.traversal.com:4317"
 	// pemPrefix is used to detect raw PEM content in certificate values.
 	pemPrefix = "-----BEGIN"
 	// maxTCPPort is the highest port an endpoint URL can name.
@@ -130,6 +136,7 @@ type Config struct {
 	OTLPLogsEndpoint string
 	// OTLPProtocol selects the OTLP exporter transport.
 	// "grpc" or "http/protobuf" → gRPC; "http/json" or "" → HTTP.
+	// Defaults to "http/json".
 	OTLPProtocol string
 	// OTLPConnectTo is a curl --connect-to-style override that changes only the
 	// TCP socket destination used by every direct OTLP exporter. Logical endpoints
@@ -285,7 +292,7 @@ func Load() (Config, error) {
 			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "",
 		),
 		OTLPProtocol: env.GetEnvString(
-			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
+			"OTEL_EXPORTER_OTLP_PROTOCOL", defaultOTLPProtocol,
 		),
 		OTLPConnectTo:    otlpConnectTo,
 		DisableTelemetry: disableTelemetry,
@@ -341,6 +348,10 @@ func Load() (Config, error) {
 // it still looks healthy from the outside. Failing at startup surfaces that at
 // deploy time rather than at the first incident.
 //
+// Leaving all three endpoints unset selects Traversal's hosted ingest. Setting
+// only some of them is still rejected: it more likely means a missed variable
+// than an intent to mix destinations.
+//
 // Opting out is absolute. TRAVERSAL_DISABLE_TELEMETRY drops any endpoints
 // configured anyway, so an empty endpoint keeps one meaning downstream: no
 // exporter starts. The caller announces that state, because config loading runs
@@ -360,6 +371,13 @@ func applyTelemetryPolicy(cfg *Config) error {
 		return nil
 	}
 
+	if cfg.OTLPMetricsEndpoint == "" && cfg.OTLPTracesEndpoint == "" &&
+		cfg.OTLPLogsEndpoint == "" {
+		cfg.OTLPMetricsEndpoint = defaultOTLPEndpoint(cfg.OTLPProtocol, "metrics")
+		cfg.OTLPTracesEndpoint = defaultOTLPEndpoint(cfg.OTLPProtocol, "traces")
+		cfg.OTLPLogsEndpoint = defaultOTLPEndpoint(cfg.OTLPProtocol, "logs")
+	}
+
 	for _, endpoint := range []otlpEndpoint{
 		{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", cfg.OTLPMetricsEndpoint},
 		{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", cfg.OTLPTracesEndpoint},
@@ -370,6 +388,15 @@ func applyTelemetryPolicy(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// defaultOTLPEndpoint returns the hosted ingest endpoint for one signal, in the
+// shape the selected exporter expects.
+func defaultOTLPEndpoint(protocol, signal string) string {
+	if telemetry.IsGRPCProtocol(protocol) {
+		return defaultOTLPGRPCEndpoint
+	}
+	return defaultOTLPHTTPEndpointBase + signal
 }
 
 // validateConnectTo validates a routing-only host:port without ever echoing
@@ -422,7 +449,7 @@ type otlpEndpoint struct {
 func (e otlpEndpoint) validate() error {
 	if e.value == "" {
 		return fmt.Errorf(
-			"%s is required: set all three OTLP endpoints, or set "+
+			"%s is required: set all three OTLP endpoints or none, or set "+
 				"TRAVERSAL_DISABLE_TELEMETRY=true to run without telemetry "+
 				"(Traversal cannot then support this deployment)",
 			e.envVar,
