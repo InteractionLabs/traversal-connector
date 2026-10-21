@@ -1,7 +1,9 @@
 package redact
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,8 +38,9 @@ func TestFileLoaderInitial(t *testing.T) {
 		{name: "invalid TOML", content: "CUSTOMER_CANARY = [", wantErr: true},
 		{name: "invalid pattern", content: strings.ReplaceAll(localRules, "'secret'", "'[CUSTOMER_CANARY'"), wantErr: true},
 		{name: "invalid host", content: strings.Replace(localRules, "hosts = ['.*']", "hosts=['.*', '[CUSTOMER_CANARY']", 1), wantErr: true},
-		{name: "no hosts", content: strings.Replace(localRules, "hosts = ['.*']\n", "", 1), wantErr: true},
-		{name: "empty hosts", content: strings.Replace(localRules, "['.*']", "[]", 1), wantErr: true},
+		// v0.9 rules files: a rule without hosts covers every host.
+		{name: "no hosts", content: strings.Replace(localRules, "hosts = ['.*']\n", "", 1), want: "[LOCAL]"},
+		{name: "empty hosts", content: strings.Replace(localRules, "['.*']", "[]", 1), want: "[LOCAL]"},
 		{name: "unsupported type", content: strings.ReplaceAll(localRules, `"regex"`, `"CUSTOMER_CANARY"`), wantErr: true},
 		{name: "omitted type", content: strings.ReplaceAll(localRules, "type = \"regex\"\n", ""), wantErr: true},
 		{name: "mixed valid and invalid types", content: localRules + "\n[[rules]]\nname='bad'\ntype='CUSTOMER_CANARY'\npattern='secret'\nhosts=['.*']", wantErr: true},
@@ -120,7 +123,6 @@ func TestFileLoaderReload(t *testing.T) {
 		strings.ReplaceAll(localRules, "type = \"regex\"\n", ""),
 		localRules + "\n[[rules]]\nname='bad'\ntype='glob'\npattern='secret'\nhosts=['.*']",
 		localRules + "\n[[rules]]\nname='bad'\npattern='secret'\nhosts=['.*']",
-		strings.Replace(localRules, "hosts = ['.*']\n", "", 1),
 	} {
 		writeLocalRules(t, path, bad)
 		if err := l.refresh(); err == nil {
@@ -243,5 +245,46 @@ func TestFileLoaderRunStopsOnRepeatedFailures(t *testing.T) {
 	defer cancel()
 	if err := l.Run(ctx); err == nil || !strings.Contains(err.Error(), "3 consecutive") {
 		t.Fatalf("expected failure after three attempts, got %v", err)
+	}
+}
+
+// TestHostlessRuleCoversEveryHost: a v0.9 rules file whose rule has no hosts
+// still loads and redacts every host, and the load warns once for that rule,
+// by its place only.
+func TestHostlessRuleCoversEveryHost(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	path := filepath.Join(t.TempDir(), "rules.toml")
+	writeLocalRules(t, path, strings.Replace(localRules, "hosts = ['.*']\n", "", 1)+
+		"\n[[rules]]\nname='scoped'\ntype='regex'\npattern='other'\nhosts=['^api\\.example$']")
+	r := NewRedactor()
+	if err := NewFileLoader(path, r, time.Second).LoadInitial(); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"api.example", "customer.internal", "10.0.0.1"} {
+		if !r.HasRulesForHost(host) {
+			t.Errorf("%s: no rule covers it", host)
+		}
+		if got := string(applyBytes(r, host, []byte("secret"))); got != "[LOCAL]" {
+			t.Errorf("%s: got %q, want [LOCAL]", host, got)
+		}
+	}
+	if n := strings.Count(logs.String(), "redaction rule has no hosts"); n != 1 {
+		t.Errorf("want one warning for the one hostless rule, got %d:\n%s", n, logs.String())
+	}
+	// It names the rule and its position, and says what it costs, but never
+	// the rule's pattern ('secret') or replacement ('[LOCAL]').
+	for _, want := range []string{"rule=token", "position=1", "rules=2", "every response"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("warning lacks %q:\n%s", want, logs.String())
+		}
+	}
+	for _, content := range []string{"secret", "[LOCAL]"} {
+		if strings.Contains(logs.String(), content) {
+			t.Errorf("warning leaks rule content %q:\n%s", content, logs.String())
+		}
 	}
 }

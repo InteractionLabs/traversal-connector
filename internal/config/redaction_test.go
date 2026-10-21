@@ -16,7 +16,8 @@ func TestLoadRedactionSource(t *testing.T) {
 		{name: "local explicit OTA off", file: "/rules.toml", ota: "false", wantInterval: 10 * time.Second},
 		{name: "local custom interval", file: "/rules.toml", interval: "2s", wantInterval: 2 * time.Second},
 		{name: "remote", ota: "true", wantInterval: 10 * time.Second},
-		{name: "both", file: "/rules.toml", ota: "true", wantErr: "mutually exclusive"},
+		// Both: OTA first, the file as its fallback (startRedaction).
+		{name: "both", file: "/rules.toml", ota: "true", wantInterval: 10 * time.Second},
 		{name: "zero interval", file: "/rules.toml", interval: "0s", wantErr: "REDACTION_RELOAD_INTERVAL"},
 		{name: "negative interval", file: "/rules.toml", interval: "-1s", wantErr: "REDACTION_RELOAD_INTERVAL"},
 		{name: "malformed interval", file: "/rules.toml", interval: "typo", wantErr: "REDACTION_RELOAD_INTERVAL"},

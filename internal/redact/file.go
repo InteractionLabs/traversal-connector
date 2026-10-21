@@ -63,15 +63,13 @@ func (l *FileLoader) refresh() error {
 			)
 		}
 	}
-	if err := rules.CheckHosts(); err != nil {
-		return fmt.Errorf("local redaction rules: %w", err)
-	}
 	if err := l.redactor.Update(&rules); err != nil {
 		return errors.New(
 			"local redaction rules failed to compile; retaining last-known-good rules",
 		)
 	}
 	l.lastHash, l.loaded = hash, true
+	rules.WarnHostless("local")
 	slog.Info("local redaction rules applied", "path", l.path, "rule_count", len(rules.Rules))
 	return nil
 }

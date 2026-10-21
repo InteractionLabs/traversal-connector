@@ -195,7 +195,8 @@ otel:
 
 # ─── Remote configuration (opt-in) ──────────────────────────────────────────
 # Uses the controller origin and /v1/config/<connectorID>; no endpoint override.
-# Publish a valid config before enabling. Mutually exclusive with local redaction.
+# Publish a valid config before enabling. With local redaction also enabled,
+# the local rules are the fallback used only when the first fetch fails.
 # When enabled, startup requires a valid document (including explicit rules=[]);
 # a missing config or any other initial fetch failure blocks startup.
 configUpdates:
@@ -212,7 +213,8 @@ configUpdates:
   signingKeys: ""
 
 # ─── Local-file redaction (opt-in) ───────────────────────────────────────────
-# Set enabled: true and exactly one source. Cannot be combined with configUpdates.
+# Set enabled: true and exactly one source. With configUpdates.enabled too,
+# these rules apply only when the connector cannot load its OTA config at start.
 # See the repository README for the local TOML format.
 redaction:
   enabled: false

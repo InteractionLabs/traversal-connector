@@ -37,15 +37,18 @@ func TestRemoteConfigValidation(t *testing.T) {
 		remoteRules + "\nredact_fields = [\"message\"]",
 		remoteRules + "\nredact_fields = []",
 		remoteRules + "\n[[redaction.rules]]\nname='token'\ntype='regex'\npattern='other'\nhosts=['.*']",
-		strings.Replace(remoteRules, "hosts = ['.*']\n", "", 1),
-		strings.Replace(remoteRules, "['.*']", "[]", 1),
 		strings.Repeat(" ", MaxConfigBytes+1),
 	} {
 		if _, err := ParseConfig([]byte(bad)); err == nil {
 			t.Errorf("invalid config accepted: %.80q", bad)
 		}
 	}
-	for _, good := range []string{remoteRules, "schema_version=1\n[redaction]\nrules=[]"} {
+	for _, good := range []string{
+		remoteRules, "schema_version=1\n[redaction]\nrules=[]",
+		// v0.9 configs: a rule without hosts covers every host.
+		strings.Replace(remoteRules, "hosts = ['.*']\n", "", 1),
+		strings.Replace(remoteRules, "['.*']", "[]", 1),
+	} {
 		if _, err := ParseConfig([]byte(good)); err != nil {
 			t.Fatal(err)
 		}

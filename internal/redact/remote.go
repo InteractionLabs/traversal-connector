@@ -65,9 +65,6 @@ func ParseConfig(data []byte) (*RulesFile, error) {
 		DefaultReplacement: doc.Redaction.DefaultReplacement,
 		Rules:              *doc.Redaction.Rules,
 	}
-	if err := rules.CheckHosts(); err != nil {
-		return nil, err
-	}
 	return rules, nil
 }
 
@@ -251,6 +248,7 @@ func (l *RemoteLoader) refresh(ctx context.Context) (err error) {
 				return errors.New("config rules failed to compile; retaining last-known-good rules")
 			}
 			l.status.Store(&remoteStatus{rules: int64(len(rules.Rules))})
+			rules.WarnHostless("remote")
 			outcome = "applied"
 			slog.InfoContext(
 				ctx,

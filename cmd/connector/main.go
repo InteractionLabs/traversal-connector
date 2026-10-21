@@ -128,13 +128,32 @@ func setupTelemetry(cfg *config.Config, otlpTLS *tls.Config) (flush func(), err 
 	return func() { flushTelemetry(shutdownContextTimeout) }, err
 }
 
-// startRedaction loads the redaction rules, from a local file or Traversal's
-// config endpoint, and keeps them current until ctx is done. A connector
-// whose first load fails must not start: it would forward unredacted.
+// startRedaction loads the redaction rules and keeps them current until ctx
+// is done. It uses one source, never a merge of two:
+//
+//  1. Traversal's config endpoint (TRAVERSAL_CONFIG_ENABLED), when its first
+//     fetch succeeds;
+//  2. else the local file (REDACTION_RULES_FILE), when one is set;
+//  3. else no rules.
+//
+// A connector configured for OTA alone whose first fetch fails does not
+// start: it would forward unredacted. With a file to fall back to, it runs on
+// the file's rules instead and does not poll OTA.
 func startRedaction(ctx context.Context, cfg *config.Config) (*redact.Redactor, error) {
 	redactor := redact.NewRedactor()
-	switch {
-	case cfg.RedactionRulesFile != nil:
+	if cfg.ConfigEnabled {
+		err := startRemoteRedaction(ctx, cfg, redactor)
+		if err == nil {
+			return redactor, nil
+		}
+		var fatal *fatalConfigError
+		if cfg.RedactionRulesFile == nil || errors.As(err, &fatal) {
+			return nil, fmt.Errorf("initial remote config: %w", err)
+		}
+		slog.Warn("remote redaction config unavailable; using local redaction rules",
+			"error", err, "path", *cfg.RedactionRulesFile)
+	}
+	if cfg.RedactionRulesFile != nil {
 		loader := redact.NewFileLoader(
 			*cfg.RedactionRulesFile, redactor, cfg.RedactionReloadInterval,
 		)
@@ -147,40 +166,51 @@ func startRedaction(ctx context.Context, cfg *config.Config) (*redact.Redactor, 
 				os.Exit(1)
 			}
 		}()
-	case cfg.ConfigEnabled:
-		httpClient, err := client.NewConfigHTTPClient(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("config transport: %w", err)
-		}
-		endpoint, err := cfg.ConfigURL()
-		if err != nil {
-			return nil, fmt.Errorf("config endpoint: %w", err)
-		}
-		loader, err := redact.NewRemoteLoader(
-			httpClient,
-			endpoint,
-			redactor,
-			cfg.ConfigRefreshInterval,
-		)
-		if raw := os.Getenv("TRAVERSAL_CONFIG_KEYS"); err == nil && raw != "" {
-			// Installed keys: only configs Traversal signed for this
-			// connector apply. A bundle that does not parse refuses to start,
-			// rather than running with unsigned configs.
-			keys, keysErr := capability.ParseKeys([]byte(config.DecodePEM(raw)))
-			if keysErr != nil {
-				return nil, fmt.Errorf("TRAVERSAL_CONFIG_KEYS: %w", keysErr)
-			}
-			loader.RequireSignature(cfg.ConnectorID, keys)
-		}
-		if err == nil {
-			err = loader.LoadInitial(ctx)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("initial remote config: %w", err)
-		}
-		go loader.Run(ctx)
 	}
 	return redactor, nil
+}
+
+// fatalConfigError is an OTA misconfiguration (an unparseable key bundle):
+// the connector refuses to start rather than fall back to local rules.
+type fatalConfigError struct{ err error }
+
+func (e *fatalConfigError) Error() string { return e.err.Error() }
+func (e *fatalConfigError) Unwrap() error { return e.err }
+
+// startRemoteRedaction loads the first config from Traversal's config
+// endpoint into redactor and, if it loaded, keeps it current.
+func startRemoteRedaction(
+	ctx context.Context,
+	cfg *config.Config,
+	redactor *redact.Redactor,
+) error {
+	httpClient, err := client.NewConfigHTTPClient(cfg)
+	if err != nil {
+		return fmt.Errorf("config transport: %w", err)
+	}
+	endpoint, err := cfg.ConfigURL()
+	if err != nil {
+		return fmt.Errorf("config endpoint: %w", err)
+	}
+	loader, err := redact.NewRemoteLoader(httpClient, endpoint, redactor, cfg.ConfigRefreshInterval)
+	if err != nil {
+		return err
+	}
+	if raw := os.Getenv("TRAVERSAL_CONFIG_KEYS"); raw != "" {
+		// Installed keys: only configs Traversal signed for this connector
+		// apply. A bundle that does not parse is a misconfiguration, so it
+		// refuses to start rather than fall back.
+		keys, keysErr := capability.ParseKeys([]byte(config.DecodePEM(raw)))
+		if keysErr != nil {
+			return &fatalConfigError{fmt.Errorf("TRAVERSAL_CONFIG_KEYS: %w", keysErr)}
+		}
+		loader.RequireSignature(cfg.ConnectorID, keys)
+	}
+	if err := loader.LoadInitial(ctx); err != nil {
+		return err
+	}
+	go loader.Run(ctx)
+	return nil
 }
 
 // serveProbes serves /healthz and /readyz on HTTP_PORT, and returns what

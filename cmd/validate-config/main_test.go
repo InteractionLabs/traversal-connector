@@ -16,8 +16,9 @@ func TestValidateConfigCommand(t *testing.T) {
 		{"go_re2", rule + `'\p{Greek}+'` + "\nhosts=['.*']", 0},
 		{"malformed", rule + "'['\nhosts=['.*']", 1},
 		{"lookbehind", rule + "'(?<=secret)value'\nhosts=['.*']", 1},
-		{"no_hosts", rule + "'x'", 1},
-		{"empty_hosts", rule + "'x'\nhosts=[]", 1},
+		// v0.9 configs: a rule without hosts covers every host.
+		{"no_hosts", rule + "'x'", 0},
+		{"empty_hosts", rule + "'x'\nhosts=[]", 0},
 		{"host_malformed", rule + "'x'\nhosts=['[']", 1},
 		{"host_lookbehind", rule + "'x'\nhosts=['(?<=a)b']", 1},
 		{"wildcard_first", rule + "'x'\nhosts=['.*','[']", 1},
