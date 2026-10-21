@@ -3,7 +3,7 @@ name: Release
 on:
   pull_request:
     types: [closed]
-    branches: [main]
+    branches: [main, release/0.9]
   workflow_dispatch:
     inputs:
       bump:
