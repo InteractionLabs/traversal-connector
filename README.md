@@ -140,6 +140,28 @@ if its immutable ECR tag already exists; a changed commit receives a new tag and
 bundle. This path never writes Docker Hub, GitHub Releases, release Git tags, or
 the canonical chart OCI registry.
 
+### Cutting a release
+
+Releases are only ever dispatched by a person; merging a PR releases nothing.
+The version is given, not computed, and checked before anything is built: it
+must be the next version of an existing line (the patch after the newest
+`vX.Y.*`, or the first of the next minor or major), its tag must not exist, and
+the commit must contain the release it follows. Only a release from `main`, for
+the newest version, may be marked GitHub's Latest.
+
+Validate first with a dry run, which builds and publishes nothing:
+
+```bash
+gh workflow run release.yml --ref main -f version=v0.10.1 -f dry_run=true \
+  -f description="$(cat notes.md)"
+```
+
+The `prepare` job prints the plan (`Releasing v0.10.1 from main at <sha> …`).
+Then run the same command without `dry_run`. A patch for an older line is
+dispatched from its `release/X.Y` branch with `-f latest=false`. If a run is
+cancelled or fails during publish, its `cleanup` job removes the draft release
+and the tag it made; it never touches a published release.
+
 ## Installing with Helm
 
 Docker Hub is the canonical public image distribution. Before publishing each
