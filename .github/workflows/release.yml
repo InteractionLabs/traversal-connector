@@ -1,20 +1,28 @@
 name: Release
 
+# Releases are only ever dispatched by a person: merging a PR releases
+# nothing. The version is given, not computed, and validated before anything is
+# built. This chart and image are installed into customers' own networks, so an
+# accidental release is not cheap to take back.
 on:
-  pull_request:
-    types: [closed]
-    branches: [main, release/0.9]
   workflow_dispatch:
     inputs:
-      bump:
-        description: 'Version component to bump'
-        type: choice
-        options: [major, minor, patch]
-        default: patch
-      description:
-        description: 'Description of the release (release notes)'
+      version:
+        description: 'The version to release, e.g. v0.10.1: the next version of an existing line'
         type: string
         required: true
+      description:
+        description: 'Release notes'
+        type: string
+        required: true
+      latest:
+        description: "Mark this release as GitHub's Latest (main only)"
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Validate and print the plan only: build and publish nothing'
+        type: boolean
+        default: false
 
 concurrency:
   group: release
@@ -37,80 +45,87 @@ env:
 
 jobs:
   prepare:
-    # Run on manual dispatch, or when a PR is merged carrying a release:* label.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true && (
-        contains(github.event.pull_request.labels.*.name, 'release:major') ||
-        contains(github.event.pull_request.labels.*.name, 'release:minor') ||
-        contains(github.event.pull_request.labels.*.name, 'release:patch')))
     runs-on: [ubuntu-latest]
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      notes: ${{ steps.meta.outputs.notes }}
+      notes: ${{ steps.version.outputs.notes }}
+      latest: ${{ steps.version.outputs.latest }}
+      # 'true' when the dispatch asked for it; every later job skips then.
+      dry_run: ${{ inputs.dry_run }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
-      - name: Determine bump and release notes
-        id: meta
+      - name: Validate the release
+        id: version
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_BUMP: ${{ github.event.inputs.bump }}
-          INPUT_DESC: ${{ github.event.inputs.description }}
-          LABELS: ${{ toJson(github.event.pull_request.labels) }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.description }}
+          LATEST: ${{ inputs.latest }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            bump="$INPUT_BUMP"
-            notes="$INPUT_DESC"
-          else
-            if echo "$LABELS" | jq -e '.[] | select(.name == "release:major")' > /dev/null; then
-              bump='major'
-            elif echo "$LABELS" | jq -e '.[] | select(.name == "release:minor")' > /dev/null; then
-              bump='minor'
-            else
-              bump='patch'
-            fi
-            # Release notes are the top-level "# Release Notes" section of the PR
-            # body, enforced by the Release Notes Check workflow. Fail loudly if
-            # it is missing rather than publishing an arbitrary body as notes.
-            section=$(printf '%s\n' "$PR_BODY" | .github/scripts/extract-release-notes.sh)
-            if [[ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]]; then
-              echo "::error::Merged PR has a release:* label but no non-empty '# Release Notes' section."
-              exit 1
-            fi
-            notes="$section"
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          [[ "$VERSION" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+            fail "version $VERSION is not vX.Y.Z."
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+          [[ -n "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]] || fail "release notes are empty."
+
+          git fetch --tags --force origin
+          if git rev-parse --verify --quiet "refs/tags/$VERSION" >/dev/null; then
+            fail "$VERSION already exists."
           fi
 
-          echo "bump=$bump" >> "$GITHUB_OUTPUT"
-          echo "Bump type: $bump"
+          # The next version of an existing line: the patch after the newest
+          # vX.Y.*, or the first of a new minor or major past the newest tag.
+          line_latest=$(git tag -l "v${major}.${minor}.*" --sort=-v:refname | head -n1)
+          newest=$(git tag -l 'v*.*.*' --sort=-v:refname | head -n1)
+          if [[ -n "$line_latest" ]]; then
+            [[ "$line_latest" =~ ^v[0-9]+\.[0-9]+\.([0-9]+)$ ]]
+            want=$((BASH_REMATCH[1] + 1))
+            [[ "$patch" -eq "$want" ]] ||
+              fail "$VERSION skips or repeats: the next on v${major}.${minor} is v${major}.${minor}.${want} (after $line_latest)."
+            base=$line_latest
+          else
+            [[ "$patch" -eq 0 ]] || fail "$VERSION starts a new line, so it must be v${major}.${minor}.0."
+            IFS=. read -r newest_major newest_minor _ <<< "${newest#v}"
+            next_minor="v${newest_major}.$((newest_minor + 1)).0"
+            next_major="v$((newest_major + 1)).0.0"
+            [[ "$VERSION" == "$next_minor" || "$VERSION" == "$next_major" ]] ||
+              fail "$VERSION starts a line that isn't next: after $newest, a new line is $next_minor or $next_major."
+            base=$newest
+          fi
+
+          # The commit must build on the release it follows: vX.Y.Z+1 must
+          # contain vX.Y.Z, so code from an older line can't go out under a
+          # newer line's number. This reads git history, not the branch's name.
+          git merge-base --is-ancestor "$base" HEAD ||
+            fail "$GITHUB_SHA doesn't contain $base, so it can't be released as $VERSION."
+
+          # Only the newest line, released from main, may take GitHub's Latest.
+          latest=false
+          if [[ "$LATEST" == true ]]; then
+            [[ "$GITHUB_REF_NAME" == main ]] || fail "only a release from main may be marked Latest; set latest=false."
+            [[ "$(printf '%s\n%s\n' "$VERSION" "$newest" | sort -V | tail -n1)" == "$VERSION" ]] ||
+              fail "$VERSION is older than $newest, so it can't be Latest; set latest=false."
+            latest=true
+          fi
+
+          echo "Releasing $VERSION from $GITHUB_REF_NAME at $GITHUB_SHA (previous on this line: ${line_latest:-none}; base $base); Latest: $latest."
           {
+            echo "version=$VERSION"
+            echo "latest=$latest"
             echo "notes<<RELEASE_NOTES_EOF"
-            echo "$notes"
+            echo "$NOTES"
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Compute new version
-        id: version
-        run: |
-          latest=$(git tag -l 'v*.*.*' --sort=-v:refname | head -n1)
-          latest=${latest:-v0.0.0}
-          IFS='.' read -r major minor patch <<< "${latest#v}"
-          case "${{ steps.meta.outputs.bump }}" in
-            major) major=$((major+1)); minor=0; patch=0 ;;
-            minor) minor=$((minor+1)); patch=0 ;;
-            patch) patch=$((patch+1)) ;;
-          esac
-          version="v${major}.${minor}.${patch}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Previous: $latest -> New: $version"
-
   build:
     needs: prepare
+    if: needs.prepare.outputs.dry_run != 'true'
     runs-on: [ubuntu-latest]
     permissions:
       contents: read
@@ -164,6 +179,7 @@ jobs:
 
   package-chart:
     needs: prepare
+    if: needs.prepare.outputs.dry_run != 'true'
     runs-on: [ubuntu-latest]
     permissions:
       contents: read
@@ -267,6 +283,7 @@ jobs:
 
   publish:
     needs: [prepare, build, sign, package-chart, validate-chart-install]
+    if: needs.prepare.outputs.dry_run != 'true'
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
@@ -312,6 +329,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           NOTES: ${{ needs.prepare.outputs.notes }}
+          LATEST: ${{ needs.prepare.outputs.latest }}
           DIGEST: ${{ needs.build.outputs.digest }}
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE }}
           ECR_MIRROR_REPOSITORY: ${{ secrets.ECR_MIRROR_REPOSITORY }}
@@ -418,6 +436,54 @@ jobs:
           cosign verify --key cosign.pub "${ECR_MIRROR_REPOSITORY}@${DIGEST}"
           rm -f "$describe_error"
 
-          gh release edit "$VERSION" --draft=false --latest
+          latest_flag=--latest=false
+          if [[ "$LATEST" == true ]]; then
+            latest_flag=--latest
+          fi
+          gh release edit "$VERSION" --draft=false "$latest_flag"
           published=true
           trap - EXIT
+
+  # publish's own trap rolls back on a failing step, but a cancelled run can
+  # stop it before the trap runs. This job runs whenever publish didn't
+  # finish, and removes only what this run left half-made: a draft release, and
+  # its tag if the tag points at this run's commit. A published release is
+  # never touched.
+  cleanup:
+    needs: [prepare, publish]
+    if: >
+      always() && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.dry_run != 'true' &&
+      (needs.publish.result == 'cancelled' || needs.publish.result == 'failure')
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Remove a half-made release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          if draft=$(gh release view "$VERSION" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" != true ]]; then
+              echo "$VERSION is published; leaving it."
+              exit 0
+            fi
+            echo "Removing draft release $VERSION."
+            gh release delete "$VERSION" --yes
+          fi
+          if tag_sha=$(git rev-parse --verify --quiet "refs/tags/$VERSION^{commit}"); then
+            if [[ "$tag_sha" == "$RUN_SHA" ]]; then
+              echo "Removing tag $VERSION, made by this run."
+              git push origin ":refs/tags/$VERSION"
+            else
+              echo "Tag $VERSION points at $tag_sha, not this run's $RUN_SHA; leaving it."
+            fi
+          fi
