@@ -181,7 +181,7 @@ otel:
     enabled: true
     image:
       repository: traversalext/alloy
-      tag: "v1.18.0"
+      tag: "v1.21.2"
       pullPolicy: IfNotPresent
     port: 4318                                  # sidecar HTTP OTLP receiver and connector loopback target
     # A memory limit is required for the sidecar's memory_limiter to bound
