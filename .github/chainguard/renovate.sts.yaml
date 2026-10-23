@@ -9,8 +9,10 @@ subject: system:serviceaccount:renovate:renovate
 permissions:
   contents: write
   pull_requests: write
-  # Renovate reads issues on every run and the check and commit statuses of its
-  # own PRs. The Dependency Dashboard is off, so it never needs to write issues.
+  # Renovate reads issues on every run. It writes check runs and commit statuses
+  # on its own branches, e.g. to report a failed lockfile update; without write
+  # it aborts before opening the PR. The Dependency Dashboard is off, so it never
+  # needs to write issues.
   issues: read
-  checks: read
-  statuses: read
+  checks: write
+  statuses: write
