@@ -70,7 +70,8 @@ func TestSignWithRefusesOtherKeys(t *testing.T) {
 		"P-224": mustKey(t, elliptic.P224()),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := SignWith(signer, Header{Typ: "example+jwt"}, testClaims{}); !errors.Is(err, ErrSigner) {
+			_, err := SignWith(signer, Header{Typ: "example+jwt"}, testClaims{})
+			if !errors.Is(err, ErrSigner) {
 				t.Fatalf("err = %v, want ErrSigner", err)
 			}
 		})
