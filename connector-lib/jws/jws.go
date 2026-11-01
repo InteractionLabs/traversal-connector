@@ -3,7 +3,8 @@
 // holds exactly alg, typ, kid and, where allowed, x5c; no key may repeat,
 // exactly or by case, at any depth of either segment; nothing may trail the
 // JSON; and every claim the claims type names is required unless tagged
-// omitempty. Signatures are golang-jwt's.
+// omitempty. Signing takes any P-256 crypto.Signer; verification is
+// golang-jwt's.
 //
 // testdata/vectors.json holds golden tokens and the verdict each must get,
 // for this package's tests and for ports to other languages.
