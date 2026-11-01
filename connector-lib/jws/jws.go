@@ -3,7 +3,8 @@
 // holds exactly alg, typ, kid and, where allowed, x5c; no key may repeat,
 // exactly or by case, at any depth of either segment; nothing may trail the
 // JSON; and every claim the claims type names is required unless tagged
-// omitempty. Signatures are golang-jwt's.
+// omitempty. Signing takes any P-256 crypto.Signer; verification is
+// golang-jwt's.
 //
 // testdata/vectors.json holds golden tokens and the verdict each must get,
 // for this package's tests and for ports to other languages.
@@ -11,7 +12,12 @@ package jws
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/json/jsontext"
@@ -19,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"reflect"
 	"strings"
 
@@ -35,6 +42,9 @@ var (
 	ErrSignature = errors.New("bad signature")
 	ErrClaims    = errors.New("bad claims")
 )
+
+// ErrSigner is a signer whose key is not a P-256 ECDSA key.
+var ErrSigner = errors.New("ES256 needs a P-256 ECDSA signer")
 
 // Header is a token's JWS header.
 type Header struct {
@@ -108,6 +118,21 @@ func (t *Token) Verify(key *ecdsa.PublicKey, claims any, unknown Unknown) error 
 // Sign returns claims as a token with header h, signed by key. It sets
 // h.Alg.
 func Sign(key *ecdsa.PrivateKey, h Header, claims any) (string, error) {
+	if key == nil {
+		return "", ErrSigner
+	}
+	return SignWith(key, h, claims)
+}
+
+// SignWith is Sign with any signer of a P-256 ECDSA key, including one whose
+// private key never leaves a key management service. It sets h.Alg.
+func SignWith(signer crypto.Signer, h Header, claims any) (string, error) {
+	if signer == nil {
+		return "", ErrSigner
+	}
+	if pub, ok := signer.Public().(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P256() {
+		return "", ErrSigner
+	}
 	h.Alg = Algorithm
 	hdr, err := json.Marshal(h)
 	if err != nil {
@@ -118,11 +143,35 @@ func Sign(key *ecdsa.PrivateKey, h Header, claims any) (string, error) {
 		return "", err
 	}
 	input := b64(hdr) + "." + b64(p)
-	sig, err := jwt.SigningMethodES256.Sign(input, key)
+	digest := sha256.Sum256([]byte(input))
+	der, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
+	if err != nil {
+		return "", err
+	}
+	sig, err := rawSignature(der)
 	if err != nil {
 		return "", err
 	}
 	return input + "." + b64(sig), nil
+}
+
+// rawSignature turns the ASN.1 ECDSA signature a crypto.Signer returns into
+// the 64-byte r||s a JWS carries (RFC 7518 section 3.4).
+func rawSignature(der []byte) ([]byte, error) {
+	var rs struct{ R, S *big.Int }
+	rest, err := asn1.Unmarshal(der, &rs)
+	if err != nil || len(rest) != 0 || !inP256Order(rs.R) || !inP256Order(rs.S) {
+		return nil, errors.New("malformed ECDSA signature")
+	}
+	sig := make([]byte, 64)
+	rs.R.FillBytes(sig[:32])
+	rs.S.FillBytes(sig[32:])
+	return sig, nil
+}
+
+// inP256Order reports whether n is a valid ECDSA scalar for P-256: in [1, N).
+func inP256Order(n *big.Int) bool {
+	return n.Sign() > 0 && n.Cmp(elliptic.P256().Params().N) < 0
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
