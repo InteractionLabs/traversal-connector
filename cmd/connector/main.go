@@ -21,6 +21,7 @@ import (
 	"github.com/InteractionLabs/traversal-connector/internal/pipeserver"
 	"github.com/InteractionLabs/traversal-connector/internal/redact"
 	"github.com/InteractionLabs/traversal-connector/internal/router"
+	"github.com/InteractionLabs/traversal-connector/internal/trustbootstrap"
 )
 
 const (
@@ -66,6 +67,10 @@ func main() {
 	)
 	defer cancel()
 
+	if err := bootstrapTrust(ctx, &cfg); err != nil {
+		slog.Error("failed to establish connector trust", "error", err)
+		os.Exit(1)
+	}
 	redactor, err := startRedaction(ctx, &cfg)
 	if err != nil {
 		slog.Error("refusing to start unredacted", "error", err)
@@ -101,6 +106,44 @@ func main() {
 	defer serveProbes(&cfg, tunnels)()
 	<-done
 	slog.InfoContext(ctx, "traversal connector service shutting down")
+}
+
+func bootstrapTrust(ctx context.Context, cfg *config.Config) error {
+	if !cfg.TrustBootstrapEnabled {
+		return nil
+	}
+	if os.Getenv("TRAVERSAL_CAPABILITY_ROOTS") != "" ||
+		os.Getenv("TRAVERSAL_CAPABILITY_KEYS") != "" {
+		slog.Info("using configured capability trust; enrollment bootstrap skipped")
+		return nil
+	}
+	httpClient, err := client.NewConfigHTTPClient(cfg)
+	if err != nil {
+		return fmt.Errorf("trust transport: %w", err)
+	}
+	defer httpClient.CloseIdleConnections()
+	endpoint, err := cfg.TrustURL()
+	if err != nil {
+		return fmt.Errorf("trust endpoint: %w", err)
+	}
+	result, err := trustbootstrap.LoadOrEnroll(ctx, httpClient, endpoint, cfg.TrustStateFile)
+	if err != nil {
+		return err
+	}
+	if err = os.Setenv("TRAVERSAL_CAPABILITY_ROOTS", result.CapabilityRoots); err != nil {
+		return fmt.Errorf("set capability roots: %w", err)
+	}
+	if os.Getenv("TRAVERSAL_CONFIG_KEYS") == "" {
+		if err = os.Setenv("TRAVERSAL_CONFIG_KEYS", result.ConfigKeys); err != nil {
+			return fmt.Errorf("set config keys: %w", err)
+		}
+	}
+	message := "loaded pinned connector trust"
+	if result.Created {
+		message = "pinned connector trust at enrollment"
+	}
+	slog.InfoContext(ctx, message, "root_fingerprints", result.RootFingerprints)
+	return nil
 }
 
 // setupTelemetry starts log, metric and trace export over otlpTLS, and

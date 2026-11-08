@@ -59,7 +59,15 @@ httpPort: ""               # HTTP_PORT (default 8080)
 # x-traversal-tunnel; a TLS-intercepting proxy breaks them). Traversal opens a
 # pipe on a tunnel for each destination, carrying a Traversal-signed capability
 # the connector checks before it dials. Needs controllerTLS and a lower-case
-# UUID connectorID, and capability trust: trustedRoots, or capabilityKeys.
+# UUID connectorID, and capability trust: enrollment bootstrap, trustedRoots,
+# or capabilityKeys.
+trustBootstrap:
+  enabled: false
+  # Existing ReadWriteMany claim holding the create-once trust pin. It must
+  # survive pod replacement; emptyDir is intentionally unsupported.
+  existingClaim: ""
+  stateFile: /var/lib/traversal-connector/trust/trust.json
+
 pipes:
   # Traversal's capability root certificates (PEM), the current root and,
   # during a root rotation, the next. Rendered together as
@@ -202,8 +210,10 @@ otel:
 configUpdates:
   enabled: false
   refreshInterval: "30s"
-  # Traversal's config signing keys, a Key-ID PEM bundle (the install command
-  # sets it). Set, only configs Traversal signed for this connector apply,
+  # Traversal's config signing keys, a Key-ID PEM bundle. This remains as a
+  # legacy/explicit override; enrollment bootstrap pins the same bundle and
+  # makes signatures mandatory without putting it in the install values.
+  # Set, only configs Traversal signed for this connector apply,
   # while within their signed validity window (5 minutes' clock skew
   # allowed), each at a version above the config applied and issued no
   # earlier (the applied one re-sent is a no-op); empty, configs apply

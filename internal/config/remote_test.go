@@ -24,7 +24,11 @@ func TestConfigURLUsesOnlyControllerOrigin(t *testing.T) {
 		}
 		got, err := cfg.ConfigURL()
 		if err != nil || got != tc.origin+"/v1/config/"+configConnectorID {
-			t.Fatalf("URL: %q, %v", got, err)
+			t.Fatalf("config URL: %q, %v", got, err)
+		}
+		got, err = cfg.TrustURL()
+		if err != nil || got != tc.origin+"/v1/trust/"+configConnectorID {
+			t.Fatalf("trust URL: %q, %v", got, err)
 		}
 	}
 }
