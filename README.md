@@ -355,8 +355,10 @@ addresses, and any CIDR you add. Private ranges are allowed.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRAVERSAL_CAPABILITY_ROOTS` | (none) | Traversal's capability root certificates (PEM, raw or base64). Required unless `TRAVERSAL_CAPABILITY_KEYS` is set. |
+| `TRAVERSAL_CAPABILITY_ROOTS` | (none) | Traversal's capability root certificates (PEM, raw or base64). Required unless `TRAVERSAL_CAPABILITY_KEYS` is set or enrollment trust bootstrap is enabled. |
 | `TRAVERSAL_CAPABILITY_KEYS` / `TRAVERSAL_CAPABILITY_ISSUER` | (none) | Pinned capability keys and their issuer, beside or instead of roots. |
+| `TRAVERSAL_TRUST_BOOTSTRAP` | `false` | With no configured capability roots or keys, fetch `/v1/trust/<connector-id>` once over controller mTLS and pin its capability roots and OTA config keys. |
+| `TRAVERSAL_TRUST_STATE_FILE` | (none) | Absolute durable path for the create-once enrollment pin; required with trust bootstrap. Deleting it is explicit re-enrollment. |
 | `TRAVERSAL_TUNNELS_COUNT` | `2` | Tunnels held, at most 8. |
 | `TRAVERSAL_TUNNELS_CONNECT_TO` | `TRAVERSAL_CONTROLLER_CONNECT_TO` | `host:port` to dial instead of the controller host on 443; SNI and certificate checks are unchanged. Unset, tunnels follow `TRAVERSAL_CONTROLLER_CONNECT_TO`, or with neither set go to the controller host on 443. |
 | `TRAVERSAL_PIPES_MAX` | `200` | Pipes open at once. |

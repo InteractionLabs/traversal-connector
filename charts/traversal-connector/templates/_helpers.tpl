@@ -27,8 +27,18 @@
 {{- $pipes := .Values.pipes | default dict -}}
 {{- $roots := $pipes.trustedRoots | default dict -}}
 {{- $keys := $pipes.capabilityKeys | default "" | toString | trim -}}
-{{- if not (or ($roots.current | default "" | trim) $keys) -}}
-{{- fail "pipes.trustedRoots.current or pipes.capabilityKeys is required: the connector trusts no capability without one." -}}
+{{- $bootstrap := .Values.trustBootstrap | default dict -}}
+{{- if not (kindIs "bool" ($bootstrap.enabled | default false)) -}}
+{{- fail "trustBootstrap.enabled must be a boolean." -}}
+{{- end -}}
+{{- if and $bootstrap.enabled (not ($bootstrap.existingClaim | default "" | trim)) -}}
+{{- fail "trustBootstrap.existingClaim is required: enrollment trust must survive pod replacement." -}}
+{{- end -}}
+{{- if and $bootstrap.enabled (not (hasPrefix "/" ($bootstrap.stateFile | default ""))) -}}
+{{- fail "trustBootstrap.stateFile must be an absolute path on the durable claim." -}}
+{{- end -}}
+{{- if not (or $bootstrap.enabled ($roots.current | default "" | trim) $keys) -}}
+{{- fail "trustBootstrap.enabled, pipes.trustedRoots.current, or pipes.capabilityKeys is required: the connector trusts no capability without one." -}}
 {{- end -}}
 {{- if and $keys (not ($pipes.capabilityIssuer | default "" | toString | trim)) -}}
 {{- fail "pipes.capabilityIssuer is required with pipes.capabilityKeys." -}}

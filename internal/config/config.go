@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -167,6 +168,12 @@ type Config struct {
 	UpstreamTLSCA *string
 	// ConfigEnabled opts in to OTA polling on the controller's origin.
 	ConfigEnabled bool
+	// TrustBootstrapEnabled opts in to fetching and pinning capability and
+	// config-signing trust over the enrollment mTLS channel when no legacy
+	// capability trust environment variable is configured.
+	TrustBootstrapEnabled bool
+	// TrustStateFile is the durable, create-once trust pin.
+	TrustStateFile string
 	// ConfigRefreshInterval is the polling interval (with up to 10% jitter).
 	ConfigRefreshInterval time.Duration
 	// RedactionRulesFile selects local TOML rules: on their own, or as the
@@ -300,11 +307,13 @@ func Load() (Config, error) {
 		OTLPProtocol: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_PROTOCOL", "",
 		),
-		OTLPConnectTo:     otlpConnectTo,
-		DisableTelemetry:  disableTelemetry,
-		UpstreamTLSVerify: env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
-		UpstreamTLSCA:     upstreamTLSCA,
-		ConfigEnabled:     configEnabled,
+		OTLPConnectTo:         otlpConnectTo,
+		DisableTelemetry:      disableTelemetry,
+		UpstreamTLSVerify:     env.GetEnvBool("UPSTREAM_TLS_VERIFY", defaultUpstreamTLSVerify),
+		UpstreamTLSCA:         upstreamTLSCA,
+		ConfigEnabled:         configEnabled,
+		TrustBootstrapEnabled: strict.Bool("TRAVERSAL_TRUST_BOOTSTRAP", false),
+		TrustStateFile:        env.GetEnvString("TRAVERSAL_TRUST_STATE_FILE", ""),
 		ConfigRefreshInterval: env.GetEnvDuration(
 			"TRAVERSAL_CONFIG_REFRESH_INTERVAL", defaultConfigRefreshInterval,
 		),
@@ -314,6 +323,11 @@ func Load() (Config, error) {
 
 	if err := strict.Err(); err != nil {
 		return Config{}, err
+	}
+	if cfg.TrustBootstrapEnabled && (cfg.TrustStateFile == "" || !filepath.IsAbs(cfg.TrustStateFile)) {
+		return Config{}, errors.New(
+			"TRAVERSAL_TRUST_STATE_FILE must be an absolute durable path when trust bootstrap is enabled",
+		)
 	}
 	if os.Getenv("TRAVERSAL_CONFIG_ENDPOINT") != "" {
 		return Config{}, errors.New(

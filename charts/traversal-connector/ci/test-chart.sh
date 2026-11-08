@@ -280,10 +280,18 @@ render raw-roots-rotation "$fixtures/direct-export-values.yaml" \
   fail "TRAVERSAL_CAPABILITY_ROOTS is not the current root then the next"
 
 # Capability trust is refused at render when the connector would refuse it.
-assert_render_fails no-capability-trust 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+assert_render_fails no-capability-trust 'trustBootstrap.enabled, pipes.trustedRoots.current, or pipes.capabilityKeys is required' \
   -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}"
-assert_render_fails next-root-only 'pipes.trustedRoots.current or pipes.capabilityKeys is required' \
+assert_render_fails next-root-only 'trustBootstrap.enabled, pipes.trustedRoots.current, or pipes.capabilityKeys is required' \
   -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}" --set-string pipes.trustedRoots.next="$next_root"
+assert_render_fails bootstrap-no-claim 'trustBootstrap.existingClaim is required' \
+  -f "$fixtures/direct-export-values.yaml" "${no_keys[@]}" --set trustBootstrap.enabled=true
+render trust-bootstrap "$fixtures/direct-export-values.yaml" "${no_keys[@]}" \
+  --set trustBootstrap.enabled=true --set trustBootstrap.existingClaim=connector-trust
+assert_contains "$tmp_dir/trust-bootstrap.yaml" 'name: TRAVERSAL_TRUST_BOOTSTRAP'
+assert_contains "$tmp_dir/trust-bootstrap.yaml" 'claimName: "connector-trust"'
+assert_contains "$tmp_dir/trust-bootstrap.yaml" 'mountPath: "/var/lib/traversal-connector/trust"'
+assert_not_contains "$tmp_dir/trust-bootstrap.yaml" 'TRAVERSAL_CAPABILITY_ROOTS'
 assert_render_fails keys-without-issuer 'pipes.capabilityIssuer is required with pipes.capabilityKeys' \
   -f "$fixtures/direct-export-values.yaml" --set-string pipes.capabilityIssuer=
 

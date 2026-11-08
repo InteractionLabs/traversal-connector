@@ -150,6 +150,12 @@ spec:
             {{- end }}
             - name: TRAVERSAL_CONNECTOR_ID
               value: {{ required "connectorID is required" .Values.connectorID | quote }}
+            {{- if .Values.trustBootstrap.enabled }}
+            - name: TRAVERSAL_TRUST_BOOTSTRAP
+              value: "true"
+            - name: TRAVERSAL_TRUST_STATE_FILE
+              value: {{ .Values.trustBootstrap.stateFile | quote }}
+            {{- end }}
             - name: UPSTREAM_TLS_VERIFY
               value: {{ .Values.upstreamTLS.verify | quote }}
             {{- with .Values.envLevel }}
@@ -326,6 +332,10 @@ spec:
           volumeMounts:
             - name: connector-tmp
               mountPath: /tmp
+            {{- if .Values.trustBootstrap.enabled }}
+            - name: connector-trust
+              mountPath: {{ dir .Values.trustBootstrap.stateFile | quote }}
+            {{- end }}
             {{- if $redactionEnabled }}
             - name: redaction-rules
               mountPath: /etc/traversal
@@ -456,6 +466,11 @@ spec:
       volumes:
         - name: connector-tmp
           emptyDir: {}
+        {{- if .Values.trustBootstrap.enabled }}
+        - name: connector-trust
+          persistentVolumeClaim:
+            claimName: {{ .Values.trustBootstrap.existingClaim | quote }}
+        {{- end }}
         {{- if $redactionEnabled }}
         - name: redaction-rules
           {{- if .Values.redaction.existingSecret }}
