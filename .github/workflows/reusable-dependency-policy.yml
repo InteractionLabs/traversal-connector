@@ -19,30 +19,12 @@ jobs:
   dependency-policy:
     name: dependency-policy
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout proposed repository state
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-
-      - name: Resolve comparison commits
-        id: comparison
-        env:
-          INPUT_BASE: ${{ inputs.base-sha }}
-          INPUT_HEAD: ${{ inputs.head-sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
-        run: |
-          set -euo pipefail
-          base="${INPUT_BASE:-${PR_BASE:-${QUEUE_BASE:-}}}"
-          head="${INPUT_HEAD:-HEAD}"
-          if [[ -z "$base" ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
-          git cat-file -e "${base}^{commit}"
-          git cat-file -e "${head}^{commit}"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "head=$head" >> "$GITHUB_OUTPUT"
 
       - name: Restore dependency evidence cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -55,8 +37,10 @@ jobs:
       - name: Enforce dependency policy
         uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@main # policy-v1
         with:
-          base-sha: ${{ steps.comparison.outputs.base }}
-          head-sha: ${{ steps.comparison.outputs.head }}
+          base-sha: ${{ inputs.base-sha || github.event.merge_group.base_sha }}
+          pull-request-base-sha: ${{ github.event.pull_request.base.sha }}
+          pull-request-base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ inputs.head-sha }}
           require-caller: "true"
           caller-repository: InteractionLabs/traversal-connector
           cache: ${{ runner.temp }}/dependency-policy-cache/evidence.json

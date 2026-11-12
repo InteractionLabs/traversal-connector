@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -32,10 +33,6 @@ def git_repository(tmp_path):
 
 def test_user_agent_omits_organization_name():
     assert policy.USER_AGENT == "dependency-policy/4"
-
-
-def test_vendored_filetype_version():
-    assert policy.filetype.__version__ == "1.2.0"
 
 
 def test_discovers_immutable_and_mutable_workflow_inputs():
@@ -350,7 +347,9 @@ def test_dependency_delta_skips_deleted_tgz_and_gzip_files(
 def test_dependency_delta_does_not_load_irrelevant_blobs(monkeypatch):
     monkeypatch.setattr(policy, "run_git", lambda *unused: "image.png\0")
     monkeypatch.setattr(
-        policy, "release_asset_dependencies", lambda unused_revision, unused_paths: set()
+        policy,
+        "release_asset_dependencies",
+        lambda unused_revision, unused_paths, unused_overrides=None: set(),
     )
     monkeypatch.setattr(
         policy,
@@ -454,9 +453,14 @@ def test_dependency_delta_finds_release_asset_in_unstructured_text(
         (b"\x89PNG\r\n\x1a\n" + b"x" * 20, "image/png"),
         (b"\xff\xd8\xff" + b"x" * 20, "image/jpeg"),
         (b"%PDF-1.7\n", "application/pdf"),
+        (b"%!PS-Adobe-3.0\n", "application/postscript"),
+        (b"{\\rtf1\\ansi\n", "application/rtf"),
+        (b"GIF89a" + b"x" * 20, "image/gif"),
+        (b"!<arch>\n", "application/x-unix-archive"),
+        (b"x" * 257 + b"ustar\x0000", "application/x-tar"),
     ],
 )
-def test_binary_format_uses_filetype(content, expected):
+def test_binary_format_recognizes_signatures(content, expected):
     assert policy.binary_format(content) == expected
 
 
@@ -991,6 +995,7 @@ def test_go_uses_public_index_timestamp_not_proxy_commit_time(monkeypatch):
         "request",
         lambda url: ({"Time": "2020-01-01T00:00:00Z"}, url),
     )
+    monkeypatch.setattr(policy, "request_last_modified", lambda url: None)
     monkeypatch.setattr(
         policy,
         "request_json_lines",
@@ -1098,3 +1103,115 @@ def test_workflow_wires_default_branch_evidence_cache():
     assert "jq -e '.cache.writes > 0'" in workflow
     assert "push:\n    branches: [main]" in caller
     assert "--cache \"$INPUT_CACHE\"" in action
+
+
+CONNECTOR_REPOSITORY = "InteractionLabs/traversal-connector"
+BROTLI_ADVISORY = {
+    "ghsa_id": "GHSA-9v8h-qqgm-4m35",
+    "type": "reviewed",
+    "severity": "high",
+    "cve_id": None,
+    "identifiers": [{"type": "GHSA", "value": "GHSA-9v8h-qqgm-4m35"}],
+    "withdrawn_at": None,
+    "vulnerabilities": [
+        {
+            "package": {"ecosystem": "pip", "name": "brotli"},
+            "vulnerable_version_range": ">= 1.0.3, < 1.2.1",
+            "first_patched_version": "1.2.1",
+        }
+    ],
+}
+
+
+class PublicAdvisoryNetwork:
+    def __init__(self, monkeypatch, advisories=(), fail=False):
+        self.advisories = list(advisories)
+        self.fail = fail
+        monkeypatch.setattr(policy, "request", self)
+
+    def __call__(self, url):
+        if url == policy.KEV_CATALOG:
+            return {"vulnerabilities": []}, url
+        if self.fail:
+            raise urllib.error.HTTPError(url, 403, "rate limited", {}, None)
+        return self.advisories, url
+
+
+@pytest.fixture
+def connector_run(tmp_path, monkeypatch, git_repository):
+    repository, git = git_repository
+    lock = (
+        '[[package]]\nname = "brotli"\nversion = "{}"\n'
+        'source = {{ registry = "https://pypi.org/simple" }}\n'
+    )
+
+    def commit(version):
+        (repository / "uv.lock").write_text(lock.format(version))
+        git("add", ".")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", version)
+        return git("rev-parse", "HEAD")
+
+    base = commit("1.2.0")
+    commit("1.2.1")
+    monkeypatch.setattr(policy, "REPOSITORY", repository)
+    monkeypatch.setattr(policy, "SECURITY_FIXES", tmp_path / "missing-fix-lists")
+    monkeypatch.setenv("GITHUB_REPOSITORY", CONNECTOR_REPOSITORY)
+    monkeypatch.setattr(policy, "go_index_evidence", lambda unused: {})
+    monkeypatch.setattr(
+        policy, "evidence", lambda unused: (NOW - dt.timedelta(days=1), "registry")
+    )
+
+    def run():
+        output = tmp_path / "report.json"
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "policy.py",
+                "--repo",
+                str(repository),
+                "--base",
+                base,
+                "--now",
+                NOW.isoformat(),
+                "--output",
+                str(output),
+            ],
+        )
+        status = policy.main()
+        return status, json.loads(output.read_text())["results"]
+
+    return run
+
+
+def test_absent_fix_lists_load_as_no_urgent_fixes(tmp_path):
+    assert policy.load_urgent_fixes(tmp_path / "missing", CONNECTOR_REPOSITORY) == {}
+    (tmp_path / "allow-rules.json").write_text("[]")
+    assert policy.load_urgent_fixes(tmp_path, CONNECTOR_REPOSITORY) == {}
+
+
+def test_connector_passes_a_public_advisory_fix_without_fix_lists(
+    monkeypatch, connector_run
+):
+    PublicAdvisoryNetwork(monkeypatch, [BROTLI_ADVISORY])
+    status, results = connector_run()
+    assert status == 0
+    assert results[0]["status"] == "excepted"
+    assert results[0]["detail"].startswith("security fix (GHSA-9v8h-qqgm-4m35")
+
+
+def test_connector_blocks_a_young_version_without_fix_lists_or_advisories(
+    monkeypatch, connector_run
+):
+    PublicAdvisoryNetwork(monkeypatch, [])
+    status, results = connector_run()
+    assert status == 1
+    assert results[0]["status"] == "blocked"
+
+
+def test_connector_keeps_the_block_when_advisory_apis_are_unreachable(
+    monkeypatch, connector_run
+):
+    PublicAdvisoryNetwork(monkeypatch, fail=True)
+    status, results = connector_run()
+    assert status == 1
+    assert results[0]["status"] == "blocked"

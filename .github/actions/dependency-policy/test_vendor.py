@@ -11,12 +11,13 @@ class DependencyPolicyVendorTest(unittest.TestCase):
     def test_policy_matches_declared_infrastructure_source(self):
         self.assertEqual(
             (POLICY / "SOURCE").read_text().strip(),
-            "InteractionLabs/infrastructure@b643da6e4e60678e13f86124e74d2a08c7ae6e5a",
+            "InteractionLabs/infrastructure@f63af3ceb2728f1155836f22d0ccc111ce1595cd",
         )
         expected = {
-            "action.yml": "deb89725a4b7ac2c7ade7dcfd83a64ba4f0be0d42fed04c78914444f2810904c",
-            "policy.py": "03cd82ea1ff93530da41cc66bd87388a16251b375269d6af28ef8aa560395f39",
-            "repository_invariants.py": "3cf8531929363228bc0c5d09c047fe95c41a6248527e4137be5b850419a620b4",
+            "action.yml": "b1b5fdaceb6adaef68b416a3434d5512971e6856239569661a5304efe2aaff15",
+            "policy.py": "05c7877b14d507a7d8fa2b4decb1dd469f851a9fc8af34f0314fdccfc6c0c900",
+            "resolve_base.py": "bd3da0f8356ba3cf531d9cb9132d42da6a5bd7f2b3da4e25dcf3cf99dfdde3f0",
+            "repository_invariants.py": "57858bf11fd53159dc92ebada74cb5e233ab997f34b1c5d879ecbc8651c6d114",
         }
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((POLICY / name).read_bytes()).hexdigest(), digest)

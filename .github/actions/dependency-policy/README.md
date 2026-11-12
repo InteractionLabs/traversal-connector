@@ -7,7 +7,8 @@ test locks the copied policy files to that revision.
 
 Only the exact dependency-policy caller and action may follow `main`; every
 other GitHub Action must use a full commit SHA. The vendor test keeps the public
-copy byte-for-byte aligned with its declared infrastructure source.
+copy aligned with its declared infrastructure source; `action.yml` differs only
+by omitting the infrastructure-only `profile` input and its `uv` runtime steps.
 
 This action blocks any new third-party dependency published less than seven days
 ago. [`dependency-policy.yml`](../../workflows/dependency-policy.yml) calls
