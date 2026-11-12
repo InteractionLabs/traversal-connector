@@ -305,16 +305,19 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 ### mTLS to the control plane
 
 mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
-The connector refuses to start if `TLS_CERT_BASE64` and `TLS_KEY_BASE64` are
-not both provided, or if either fails to parse as valid PEM. mTLS is the only
-supported posture for production traffic; there is no "TLS without mTLS"
-mode.
+The connector refuses to start without a client certificate and key, or if
+either fails to parse as valid PEM. mTLS is the only supported posture for
+production traffic; there is no "TLS without mTLS" mode.
 
-All certificate variables accept either raw PEM (starting with
-`-----BEGIN`) or base64-encoded PEM.
+Provide the material either as files in `TLS_DIR`, which keeps the private key
+out of the process environment and is what the Helm chart does, or through the
+`TLS_*_BASE64` variables. Setting `TLS_DIR` together with any `TLS_*_BASE64`
+variable fails at startup. The `TLS_*_BASE64` variables accept either raw PEM
+(starting with `-----BEGIN`) or base64-encoded PEM.
 
 | Variable | Default | Description |
 |---|---|---|
+| `TLS_DIR` | (none) | Directory in the `kubernetes.io/tls` Secret layout: `tls.crt` (client certificate) and `tls.key` (its private key) are required, and `ca.crt` is used like `TLS_CA_BASE64` when present and non-empty. Files are read at startup, as raw or base64-encoded PEM; restart after rotating them. |
 | `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
 | `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
 | `TLS_CA_BASE64` | (none) | Additional CA certificate used to validate the control plane's server certificate. When set, it extends the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
@@ -344,7 +347,7 @@ UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 
 # Or read the internal CA from a mounted file instead (not both).
 UPSTREAM_TLS_VERIFY=true
-UPSTREAM_TLS_CA_FILE=/etc/traversal/upstream-ca/ca.crt
+UPSTREAM_TLS_CA_FILE=/etc/traversal-tls/upstream/ca.crt
 ```
 
 ### Tunnels, pipes and the dial policy

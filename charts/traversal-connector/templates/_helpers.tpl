@@ -97,6 +97,41 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default .Chart.AppVersion .Values.image.tag -}}
 {{- end -}}
 
+{{- /* Where the controllerTLS Secret (tls.crt, tls.key, optional ca.crt) is
+       mounted, in both the connector and the telemetry sidecar. */}}
+{{- define "traversal-connector.controllerTLSDir" -}}
+/etc/traversal-tls/controller
+{{- end -}}
+
+{{- /* The chart hands TLS material over as files, mounted 0440 and readable
+       by the containers only through the pod's fsGroup, and as TLS_DIR, which
+       images before v0.11.0 do not read: such an image would crash-loop asking
+       for the env vars this chart no longer sets. Tags that are not a release
+       version (sha-*, prerelease-*, dev) are not checked. */}}
+{{- define "traversal-connector.validateTLSFiles" -}}
+{{- if not (dig "fsGroup" nil (.Values.podSecurityContext | default dict)) -}}
+{{- fail "podSecurityContext.fsGroup is required: the TLS Secrets are mounted mode 0440 and the containers read them through that group." -}}
+{{- end -}}
+{{- $tag := include "traversal-connector.imageTag" . -}}
+{{- if and (regexMatch `^v?[0-9]+\.[0-9]+\.[0-9]+$` $tag) (semverCompare "<0.11.0" $tag) -}}
+{{- fail (printf "image.tag %s is older than this chart supports: the chart delivers controller TLS as files through TLS_DIR, which needs connector v0.11.0 or later." $tag) -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* A PEM value for a chart-rendered Secret. The connector accepted
+       base64-encoded PEM through env, and still does from files, but the
+       telemetry sidecar reads the files as PEM, so a base64 value is decoded
+       here rather than left for one reader to reject. Anything that does not
+       decode to PEM is kept as given, for the connector to report. */}}
+{{- define "traversal-connector.pem" -}}
+{{- $decoded := trim . | b64dec -}}
+{{- if and (not (hasPrefix "-----BEGIN" (trim .))) (hasPrefix "-----BEGIN" $decoded) -}}
+{{- $decoded -}}
+{{- else -}}
+{{- . -}}
+{{- end -}}
+{{- end -}}
+
 {{- /* Whether the forwarder sidecar is part of this release, as a non-empty
        string for truth. disableTelemetry is the master switch: it silences the
        forwarder too, so opting out never also requires opting out of the sidecar

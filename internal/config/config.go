@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -109,17 +111,17 @@ type Config struct {
 	// directly (h2c for the controller; default OTLP transport for telemetry).
 	EgressProxyURL *string
 	// TLSCert is the optional client TLS certificate PEM content
-	// for mTLS to the Traversal control plane. Read from TLS_CERT_BASE64;
-	// may be provided as raw PEM or base64-encoded PEM.
+	// for mTLS to the Traversal control plane. Read from TLS_DIR/tls.crt, or
+	// from TLS_CERT_BASE64 as raw PEM or base64-encoded PEM.
 	TLSCert *string
 	// TLSKey is the optional client TLS private key PEM content
-	// for mTLS to the Traversal control plane. Read from TLS_KEY_BASE64;
-	// may be provided as raw PEM or base64-encoded PEM.
+	// for mTLS to the Traversal control plane. Read from TLS_DIR/tls.key, or
+	// from TLS_KEY_BASE64 as raw PEM or base64-encoded PEM.
 	TLSKey *string
 	// TLSCA is the optional CA certificate PEM content for server certificate
-	// verification. Read from TLS_CA_BASE64; may be provided as raw PEM or
-	// base64-encoded PEM. Additional roots are appended to the connector
-	// container's system trust store.
+	// verification. Read from TLS_DIR/ca.crt when present, or from
+	// TLS_CA_BASE64 as raw PEM or base64-encoded PEM. Additional roots are
+	// appended to the connector container's system trust store.
 	TLSCA *string
 	// ConnectorID is the identifier stamped on every gRPC request to the
 	// Traversal control plane via the X-Traversal-Connector-ID header, letting
@@ -247,6 +249,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	controllerTLS, err := loadControllerTLS()
+	if err != nil {
+		return Config{}, err
+	}
+
 	configEnabled := false
 	if raw := os.Getenv("TRAVERSAL_CONFIG_ENABLED"); raw != "" {
 		var err error
@@ -283,9 +290,9 @@ func Load() (Config, error) {
 		UncoveredStreamMaxLifetime: strict.Duration("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
 			DefaultUncoveredStreamMaxLifetime),
 		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
-		TLSCert:         decodeCertificate(env.GetEnvOptionalString("TLS_CERT_BASE64")),
-		TLSKey:          decodeCertificate(env.GetEnvOptionalString("TLS_KEY_BASE64")),
-		TLSCA:           decodeCertificate(env.GetEnvOptionalString("TLS_CA_BASE64")),
+		TLSCert:         controllerTLS.cert,
+		TLSKey:          controllerTLS.key,
+		TLSCA:           controllerTLS.ca,
 		ConnectorID:     *connectorID,
 		OTELServiceName: env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
 		OTLPMetricsEndpoint: env.GetEnvString(
@@ -494,8 +501,9 @@ func isLoopbackHost(host string) bool {
 // misconfigurations fail at startup rather than after the connector has
 // entered the reconnect-with-backoff loop. The rules:
 //
-//   - https:// requires both TLS_CERT_BASE64 and TLS_KEY_BASE64 (mTLS is
-//     mandatory for production deployments).
+//   - https:// requires a client certificate and key, from TLS_DIR or
+//     TLS_CERT_BASE64 and TLS_KEY_BASE64 (mTLS is mandatory for production
+//     deployments).
 //   - http:// is rejected when ENV_LEVEL=production.
 //   - Other schemes are rejected.
 //
@@ -512,8 +520,9 @@ func validateControllerConnection(cfg Config) error {
 	case "https":
 		if cfg.TLSCert == nil || cfg.TLSKey == nil {
 			return errors.New(
-				"TLS_CERT_BASE64 and TLS_KEY_BASE64 are required when " +
-					"TRAVERSAL_CONTROLLER_URL uses https:// (mTLS is required)",
+				"TLS_DIR (with tls.crt and tls.key) or TLS_CERT_BASE64 and " +
+					"TLS_KEY_BASE64 are required when TRAVERSAL_CONTROLLER_URL " +
+					"uses https:// (mTLS is required)",
 			)
 		}
 		if _, err := tls.X509KeyPair(
@@ -526,7 +535,7 @@ func validateControllerConnection(cfg Config) error {
 			return errors.New(
 				"http:// TRAVERSAL_CONTROLLER_URL is not allowed when " +
 					"ENV_LEVEL=production; use https:// with " +
-					"TLS_CERT_BASE64 / TLS_KEY_BASE64",
+					"TLS_DIR or TLS_CERT_BASE64 / TLS_KEY_BASE64",
 			)
 		}
 		if cfg.TLSCert != nil || cfg.TLSKey != nil {
@@ -604,8 +613,99 @@ func loadUpstreamTLSCA() (*string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read UPSTREAM_TLS_CA_FILE: %w", err)
 	}
-	ca := string(contents)
+	ca := filePEM(contents)
 	return &ca, nil
+}
+
+// controllerTLSMaterial is the controller mTLS PEM content; each field is nil
+// when unset.
+type controllerTLSMaterial struct {
+	cert, key, ca *string
+}
+
+// loadControllerTLS reads the controller mTLS material from TLS_DIR, a
+// directory in the kubernetes.io/tls Secret layout (tls.crt, tls.key and an
+// optional ca.crt), or from the TLS_*_BASE64 variables. TLS_DIR keeps the
+// private key out of the process environment. Combining the two is rejected
+// rather than resolved by precedence, so no material is silently ignored.
+func loadControllerTLS() (controllerTLSMaterial, error) {
+	inline := map[string]*string{
+		"TLS_CERT_BASE64": env.GetEnvOptionalString("TLS_CERT_BASE64"),
+		"TLS_KEY_BASE64":  env.GetEnvOptionalString("TLS_KEY_BASE64"),
+		"TLS_CA_BASE64":   env.GetEnvOptionalString("TLS_CA_BASE64"),
+	}
+	dir := env.GetEnvOptionalString("TLS_DIR")
+	if dir == nil {
+		return controllerTLSMaterial{
+			cert: decodeCertificate(inline["TLS_CERT_BASE64"]),
+			key:  decodeCertificate(inline["TLS_KEY_BASE64"]),
+			ca:   decodeCertificate(inline["TLS_CA_BASE64"]),
+		}, nil
+	}
+	for _, name := range []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"} {
+		if inline[name] != nil {
+			return controllerTLSMaterial{}, fmt.Errorf(
+				"TLS_DIR and %s are mutually exclusive: set only one source", name,
+			)
+		}
+	}
+
+	cert, err := readTLSFile(*dir, "tls.crt", true)
+	if err != nil {
+		return controllerTLSMaterial{}, err
+	}
+	key, err := readTLSFile(*dir, "tls.key", true)
+	if err != nil {
+		return controllerTLSMaterial{}, err
+	}
+	ca, err := readTLSFile(*dir, "ca.crt", false)
+	if err != nil {
+		return controllerTLSMaterial{}, err
+	}
+	return controllerTLSMaterial{cert: cert, key: key, ca: ca}, nil
+}
+
+// readTLSFile reads TLS_DIR/name as raw or base64-encoded PEM, the forms the
+// TLS_*_BASE64 variables accept, so a Secret that worked through env keeps
+// working mounted. A missing or empty optional file is nil; a missing or empty
+// required file is an error.
+func readTLSFile(dir, name string, required bool) (*string, error) {
+	//nolint:gosec // G304: TLS_DIR is operator-set config, as UPSTREAM_TLS_CA_FILE is.
+	contents, err := os.ReadFile(filepath.Join(dir, name))
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && !required:
+		return nil, nil //nolint:nilnil // an absent optional file is unset.
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf(
+			"read TLS_DIR %s: %w (does the controller TLS Secret have key %s?)", name, err, name,
+		)
+	case errors.Is(err, fs.ErrPermission):
+		return nil, fmt.Errorf(
+			"read TLS_DIR %s: %w (a Secret mounted 0440 is readable only through the pod's fsGroup)",
+			name,
+			err,
+		)
+	case err != nil:
+		return nil, fmt.Errorf("read TLS_DIR %s: %w", name, err)
+	}
+	pem := strings.TrimSpace(string(contents))
+	if pem == "" {
+		if !required {
+			return nil, nil //nolint:nilnil // an empty optional file is unset.
+		}
+		return nil, fmt.Errorf("TLS_DIR %s is empty", name)
+	}
+	pem = filePEM(contents)
+	return &pem, nil
+}
+
+// filePEM is a mounted file's PEM: raw PEM as-is, anything else base64-decoded
+// as DecodePEM does, ignoring the trailing newline an editor or kubectl adds.
+func filePEM(contents []byte) string {
+	if trimmed := strings.TrimSpace(string(contents)); !strings.HasPrefix(trimmed, pemPrefix) {
+		return DecodePEM(trimmed)
+	}
+	return string(contents)
 }
 
 // decodeCertificate is DecodePEM for an optional value: nil stays nil.

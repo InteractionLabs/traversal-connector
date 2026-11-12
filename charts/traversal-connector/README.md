@@ -81,6 +81,14 @@ checking or restore a revoked credential.
 
 Update `controllerTLS.existingSecret` or the inline `controllerTLS.certPEM`
 and `keyPEM` values through your existing secret-management workflow. For an
-existing Secret, restart the Deployment after updating it: the connector and
-sidecar load credentials from environment variables at startup. Inline
-certificate changes update the pod-template checksum automatically.
+existing Secret, restart the Deployment after updating it: the Secret is
+mounted at `/etc/traversal-tls/controller`, and the connector and sidecar read
+it only at startup. Inline certificate changes update the pod-template checksum
+automatically.
+
+Since chart 0.11.0 the controller key, certificate and CA, and the upstream CA,
+are mounted as files rather than passed through environment variables. The
+chart sets `TLS_DIR`, which connector images before v0.11.0 do not read, so do
+not pin `image.tag` below v0.11.0 with this chart; the chart refuses to render
+an older release tag. The mounts are mode 0440 and readable through the pod's
+`fsGroup`, so `podSecurityContext.fsGroup` must stay set.

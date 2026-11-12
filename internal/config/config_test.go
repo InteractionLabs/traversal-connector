@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -769,6 +770,10 @@ func TestLoad_UpstreamTLSCASources(t *testing.T) {
 	if err := os.WriteFile(caFile, []byte(caPEM), 0o600); err != nil {
 		t.Fatalf("write CA file: %v", err)
 	}
+	b64CAFile := t.TempDir() + "/ca-b64.crt"
+	if err := os.WriteFile(b64CAFile, []byte(base64.StdEncoding.EncodeToString([]byte(caPEM))+"\n"), 0o600); err != nil {
+		t.Fatalf("write base64 CA file: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -786,6 +791,11 @@ func TestLoad_UpstreamTLSCASources(t *testing.T) {
 			env: map[string]string{
 				"UPSTREAM_TLS_CA_BASE64": base64.StdEncoding.EncodeToString([]byte(caPEM)),
 			},
+			want: ptrTo(caPEM),
+		},
+		{
+			name: "base64-encoded file is decoded",
+			env:  map[string]string{"UPSTREAM_TLS_CA_FILE": b64CAFile},
 			want: ptrTo(caPEM),
 		},
 		{
@@ -826,6 +836,206 @@ func TestLoad_UpstreamTLSCASources(t *testing.T) {
 				t.Fatalf("UpstreamTLSCA mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestLoad_TLSDirSources(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	otherCertPEM, _ := generateTestKeyPair(t)
+	const caPEM = "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----\n"
+
+	writeDir := func(t *testing.T, files map[string]string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for name, contents := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		return dir
+	}
+
+	tests := []struct {
+		name    string
+		files   map[string]string
+		noDir   bool
+		env     map[string]string
+		wantCA  *string
+		wantErr string
+	}{
+		{
+			name:   "cert, key and CA are read",
+			files:  map[string]string{"tls.crt": certPEM, "tls.key": keyPEM, "ca.crt": caPEM},
+			wantCA: ptrTo(caPEM),
+		},
+		{
+			name:  "missing ca.crt is unset",
+			files: map[string]string{"tls.crt": certPEM, "tls.key": keyPEM},
+		},
+		{
+			name:  "empty ca.crt is unset",
+			files: map[string]string{"tls.crt": certPEM, "tls.key": keyPEM, "ca.crt": ""},
+		},
+		{
+			name:    "missing tls.key is rejected",
+			files:   map[string]string{"tls.crt": certPEM},
+			wantErr: "read TLS_DIR tls.key",
+		},
+		{
+			name:    "empty tls.crt is rejected",
+			files:   map[string]string{"tls.crt": "\n", "tls.key": keyPEM},
+			wantErr: "TLS_DIR tls.crt is empty",
+		},
+		{
+			name:    "missing directory is rejected",
+			noDir:   true,
+			wantErr: "read TLS_DIR tls.crt",
+		},
+		{
+			name:    "mismatched cert and key are rejected",
+			files:   map[string]string{"tls.crt": otherCertPEM, "tls.key": keyPEM},
+			wantErr: "failed to parse client TLS certificate",
+		},
+		{
+			name: "base64-encoded files are decoded",
+			files: map[string]string{
+				"tls.crt": base64.StdEncoding.EncodeToString([]byte(certPEM)) + "\n",
+				"tls.key": base64.StdEncoding.EncodeToString([]byte(keyPEM)),
+				"ca.crt":  base64.StdEncoding.EncodeToString([]byte(caPEM)),
+			},
+			wantCA: ptrTo(caPEM),
+		},
+		{
+			name:    "whitespace-only tls.key is rejected",
+			files:   map[string]string{"tls.crt": certPEM, "tls.key": " \n\t"},
+			wantErr: "TLS_DIR tls.key is empty",
+		},
+		{
+			name:    "combined with TLS_CERT_BASE64 is rejected",
+			files:   map[string]string{"tls.crt": certPEM, "tls.key": keyPEM},
+			env:     map[string]string{"TLS_CERT_BASE64": certPEM},
+			wantErr: "TLS_DIR and TLS_CERT_BASE64 are mutually exclusive",
+		},
+		{
+			name:    "combined with TLS_KEY_BASE64 is rejected",
+			files:   map[string]string{"tls.crt": certPEM, "tls.key": keyPEM},
+			env:     map[string]string{"TLS_KEY_BASE64": keyPEM},
+			wantErr: "TLS_DIR and TLS_KEY_BASE64 are mutually exclusive",
+		},
+		{
+			name:    "combined with TLS_CA_BASE64 is rejected",
+			files:   map[string]string{"tls.crt": certPEM, "tls.key": keyPEM},
+			env:     map[string]string{"TLS_CA_BASE64": caPEM},
+			wantErr: "TLS_DIR and TLS_CA_BASE64 are mutually exclusive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			setProductionEnv(t, "", "")
+			_ = os.Unsetenv("TLS_CERT_BASE64")
+			_ = os.Unsetenv("TLS_KEY_BASE64")
+			setOTLPEndpoints("https://otlp.example.com:4317")
+			dir := filepath.Join(t.TempDir(), "missing")
+			if !tt.noDir {
+				dir = writeDir(t, tt.files)
+			}
+			_ = os.Setenv("TLS_DIR", dir)
+			for k, v := range tt.env {
+				_ = os.Setenv(k, v)
+			}
+
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load() error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if diff := cmp.Diff(ptrTo(certPEM), cfg.TLSCert); diff != "" {
+				t.Errorf("TLSCert mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(ptrTo(keyPEM), cfg.TLSKey); diff != "" {
+				t.Errorf("TLSKey mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantCA, cfg.TLSCA); diff != "" {
+				t.Errorf("TLSCA mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestLoad_TLSDirKubeletLayout reads a directory laid out as the kubelet
+// projects a Secret: each key a symlink through ..data into a timestamped
+// directory that is swapped atomically on update.
+func TestLoad_TLSDirKubeletLayout(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	dir := t.TempDir()
+	version := filepath.Join(dir, "..2026_10_30_00_00_00.000000001")
+	if err := os.Mkdir(version, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for name, contents := range map[string]string{"tls.crt": certPEM, "tls.key": keyPEM} {
+		if err := os.WriteFile(filepath.Join(version, name), []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.Symlink(filepath.Base(version), filepath.Join(dir, "..data")); err != nil {
+		t.Fatalf("symlink ..data: %v", err)
+	}
+	for _, name := range []string{"tls.crt", "tls.key"} {
+		if err := os.Symlink(filepath.Join("..data", name), filepath.Join(dir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+
+	clearEnv()
+	defer clearEnv()
+	setProductionEnv(t, "", "")
+	_ = os.Unsetenv("TLS_CERT_BASE64")
+	_ = os.Unsetenv("TLS_KEY_BASE64")
+	setOTLPEndpoints("https://otlp.example.com:4317")
+	_ = os.Setenv("TLS_DIR", dir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.TLSCert == nil || *cfg.TLSCert != certPEM || cfg.TLSKey == nil || *cfg.TLSKey != keyPEM {
+		t.Fatal("TLS material not read through the ..data symlinks")
+	}
+	if cfg.TLSCA != nil {
+		t.Fatalf("TLSCA = %q, want unset", *cfg.TLSCA)
+	}
+}
+
+func TestLoad_TLSDirUnreadableKeyNamesFSGroup(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads files regardless of mode")
+	}
+	certPEM, keyPEM := generateTestKeyPair(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tls.crt"), []byte(certPEM), 0o600); err != nil {
+		t.Fatalf("write tls.crt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tls.key"), []byte(keyPEM), 0o000); err != nil {
+		t.Fatalf("write tls.key: %v", err)
+	}
+
+	clearEnv()
+	defer clearEnv()
+	setProductionEnv(t, "", "")
+	_ = os.Unsetenv("TLS_CERT_BASE64")
+	_ = os.Unsetenv("TLS_KEY_BASE64")
+	_ = os.Setenv("TLS_DIR", dir)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "fsGroup") {
+		t.Fatalf("Load() error = %v, want a permission error naming fsGroup", err)
 	}
 }
 
@@ -1060,7 +1270,7 @@ func clearEnv() {
 		"MAX_REQUEST_BODY_SIZE_MB", "MAX_RESPONSE_BODY_SIZE_MB",
 		"MAX_DECODED_RESPONSE_BODY_SIZE_MB", "TRAVERSAL_REDACTION_MAX_CONCURRENT",
 		"TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
-		"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
+		"TLS_DIR", "TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64",
 		"OTEL_SERVICE_NAME",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
