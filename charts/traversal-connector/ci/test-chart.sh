@@ -175,6 +175,14 @@ assert_render_fails old-image 'needs connector v0.11.0 or later' "${common[@]}" 
 for tag in v0.11.0 0.11.0 sha-0123456789abcdef prerelease-0123456789ab dev; do
   render "image-$tag" "$fixtures/direct-export-values.yaml" --set-string "image.tag=$tag"
 done
+# Only a pinned image.tag is checked: the default appVersion is the image released
+# with this chart, so a chart packaged at any version (CI packages v0.0.0) renders.
+appversion_dir="$tmp_dir/appversion-chart"
+cp -R "$chart_dir" "$appversion_dir"
+sed -i.bak 's/^appVersion: .*/appVersion: v0.0.0/' "$appversion_dir/Chart.yaml"
+helm template appversion "$appversion_dir" -f "$fixtures/direct-export-values.yaml" >"$tmp_dir/appversion.yaml" ||
+  fail "appversion: a chart whose appVersion is v0.0.0 must render with the default image.tag"
+assert_contains "$tmp_dir/appversion.yaml" 'image: "traversalext/traversal-connector:v0.0.0"'
 # A base64-encoded inline PEM reaches the Secret, and so both readers, decoded.
 render tls-b64 "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string "controllerTLS.certPEM=$(printf -- '-----BEGIN CERTIFICATE-----\nx\n' | base64)" \

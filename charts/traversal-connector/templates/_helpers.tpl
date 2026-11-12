@@ -106,13 +106,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- /* The chart hands TLS material over as files, mounted 0440 and readable
        by the containers only through the pod's fsGroup, and as TLS_DIR, which
        images before v0.11.0 do not read: such an image would crash-loop asking
-       for the env vars this chart no longer sets. Tags that are not a release
-       version (sha-*, prerelease-*, dev) are not checked. */}}
+       for the env vars this chart no longer sets. Only a pinned image.tag is
+       checked: the default is the chart's own appVersion, the image released
+       with it. Tags that are not a release version (sha-*, prerelease-*, dev)
+       are not checked. */}}
 {{- define "traversal-connector.validateTLSFiles" -}}
 {{- if not (dig "fsGroup" nil (.Values.podSecurityContext | default dict)) -}}
 {{- fail "podSecurityContext.fsGroup is required: the TLS Secrets are mounted mode 0440 and the containers read them through that group." -}}
 {{- end -}}
-{{- $tag := include "traversal-connector.imageTag" . -}}
+{{- $tag := .Values.image.tag | default "" | toString -}}
 {{- if and (regexMatch `^v?[0-9]+\.[0-9]+\.[0-9]+$` $tag) (semverCompare "<0.11.0" $tag) -}}
 {{- fail (printf "image.tag %s is older than this chart supports: the chart delivers controller TLS as files through TLS_DIR, which needs connector v0.11.0 or later." $tag) -}}
 {{- end -}}
