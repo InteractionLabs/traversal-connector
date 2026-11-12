@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import email.utils
+import fnmatch
 import http.client
 import json
 import math
@@ -2144,18 +2145,43 @@ def fixes_are_trusted(directory: Path) -> bool:
     return False
 
 
+MANIFEST_FAMILIES = (
+    ("go.mod", "go.sum"),
+    ("pyproject.toml", "uv.lock", "requirements*.txt"),
+    ("package.json", "package-lock.json", "pnpm-lock.yaml"),
+    ("Cargo.toml", "Cargo.lock"),
+)
+
+
+def fix_path_matches(fix_path: str, source: str) -> bool:
+    """Say whether a fix entry's path names the source file or a manifest or lock sibling of it."""
+    if fix_path == source:
+        return True
+    fix_dir, _, fix_name = fix_path.rpartition("/")
+    source_dir, _, source_name = source.rpartition("/")
+    return fix_dir == source_dir and any(
+        any(fnmatch.fnmatchcase(fix_name, pattern) for pattern in family)
+        and any(fnmatch.fnmatchcase(source_name, pattern) for pattern in family)
+        for family in MANIFEST_FAMILIES
+    )
+
+
 def wiz_fix_applies(
     fix: dict[str, Any], dependency: Dependency, old_version: Optional[str]
 ) -> bool:
     """Say whether the change replaces an older version with the fix's target.
 
-    An entry that names a `path` lifts only the dependency found in that file.
+    An entry that names a `path` lifts only the dependency found in that file
+    or in a manifest or lock file beside it.
     Version ecosystems also need NEW > OLD and, when the entry has `from`, OLD
     equal to it. Pinned commits and digests only need a different OLD pin.
     """
     if old_version is None or old_version == dependency.version:
         return False
-    if fix.get("path") not in {None, dependency.source}:
+    fix_path = fix.get("path")
+    if fix_path is not None and not (
+        isinstance(fix_path, str) and fix_path_matches(fix_path, dependency.source)
+    ):
         return False
     if dependency.ecosystem in {"github-commit", "oci"}:
         return True
@@ -2294,8 +2320,9 @@ def advisory_cves(advisory: dict[str, Any]) -> list[str]:
 class AdvisoryLookup:
     """Public advisories for coordinates that would otherwise block, fetched once per run.
 
-    Once a lookup exhausts its retries on a 429, later lookups are skipped and
-    count as no advisory; the Wiz Patch Tuesday list stays the primary source.
+    Once a lookup exhausts its retries on a transient failure (429, 5xx, timeout
+    or dropped connection), later lookups are skipped and count as no advisory;
+    the Wiz Patch Tuesday list stays the primary source.
     """
 
     def __init__(self) -> None:
@@ -2317,8 +2344,7 @@ class AdvisoryLookup:
                 self.advisories[key] = self.fetch_advisories(*key)
             except LOOKUP_ERRORS as error:
                 self.advisories[key] = error
-                cause = error.__cause__
-                if isinstance(cause, urllib.error.HTTPError) and cause.code == 429:
+                if registry_unreachable(error):
                     self.rate_limited = error
         outcome = self.advisories[key]
         if isinstance(outcome, Exception):
