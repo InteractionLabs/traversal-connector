@@ -266,9 +266,10 @@ func IsConnectorID(id string) bool {
 	return err == nil && u.String() == id
 }
 
-// TenantID parses a connector certificate's SPIFFE ID: org-scoped,
-// spiffe://traversal.com/tenant/<org>/<name>, or connector-scoped, the same
-// ending /connector/<connector>. connector is empty for an org-scoped ID.
+// TenantID parses a tenant certificate's SPIFFE ID: org-scoped,
+// spiffe://traversal.com/tenant/<org>/<name>, or deployment-scoped, the same
+// ending /connector/<connector> or /processor/<processor>. connector is the
+// connector a connector-scoped ID names, and empty otherwise.
 func TenantID(uri string) (org, connector string, ok bool) {
 	rest, ok := strings.CutPrefix(uri, "spiffe://traversal.com/tenant/")
 	if !ok {
@@ -279,6 +280,7 @@ func TenantID(uri string) (org, connector string, ok bool) {
 	case len(parts) == 2 && parts[1] != "":
 	case len(parts) == 4 && parts[1] != "" && parts[2] == "connector" && IsConnectorID(parts[3]):
 		connector = parts[3]
+	case len(parts) == 4 && parts[1] != "" && parts[2] == "processor" && IsConnectorID(parts[3]):
 	default:
 		return "", "", false
 	}
@@ -288,19 +290,16 @@ func TenantID(uri string) (org, connector string, ok bool) {
 	return parts[0], connector, true
 }
 
-// CheckIdentity reports whether a connector certificate whose URI SAN is
-// uriSAN may hold tunnels for connectorID: the SAN is a tenant SPIFFE ID
-// (TenantID), and a connector-scoped one names connectorID.
+// CheckIdentity reports whether a certificate whose URI SAN is uriSAN may
+// hold tunnels for connectorID: the SAN is a tenant SPIFFE ID (TenantID).
+// Certificates belong to the organization, so the deployment a
+// deployment-scoped SAN names is not compared with connectorID.
 func CheckIdentity(uriSAN, connectorID string) error {
 	if !IsConnectorID(connectorID) {
 		return fmt.Errorf("rawpipe: %q is not a connector ID", connectorID)
 	}
-	_, scoped, ok := TenantID(uriSAN)
-	switch {
-	case !ok:
+	if _, _, ok := TenantID(uriSAN); !ok {
 		return fmt.Errorf("rawpipe: %q is not a tenant SPIFFE ID", uriSAN)
-	case scoped != "" && scoped != connectorID:
-		return fmt.Errorf("rawpipe: the identity is for connector %s, not %s", scoped, connectorID)
 	}
 	return nil
 }

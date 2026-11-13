@@ -12,8 +12,7 @@ import (
 )
 
 // TestPipeTLS: the proxy accepts the connector only with a certificate from
-// the tenant CA, unexpired, naming this pipe's org and connector, and they
-// agree on h2.
+// the tenant CA, unexpired, naming this pipe's org, and they agree on h2.
 func TestPipeTLS(t *testing.T) {
 	const org, conn = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d", "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
 	otherOrg := strings.Replace(org, "0b", "1b", 1)
@@ -30,7 +29,8 @@ func TestPipeTLS(t *testing.T) {
 		{"connector-scoped", tenant.Connector(t, orgScoped+"/connector/"+conn, later), true},
 		{"another CA", stranger.Connector(t, orgScoped, later), false},
 		{"another org", tenant.Connector(t, "spiffe://traversal.com/tenant/"+otherOrg+"/acme", later), false},
-		{"another connector", tenant.Connector(t, orgScoped+"/connector/"+otherConn, later), false},
+		{"another connector's", tenant.Connector(t, orgScoped+"/connector/"+otherConn, later), true},
+		{"a processor's", tenant.Connector(t, orgScoped+"/processor/"+otherConn, later), true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, b := halfconntest.TCPPair(t)
