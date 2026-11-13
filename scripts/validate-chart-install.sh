@@ -88,9 +88,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # The connector refuses to start its tunnels without exactly one tenant
-# SPIFFE ID for its connector (rawpipe.CheckIdentity), as the edge
-# controller would refuse every tunnel. The ID matches install-values.yaml's
-# connectorID under a synthetic organization.
+# SPIFFE ID (rawpipe.CheckIdentity), as the edge controller would refuse
+# every tunnel. The ID is a synthetic organization's.
 validation_spiffe_id="spiffe://traversal.com/tenant/00000000-0000-4000-8000-0000000000a1/edge/connector/00000000-0000-4000-8000-00000000c1a7"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj /CN=chart-install-validation \
