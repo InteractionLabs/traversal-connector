@@ -210,6 +210,11 @@ helm upgrade --install traversal-connector "$OCI_CHART" \
   -f customer-values.yaml
 ```
 
+To upgrade, run the same `helm upgrade --install` with the existing release
+name. Do not install a new version under a second release name; see
+[Upgrading](charts/traversal-connector/README.md#upgrading) for why, and for
+carrying over pod settings applied outside the chart.
+
 `image.tag` is empty in the canonical values and therefore falls back to the
 chart's `appVersion`, keeping the chart and connector image on the same release.
 An explicit `image.tag` override remains supported when a deployment needs to
