@@ -62,7 +62,7 @@ func newTLSTransport(cfg *config.Config) (http.RoundTripper, error) {
 	}
 	if tlsConfig == nil {
 		return nil, errors.New(
-			"https:// URL requires TLS_CERT_BASE64 and TLS_KEY_BASE64",
+			"https:// URL requires TLS_DIR or TLS_CERT_BASE64 and TLS_KEY_BASE64",
 		)
 	}
 	controllerURL, err := url.Parse(cfg.TraversalControllerURL)

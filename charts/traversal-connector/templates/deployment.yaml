@@ -2,6 +2,8 @@
 {{- $upstreamSecret  := default (printf "%s-upstream-tls"  (include "traversal-connector.fullname" .)) .Values.upstreamTLS.existingSecret -}}
 {{- $hasControllerTLS := or .Values.controllerTLS.existingSecret .Values.controllerTLS.certPEM .Values.controllerTLS.keyPEM .Values.controllerTLS.caPEM -}}
 {{- $hasUpstreamTLS  := or .Values.upstreamTLS.existingSecret  .Values.upstreamTLS.caPEM -}}
+{{- $controllerTLSDir := include "traversal-connector.controllerTLSDir" . -}}
+{{- $upstreamTLSDir := "/etc/traversal-tls/upstream" -}}
 {{- $redactionEnabled := include "traversal-connector.redactionEnabled" . -}}
 {{- if not (kindIs "bool" .Values.configUpdates.enabled) -}}
 {{- fail "configUpdates.enabled must be a boolean" -}}
@@ -93,6 +95,7 @@
 {{- end }}
 {{- end }}
 {{- include "traversal-connector.validateIdentity" . }}
+{{- include "traversal-connector.validateTLSFiles" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -248,32 +251,15 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- /* TLS material is mounted from its Secret, not passed through env, so
+                   the private key never appears in the pod spec's env or /proc/<pid>/environ. */}}
             {{- if $hasControllerTLS }}
-            - name: TLS_CERT_BASE64
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $controllerSecret }}
-                  key: tls.crt
-                  optional: true
-            - name: TLS_KEY_BASE64
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $controllerSecret }}
-                  key: tls.key
-                  optional: true
-            - name: TLS_CA_BASE64
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $controllerSecret }}
-                  key: ca.crt
-                  optional: true
+            - name: TLS_DIR
+              value: {{ $controllerTLSDir | quote }}
             {{- end }}
             {{- if $hasUpstreamTLS }}
-            - name: UPSTREAM_TLS_CA_BASE64
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $upstreamSecret }}
-                  key: ca.crt
+            - name: UPSTREAM_TLS_CA_FILE
+              value: {{ printf "%s/ca.crt" $upstreamTLSDir | quote }}
             {{- end }}
             {{- with .Values.upstreamTLS.caFile }}
             - name: UPSTREAM_TLS_CA_FILE
@@ -329,6 +315,16 @@ spec:
             {{- if $redactionEnabled }}
             - name: redaction-rules
               mountPath: /etc/traversal
+              readOnly: true
+            {{- end }}
+            {{- if $hasControllerTLS }}
+            - name: controller-tls
+              mountPath: {{ $controllerTLSDir }}
+              readOnly: true
+            {{- end }}
+            {{- if $hasUpstreamTLS }}
+            - name: upstream-tls
+              mountPath: {{ $upstreamTLSDir }}
               readOnly: true
             {{- end }}
           resources:
@@ -397,18 +393,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: OTLP_TLS_CERT_PEM
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $controllerSecret }}
-                  key: tls.crt
-                  optional: true
-            - name: OTLP_TLS_KEY_PEM
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $controllerSecret }}
-                  key: tls.key
-                  optional: true
+            {{- /* The client cert and key are read from the mounted Secret (see the
+                   controller-tls mount); only the public CA stays in env, because
+                   ca.crt is optional and Alloy's ca_file would fail on a missing file. */}}
             - name: OTLP_TLS_CA_PEM
               valueFrom:
                 secretKeyRef:
@@ -423,6 +410,9 @@ spec:
               readOnly: true
             - name: telemetry-sidecar-data
               mountPath: /var/lib/telemetry-sidecar
+            - name: controller-tls
+              mountPath: {{ $controllerTLSDir }}
+              readOnly: true
           {{- /* Alloy's own health endpoints, on the loopback server above. The image
                  has bash and no HTTP client, so the probe speaks HTTP/1.0 itself. */}}
           livenessProbe:
@@ -468,6 +458,37 @@ spec:
             items:
               - key: redaction-rules.toml
                 path: redaction-rules.toml
+        {{- end }}
+        {{- if $hasControllerTLS }}
+        {{- /* optional, as the env refs it replaces were: a missing Secret starts
+               the pod with an empty directory, and the connector names the missing
+               file, instead of the pod hanging in ContainerCreating. */}}
+        - name: controller-tls
+          secret:
+            secretName: {{ $controllerSecret | quote }}
+            defaultMode: 0440
+            optional: true
+            {{- /* Only the keys the containers read: a reused Secret's other keys stay unmounted.
+                   A listed key the Secret lacks (ca.crt) is skipped because the volume is optional. */}}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- if $hasUpstreamTLS }}
+        {{- /* Not optional, as the secretKeyRef it replaces was not: the upstream CA has no
+               fallback, so a missing Secret or key holds the pod at FailedMount instead of
+               starting a connector that cannot verify its upstreams. */}}
+        - name: upstream-tls
+          secret:
+            secretName: {{ $upstreamSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
         {{- if $sidecarEnabled }}
         - name: telemetry-sidecar-tmp

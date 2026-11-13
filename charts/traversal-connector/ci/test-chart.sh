@@ -63,17 +63,23 @@ render upstream-inline "$fixtures/direct-export-values.yaml" --set-string upstre
 assert_contains "$tmp_dir/upstream-inline.yaml" $'  name: upstream-inline-traversal-connector-upstream-tls\n'
 assert_contains "$tmp_dir/upstream-inline.yaml" '  ca.crt: c3ludGhldGljLXVwc3RyZWFtLWNh'
 assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: UPSTREAM_TLS_VERIFY\n              value: "true"'
-assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: UPSTREAM_TLS_CA_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: upstream-inline-traversal-connector-upstream-tls\n                  key: ca.crt'
+assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: UPSTREAM_TLS_CA_FILE\n              value: "/etc/traversal-tls/upstream/ca.crt"'
+assert_contains "$tmp_dir/upstream-inline.yaml" $'            - name: upstream-tls\n              mountPath: /etc/traversal-tls/upstream\n              readOnly: true'
+assert_contains "$tmp_dir/upstream-inline.yaml" $'        - name: upstream-tls\n          secret:\n            secretName: "upstream-inline-traversal-connector-upstream-tls"\n            defaultMode: 0440\n            items:\n              - key: ca.crt\n                path: ca.crt'
+assert_not_contains "$tmp_dir/upstream-inline.yaml" 'UPSTREAM_TLS_CA_BASE64'
 
 render upstream-existing "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.existingSecret=supplied-upstream-ca --set upstreamTLS.verify=false
 assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_VERIFY\n              value: "false"'
-assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_CA_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: supplied-upstream-ca\n                  key: ca.crt'
+assert_contains "$tmp_dir/upstream-existing.yaml" $'            - name: UPSTREAM_TLS_CA_FILE\n              value: "/etc/traversal-tls/upstream/ca.crt"'
+assert_contains "$tmp_dir/upstream-existing.yaml" $'            secretName: "supplied-upstream-ca"'
+assert_not_contains "$tmp_dir/upstream-existing.yaml" 'UPSTREAM_TLS_CA_BASE64'
 assert_not_contains "$tmp_dir/upstream-existing.yaml" 'name: upstream-existing-traversal-connector-upstream-tls'
 
 render upstream-file "$fixtures/direct-export-values.yaml" --set-string upstreamTLS.caFile=/vault/secrets/upstream-ca.crt
 assert_contains "$tmp_dir/upstream-file.yaml" $'            - name: UPSTREAM_TLS_CA_FILE\n              value: "/vault/secrets/upstream-ca.crt"'
 assert_not_contains "$tmp_dir/upstream-file.yaml" 'UPSTREAM_TLS_CA_BASE64'
 assert_not_contains "$tmp_dir/upstream-file.yaml" 'name: upstream-file-traversal-connector-upstream-tls'
+assert_not_contains "$tmp_dir/upstream-file.yaml" 'name: upstream-tls'
 assert_not_contains "$tmp_dir/direct.yaml" 'UPSTREAM_TLS_CA_FILE'
 
 render sidecar "$fixtures/sidecar-values.yaml"
@@ -153,7 +159,52 @@ assert_render_fails controller-cert-only 'controllerTLS is required' "${common[@
 render controller-tls-inline "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
   --set-string controllerTLS.certPEM=certificate --set-string controllerTLS.keyPEM=private-key
 assert_contains "$tmp_dir/controller-tls-inline.yaml" 'name: controller-tls-inline-traversal-connector-controller-tls'
-assert_contains "$tmp_dir/direct.yaml" $'            - name: TLS_CERT_BASE64\n              valueFrom:\n                secretKeyRef:\n                  name: ci-controller-tls'
+# Controller mTLS material is mounted from its Secret, never passed through env.
+assert_contains "$tmp_dir/direct.yaml" $'            - name: TLS_DIR\n              value: "/etc/traversal-tls/controller"'
+assert_contains "$tmp_dir/direct.yaml" $'            - name: controller-tls\n              mountPath: /etc/traversal-tls/controller\n              readOnly: true'
+assert_contains "$tmp_dir/direct.yaml" $'        - name: controller-tls\n          secret:\n            secretName: "ci-controller-tls"\n            defaultMode: 0440\n            optional: true\n            items:\n              - key: tls.crt\n                path: tls.crt\n              - key: tls.key\n                path: tls.key\n              - key: ca.crt\n                path: ca.crt'
+assert_contains "$tmp_dir/upstream-existing.yaml" $'            secretName: "supplied-upstream-ca"\n            defaultMode: 0440\n            items:'
+# Only the public CA stays in the sidecar's env, and a Secret without it still starts.
+assert_contains "$tmp_dir/sidecar.yaml" $'            - name: OTLP_TLS_CA_PEM\n              valueFrom:\n                secretKeyRef:\n                  name: ci-controller-tls\n                  key: ca.crt\n                  optional: true'
+# The mounts are 0440, readable only through the pod's fsGroup.
+assert_render_fails no-fsgroup 'podSecurityContext.fsGroup is required' "${common[@]}" --set podSecurityContext.fsGroup=null
+render fsgroup-other "$fixtures/direct-export-values.yaml" --set podSecurityContext.fsGroup=10001
+assert_contains "$tmp_dir/fsgroup-other.yaml" 'fsGroup: 10001'
+# Images before v0.11.0 do not read TLS_DIR; non-release tags are not checked.
+assert_render_fails old-image 'needs connector v0.11.0 or later' "${common[@]}" --set-string image.tag=v0.10.1
+for tag in v0.11.0 0.11.0 sha-0123456789abcdef prerelease-0123456789ab dev; do
+  render "image-$tag" "$fixtures/direct-export-values.yaml" --set-string "image.tag=$tag"
+done
+# Only a pinned image.tag is checked: the default appVersion is the image released
+# with this chart, so a chart packaged at any version (CI packages v0.0.0) renders.
+appversion_dir="$tmp_dir/appversion-chart"
+cp -R "$chart_dir" "$appversion_dir"
+sed -i.bak 's/^appVersion: .*/appVersion: v0.0.0/' "$appversion_dir/Chart.yaml"
+helm template appversion "$appversion_dir" -f "$fixtures/direct-export-values.yaml" >"$tmp_dir/appversion.yaml" ||
+  fail "appversion: a chart whose appVersion is v0.0.0 must render with the default image.tag"
+assert_contains "$tmp_dir/appversion.yaml" 'image: "traversalext/traversal-connector:v0.0.0"'
+# A base64-encoded inline PEM reaches the Secret, and so both readers, decoded.
+render tls-b64 "$fixtures/direct-export-values.yaml" --set-string controllerTLS.existingSecret= \
+  --set-string "controllerTLS.certPEM=$(printf -- '-----BEGIN CERTIFICATE-----\nx\n' | base64)" \
+  --set-string "controllerTLS.keyPEM=-----BEGIN PRIVATE KEY-----" \
+  --set-string "upstreamTLS.caPEM=$(printf -- '-----BEGIN CERTIFICATE-----\ny\n' | base64)"
+assert_contains "$tmp_dir/tls-b64.yaml" "tls.crt: $(printf -- '-----BEGIN CERTIFICATE-----\nx\n' | base64)"
+assert_contains "$tmp_dir/tls-b64.yaml" "tls.key: $(printf -- '-----BEGIN PRIVATE KEY-----' | base64)"
+assert_contains "$tmp_dir/tls-b64.yaml" "ca.crt: $(printf -- '-----BEGIN CERTIFICATE-----\ny\n' | base64)"
+assert_contains "$tmp_dir/controller-tls-inline.yaml" $'            secretName: "controller-tls-inline-traversal-connector-controller-tls"'
+assert_not_contains "$tmp_dir/direct.yaml" 'name: upstream-tls'
+for scenario in direct sidecar disabled controller-tls-inline upstream-inline upstream-existing; do
+  for name in TLS_CERT_BASE64 TLS_KEY_BASE64 TLS_CA_BASE64 UPSTREAM_TLS_CA_BASE64 OTLP_TLS_CERT_PEM OTLP_TLS_KEY_PEM; do
+    assert_not_contains "$tmp_dir/$scenario.yaml" "$name"
+  done
+  # No env var of any name is sourced from the private key.
+  ! grep -B1 -E '^ +key: tls\.key$' "$tmp_dir/$scenario.yaml" | grep -q 'name: ' ||
+    fail "$scenario: tls.key is referenced from a secretKeyRef"
+done
+# The sidecar reads the client cert and key from the same mount.
+assert_contains "$tmp_dir/sidecar.yaml" $'          cert_file = "/etc/traversal-tls/controller/tls.crt"\n          key_file  = "/etc/traversal-tls/controller/tls.key"'
+actual=$(grep -Fc 'mountPath: /etc/traversal-tls/controller' "$tmp_dir/sidecar.yaml")
+[[ "$actual" == 2 ]] || fail "sidecar: expected the controller TLS mount in both containers, got $actual"
 assert_render_fails non-boolean 'disableTelemetry must be a boolean' "${common[@]}" --set-string disableTelemetry=false
 assert_render_fails sidecar-no-tls 'otel.sidecar.enabled requires controllerTLS' -f "$fixtures/sidecar-values.yaml" --set controllerTLS.existingSecret=
 assert_render_fails divergent-sidecar 'requires a single OTLP egress endpoint' -f "$fixtures/sidecar-values.yaml" --set otel.logsEndpoint=https://logs.example.invalid:4317

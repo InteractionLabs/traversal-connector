@@ -305,19 +305,24 @@ docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}' \
 ### mTLS to the control plane
 
 mTLS is **required** whenever `TRAVERSAL_CONTROLLER_URL` is `https://...`.
-The connector refuses to start if `TLS_CERT_BASE64` and `TLS_KEY_BASE64` are
-not both provided, or if either fails to parse as valid PEM. mTLS is the only
-supported posture for production traffic; there is no "TLS without mTLS"
-mode.
+The connector refuses to start without a client certificate and key, or if
+either fails to parse as valid PEM. mTLS is the only supported posture for
+production traffic; there is no "TLS without mTLS" mode.
 
-All certificate variables accept either raw PEM (starting with
-`-----BEGIN`) or base64-encoded PEM.
+Provide the material as files in `TLS_DIR`. This keeps the private key out of
+the process environment, and is what the Helm chart does. The legacy
+`TLS_*_BASE64` variables still work for backwards compatibility, but put the
+private key in the environment, so the connector logs a warning at startup
+while any of them is set. Setting `TLS_DIR` together with any `TLS_*_BASE64`
+variable fails at startup. The `TLS_*_BASE64` variables accept either raw PEM
+(starting with `-----BEGIN`) or base64-encoded PEM.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TLS_CERT_BASE64` | **required for `https://`** | Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
-| `TLS_KEY_BASE64` | **required for `https://`** | Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
-| `TLS_CA_BASE64` | (none) | Additional CA certificate used to validate the control plane's server certificate. When set, it extends the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
+| `TLS_DIR` | (none) | Directory in the `kubernetes.io/tls` Secret layout: `tls.crt` (client certificate) and `tls.key` (its private key) are required, and `ca.crt` is used like `TLS_CA_BASE64` when present and non-empty. Files are read at startup, as raw or base64-encoded PEM; restart after rotating them. Required for `https://` unless the legacy variables below are set. |
+| `TLS_CERT_BASE64` | (none) | Legacy; use `TLS_DIR`. Client TLS certificate. Must be paired with `TLS_KEY_BASE64`. |
+| `TLS_KEY_BASE64` | (none) | Legacy; use `TLS_DIR`. Client TLS private key. Must match the public key in `TLS_CERT_BASE64`. |
+| `TLS_CA_BASE64` | (none) | Legacy; use `ca.crt` in `TLS_DIR`. Additional CA certificate used to validate the control plane's server certificate. When set, it extends the system CA bundle. Leave unset for public CAs (e.g. Let's Encrypt). |
 
 ### Upstream TLS (HTTPS to internal services)
 
@@ -344,7 +349,7 @@ UPSTREAM_TLS_CA_BASE64="LS0tLS1CRUdJTi..."
 
 # Or read the internal CA from a mounted file instead (not both).
 UPSTREAM_TLS_VERIFY=true
-UPSTREAM_TLS_CA_FILE=/etc/traversal/upstream-ca/ca.crt
+UPSTREAM_TLS_CA_FILE=/etc/traversal-tls/upstream/ca.crt
 ```
 
 ### Tunnels, pipes and the dial policy
