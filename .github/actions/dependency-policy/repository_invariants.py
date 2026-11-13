@@ -73,7 +73,45 @@ def validate_caller(
     write_permissions = re.findall(r"(?m)^\s*([A-Za-z_-]+):\s*write\s*$", content)
     if write_permissions:
         failures.append("the dependency-policy caller cannot request write permissions")
+    if passes_inputs_to_shared_workflow(content):
+        failures.append(
+            "the dependency-policy caller must not pass inputs to the shared workflow"
+        )
     return failures
+
+
+def passes_inputs_to_shared_workflow(content: str) -> bool:
+    """Return whether the job calling the shared workflow has a sibling `with:` key."""
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(
+            r"^(\s*)uses:\s*\S*reusable-(?:infrastructure-)?dependency-policy\.yml@",
+            line,
+        )
+        if not match:
+            continue
+        indent = len(match.group(1))
+        first = index
+        while first > 0 and (
+            not lines[first - 1].strip() or indentation(lines[first - 1]) >= indent
+        ):
+            first -= 1
+        last = index
+        while last + 1 < len(lines) and (
+            not lines[last + 1].strip() or indentation(lines[last + 1]) >= indent
+        ):
+            last += 1
+        if any(
+            indentation(sibling) == indent and re.match(r"\s*with\s*:", sibling)
+            for sibling in lines[first : last + 1]
+        ):
+            return True
+    return False
+
+
+def indentation(line: str) -> int:
+    """Return the number of leading spaces."""
+    return len(line) - len(line.lstrip())
 
 
 def main() -> int:

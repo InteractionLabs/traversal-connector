@@ -1,10 +1,6 @@
 name: Enforce dependency policy
 description: Validate repository policy and changed dependency publication times
 inputs:
-  base-sha:
-    description: Base commit to compare, which must exist; takes precedence over the pull request base
-    required: false
-    default: ""
   pull-request-base-sha:
     description: Base commit from the pull request event; replaced by the merge-base with pull-request-base-ref when it no longer exists
     required: false
@@ -13,8 +9,20 @@ inputs:
     description: Base branch name from the pull request event
     required: false
     default: ""
-  head-sha:
-    description: Commit containing proposed dependency changes; defaults to HEAD
+  merge-group-base-sha:
+    description: Base commit from the merge group event
+    required: false
+    default: ""
+  event-name:
+    description: Name of the triggering event
+    required: false
+    default: ""
+  push-before-sha:
+    description: Commit the branch pointed to before a push event
+    required: false
+    default: ""
+  default-branch:
+    description: Default branch of the repository, the fallback base for pushes
     required: false
     default: ""
   require-caller:
@@ -57,10 +65,12 @@ runs:
       id: comparison
       shell: bash
       env:
-        INPUT_BASE_SHA: ${{ inputs.base-sha }}
         EVENT_BASE_SHA: ${{ inputs.pull-request-base-sha }}
         EVENT_BASE_REF: ${{ inputs.pull-request-base-ref }}
-        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        EVENT_MERGE_GROUP_BASE_SHA: ${{ inputs.merge-group-base-sha }}
+        EVENT_NAME: ${{ inputs.event-name }}
+        EVENT_PUSH_BEFORE_SHA: ${{ inputs.push-before-sha }}
+        EVENT_DEFAULT_BRANCH: ${{ inputs.default-branch }}
       run: python3 -I "$GITHUB_ACTION_PATH/resolve_base.py"
     - name: Enforce dependency publication age
       shell: bash

@@ -2,15 +2,6 @@ name: reusable-dependency-policy
 
 on:
   workflow_call:
-    inputs:
-      base-sha:
-        description: Merge-base commit to compare
-        required: false
-        type: string
-      head-sha:
-        description: Commit containing proposed dependency changes
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -37,10 +28,12 @@ jobs:
       - name: Enforce dependency policy
         uses: InteractionLabs/traversal-connector/.github/actions/dependency-policy@main # policy-v1
         with:
-          base-sha: ${{ inputs.base-sha || github.event.merge_group.base_sha }}
           pull-request-base-sha: ${{ github.event.pull_request.base.sha }}
           pull-request-base-ref: ${{ github.event.pull_request.base.ref }}
-          head-sha: ${{ inputs.head-sha }}
+          merge-group-base-sha: ${{ github.event.merge_group.base_sha }}
+          event-name: ${{ github.event_name }}
+          push-before-sha: ${{ github.event.before }}
+          default-branch: ${{ github.event.repository.default_branch }}
           require-caller: "true"
           caller-repository: InteractionLabs/traversal-connector
           cache: ${{ runner.temp }}/dependency-policy-cache/evidence.json

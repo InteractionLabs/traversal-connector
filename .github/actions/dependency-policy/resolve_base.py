@@ -7,8 +7,20 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
+from typing import NamedTuple
 
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+NULL_COMMIT = re.compile(r"(?:0{40}|0{64})")
+
+
+HEAD = "HEAD"
+
+
+class PushEvent(NamedTuple):
+    """The push event fields that bound the pushed commits."""
+
+    before: str
+    default_branch: str
 
 
 class BaseUnresolvable(Exception):
@@ -70,16 +82,53 @@ def event_base_is_current(event_base: str, tracking: str, head: str) -> bool:
     return is_ancestor(event_base, tracking) and is_ancestor(event_base, head)
 
 
-def resolve_base(explicit_base: str, event_base: str, base_ref: str, head: str) -> str:
+def resolve_merge_group_base(group_base: str) -> str:
+    """Return the merge group's base commit once it is validated and present."""
+    if not COMMIT.fullmatch(group_base) or not has_commit(group_base):
+        raise BaseUnresolvable(f"merge group base {group_base!r} does not exist")
+    return group_base
+
+
+def resolve_push_base(before: str, default_branch: str, head: str) -> str:
+    """Return the pushed range's start: the before commit, else the default branch merge-base."""
+    if not (COMMIT.fullmatch(before) or NULL_COMMIT.fullmatch(before)):
+        raise BaseUnresolvable(f"push before commit {before!r} is not a commit SHA")
+    if not default_branch:
+        raise BaseUnresolvable("the push event names no default branch")
+    if (
+        not NULL_COMMIT.fullmatch(before)
+        and has_commit(before)
+        and is_ancestor(before, head)
+    ):
+        return before
+    tracking = fetch_base_branch(default_branch)
+    merged = git("merge-base", head, tracking)
+    resolved = merged.stdout.strip()
+    if merged.returncode != 0 or not has_commit(resolved):
+        raise BaseUnresolvable(
+            f"{head} and default branch {default_branch!r} share no merge-base"
+        )
+    notice(
+        f"Push base {before} is new or not an ancestor of {head}; "
+        f"comparing against the merge-base {resolved} of {head} and origin/{default_branch}."
+    )
+    return resolved
+
+
+def resolve_base(
+    event_base: str,
+    base_ref: str,
+    group_base: str,
+    head: str = HEAD,
+    push_event: PushEvent | None = None,
+) -> str:
     """Return the base commit; a pull request event base is trusted only while the base branch still contains it."""
-    if head != "HEAD" and not COMMIT.fullmatch(head):
-        raise BaseUnresolvable(f"head {head!r} is not a commit SHA")
-    if explicit_base:
-        if not COMMIT.fullmatch(explicit_base) or not has_commit(explicit_base):
-            raise BaseUnresolvable(f"base commit {explicit_base!r} does not exist")
-        return explicit_base
+    if group_base:
+        return resolve_merge_group_base(group_base)
     if not event_base:
-        return git("rev-parse", "HEAD^").stdout.strip()
+        if push_event is None:
+            raise BaseUnresolvable("the event supplies no comparison base")
+        return resolve_push_base(push_event.before, push_event.default_branch, head)
     if not COMMIT.fullmatch(event_base):
         raise BaseUnresolvable(f"pull request base {event_base!r} is not a commit SHA")
     if not base_ref:
@@ -107,13 +156,21 @@ def resolve_base(explicit_base: str, event_base: str, base_ref: str, head: str) 
 def main(environment: Mapping[str, str] | None = None) -> int:
     """Resolve the commits and write them to the step outputs."""
     env = os.environ if environment is None else environment
-    head = env.get("INPUT_HEAD_SHA") or "HEAD"
+    head = HEAD
+    push_event = (
+        PushEvent(
+            env.get("EVENT_PUSH_BEFORE_SHA", ""), env.get("EVENT_DEFAULT_BRANCH", "")
+        )
+        if env.get("EVENT_NAME") == "push"
+        else None
+    )
     try:
         base = resolve_base(
-            env.get("INPUT_BASE_SHA", ""),
             env.get("EVENT_BASE_SHA", ""),
             env.get("EVENT_BASE_REF", ""),
+            env.get("EVENT_MERGE_GROUP_BASE_SHA", ""),
             head,
+            push_event,
         )
         if not has_commit(base) or not has_commit(head):
             raise BaseUnresolvable("base or head commit does not exist")
