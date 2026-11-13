@@ -123,6 +123,11 @@ type Config struct {
 	// TLS_CA_BASE64 as raw PEM or base64-encoded PEM. Additional roots are
 	// appended to the connector container's system trust store.
 	TLSCA *string
+	// LegacyTLSEnvVars names the TLS_*_BASE64 variables the controller mTLS
+	// material was read from, in a fixed order, or is empty when it came from
+	// TLS_DIR or is unset. They still work, but put the private key in the
+	// process environment, so the connector warns while any is in use.
+	LegacyTLSEnvVars []string
 	// ConnectorID is the identifier stamped on every gRPC request to the
 	// Traversal control plane via the X-Traversal-Connector-ID header, letting
 	// it attribute connections to a specific connector instance. Read from
@@ -289,12 +294,13 @@ func Load() (Config, error) {
 			DefaultMaxConcurrentRedactions, maxConcurrentRedactions)),
 		UncoveredStreamMaxLifetime: strict.Duration("TRAVERSAL_UNCOVERED_STREAM_MAX_LIFETIME",
 			DefaultUncoveredStreamMaxLifetime),
-		EgressProxyURL:  env.GetEnvOptionalString("EGRESS_PROXY_URL"),
-		TLSCert:         controllerTLS.cert,
-		TLSKey:          controllerTLS.key,
-		TLSCA:           controllerTLS.ca,
-		ConnectorID:     *connectorID,
-		OTELServiceName: env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
+		EgressProxyURL:   env.GetEnvOptionalString("EGRESS_PROXY_URL"),
+		TLSCert:          controllerTLS.cert,
+		TLSKey:           controllerTLS.key,
+		TLSCA:            controllerTLS.ca,
+		LegacyTLSEnvVars: controllerTLS.legacyEnvVars,
+		ConnectorID:      *connectorID,
+		OTELServiceName:  env.GetEnvString("OTEL_SERVICE_NAME", "traversal-connector"),
 		OTLPMetricsEndpoint: env.GetEnvString(
 			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "",
 		),
@@ -520,9 +526,9 @@ func validateControllerConnection(cfg Config) error {
 	case "https":
 		if cfg.TLSCert == nil || cfg.TLSKey == nil {
 			return errors.New(
-				"TLS_DIR (with tls.crt and tls.key) or TLS_CERT_BASE64 and " +
-					"TLS_KEY_BASE64 are required when TRAVERSAL_CONTROLLER_URL " +
-					"uses https:// (mTLS is required)",
+				"TLS_DIR (with tls.crt and tls.key) is required when " +
+					"TRAVERSAL_CONTROLLER_URL uses https:// (mTLS is required); " +
+					"the legacy TLS_CERT_BASE64 and TLS_KEY_BASE64 are still accepted",
 			)
 		}
 		if _, err := tls.X509KeyPair(
@@ -534,8 +540,7 @@ func validateControllerConnection(cfg Config) error {
 		if !cfg.EnvLevel.IsDev() {
 			return errors.New(
 				"http:// TRAVERSAL_CONTROLLER_URL is not allowed when " +
-					"ENV_LEVEL=production; use https:// with " +
-					"TLS_DIR or TLS_CERT_BASE64 / TLS_KEY_BASE64",
+					"ENV_LEVEL=production; use https:// with TLS_DIR",
 			)
 		}
 		if cfg.TLSCert != nil || cfg.TLSKey != nil {
@@ -617,32 +622,41 @@ func loadUpstreamTLSCA() (*string, error) {
 	return &ca, nil
 }
 
-// controllerTLSMaterial is the controller mTLS PEM content; each field is nil
-// when unset.
+// controllerTLSMaterial is the controller mTLS PEM content; each PEM field is
+// nil when unset. legacyEnvVars names the TLS_*_BASE64 variables it came from.
 type controllerTLSMaterial struct {
 	cert, key, ca *string
+	legacyEnvVars []string
 }
+
+// legacyTLSEnvVars are the variables that carry controller mTLS material
+// through the environment, in the order a warning lists them.
+var legacyTLSEnvVars = []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"}
 
 // loadControllerTLS reads the controller mTLS material from TLS_DIR, a
 // directory in the kubernetes.io/tls Secret layout (tls.crt, tls.key and an
-// optional ca.crt), or from the TLS_*_BASE64 variables. TLS_DIR keeps the
-// private key out of the process environment. Combining the two is rejected
+// optional ca.crt), or from the legacy TLS_*_BASE64 variables. TLS_DIR keeps
+// the private key out of the process environment. Combining the two is rejected
 // rather than resolved by precedence, so no material is silently ignored.
 func loadControllerTLS() (controllerTLSMaterial, error) {
-	inline := map[string]*string{
-		"TLS_CERT_BASE64": env.GetEnvOptionalString("TLS_CERT_BASE64"),
-		"TLS_KEY_BASE64":  env.GetEnvOptionalString("TLS_KEY_BASE64"),
-		"TLS_CA_BASE64":   env.GetEnvOptionalString("TLS_CA_BASE64"),
+	inline := make(map[string]*string, len(legacyTLSEnvVars))
+	var set []string
+	for _, name := range legacyTLSEnvVars {
+		inline[name] = env.GetEnvOptionalString(name)
+		if inline[name] != nil {
+			set = append(set, name)
+		}
 	}
 	dir := env.GetEnvOptionalString("TLS_DIR")
 	if dir == nil {
 		return controllerTLSMaterial{
-			cert: decodeCertificate(inline["TLS_CERT_BASE64"]),
-			key:  decodeCertificate(inline["TLS_KEY_BASE64"]),
-			ca:   decodeCertificate(inline["TLS_CA_BASE64"]),
+			cert:          decodeCertificate(inline["TLS_CERT_BASE64"]),
+			key:           decodeCertificate(inline["TLS_KEY_BASE64"]),
+			ca:            decodeCertificate(inline["TLS_CA_BASE64"]),
+			legacyEnvVars: set,
 		}, nil
 	}
-	for _, name := range []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"} {
+	for _, name := range legacyTLSEnvVars {
 		if inline[name] != nil {
 			return controllerTLSMaterial{}, fmt.Errorf(
 				"TLS_DIR and %s are mutually exclusive: set only one source", name,

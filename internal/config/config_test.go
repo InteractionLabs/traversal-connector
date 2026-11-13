@@ -155,6 +155,7 @@ func TestLoad(t *testing.T) {
 				UncoveredStreamMaxLifetime:   DefaultUncoveredStreamMaxLifetime,
 				TLSCert:                      &certPEM,
 				TLSKey:                       &keyPEM,
+				LegacyTLSEnvVars:             []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64"},
 				OTELServiceName:              "custom-traversal-connector",
 				OTLPMetricsEndpoint:          "https://otlp.example.com:4317",
 				OTLPTracesEndpoint:           "https://otlp.example.com:4317",
@@ -965,7 +966,68 @@ func TestLoad_TLSDirSources(t *testing.T) {
 			if diff := cmp.Diff(tt.wantCA, cfg.TLSCA); diff != "" {
 				t.Errorf("TLSCA mismatch (-want +got):\n%s", diff)
 			}
+			if len(cfg.LegacyTLSEnvVars) != 0 {
+				t.Errorf("LegacyTLSEnvVars = %v, want none with TLS_DIR", cfg.LegacyTLSEnvVars)
+			}
 		})
+	}
+}
+
+// TestLoad_LegacyTLSEnvVars checks the TLS_*_BASE64 variables still load, and
+// that Load reports which were set so the connector can warn about them.
+func TestLoad_LegacyTLSEnvVars(t *testing.T) {
+	certPEM, keyPEM := generateTestKeyPair(t)
+	const caPEM = "-----BEGIN CERTIFICATE-----\nMIIBxxx\n-----END CERTIFICATE-----\n"
+
+	tests := []struct {
+		name string
+		ca   bool
+		want []string
+	}{
+		{name: "cert and key", want: []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64"}},
+		{name: "cert, key and CA", ca: true, want: []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv()
+			defer clearEnv()
+			setProductionEnv(t, base64.StdEncoding.EncodeToString([]byte(certPEM)), keyPEM)
+			setOTLPEndpoints("https://otlp.example.com:4317")
+			if tt.ca {
+				_ = os.Setenv("TLS_CA_BASE64", caPEM)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if diff := cmp.Diff(ptrTo(certPEM), cfg.TLSCert); diff != "" {
+				t.Errorf("TLSCert mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(ptrTo(keyPEM), cfg.TLSKey); diff != "" {
+				t.Errorf("TLSKey mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.want, cfg.LegacyTLSEnvVars); diff != "" {
+				t.Errorf("LegacyTLSEnvVars mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestLoad_NoControllerTLSReportsNoLegacyVars(t *testing.T) {
+	clearEnv()
+	defer clearEnv()
+	_ = os.Setenv("ENV_NAME", "test")
+	_ = os.Setenv("TRAVERSAL_CONNECTOR_ID", "connector-1")
+	_ = os.Setenv("ENV_LEVEL", "development")
+	_ = os.Setenv("TRAVERSAL_CONTROLLER_URL", "http://localhost:9080")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.LegacyTLSEnvVars) != 0 {
+		t.Errorf("LegacyTLSEnvVars = %v, want none", cfg.LegacyTLSEnvVars)
 	}
 }
 
