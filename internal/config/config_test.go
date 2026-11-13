@@ -985,7 +985,11 @@ func TestLoad_LegacyTLSEnvVars(t *testing.T) {
 		want []string
 	}{
 		{name: "cert and key", want: []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64"}},
-		{name: "cert, key and CA", ca: true, want: []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"}},
+		{
+			name: "cert, key and CA",
+			ca:   true,
+			want: []string{"TLS_CERT_BASE64", "TLS_KEY_BASE64", "TLS_CA_BASE64"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
