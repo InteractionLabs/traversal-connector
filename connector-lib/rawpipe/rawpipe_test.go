@@ -17,6 +17,7 @@ func TestTenantID(t *testing.T) {
 	for uri, want := range map[string][2]string{
 		"spiffe://traversal.com/tenant/" + org + "/acme":                   {org, ""},
 		"spiffe://traversal.com/tenant/" + org + "/acme/connector/" + conn: {org, conn},
+		"spiffe://traversal.com/tenant/" + org + "/acme/processor/" + conn: {org, ""},
 	} {
 		if o, c, ok := rawpipe.TenantID(uri); !ok || o != want[0] || c != want[1] {
 			t.Errorf("TenantID(%q) = %q %q %v", uri, o, c, ok)
@@ -25,6 +26,8 @@ func TestTenantID(t *testing.T) {
 	for _, uri := range []string{
 		"spiffe://traversal.com/processor/x",
 		"spiffe://traversal.com/tenant/ORG/acme",
+		"spiffe://traversal.com/tenant/" + org + "/acme/connector/c1",
+		"spiffe://traversal.com/tenant/" + org + "/acme/other/" + conn,
 		"",
 	} {
 		if _, _, ok := rawpipe.TenantID(uri); ok {
@@ -132,13 +135,17 @@ func TestCheckIdentity(t *testing.T) {
 	const org, conn = "0b6e5a3c-1d2f-4a5b-8c7d-9e0f1a2b3c4d", "6f1c0a52-8d3e-4b7a-9c21-5e4f3a2b1d00"
 	other := strings.Replace(conn, "6", "7", 1)
 	tenant := "spiffe://traversal.com/tenant/" + org + "/acme"
-	for san, id := range map[string]string{tenant: conn, tenant + "/connector/" + conn: conn} {
-		if err := rawpipe.CheckIdentity(san, id); err != nil {
-			t.Errorf("CheckIdentity(%q, %q): %v", san, id, err)
+	for _, san := range []string{
+		tenant,
+		tenant + "/connector/" + conn,
+		tenant + "/connector/" + other,
+		tenant + "/processor/" + other,
+	} {
+		if err := rawpipe.CheckIdentity(san, conn); err != nil {
+			t.Errorf("CheckIdentity(%q, %q): %v", san, conn, err)
 		}
 	}
 	for name, c := range map[string][2]string{
-		"another connector's":   {tenant + "/connector/" + other, conn},
 		"not a tenant":          {"spiffe://traversal.com/processor/x", conn},
 		"no SAN":                {"", conn},
 		"upper-case connector":  {tenant, strings.ToUpper(conn)},
