@@ -108,19 +108,22 @@ pipes:
 # set. Either provide PEM strings inline (chart will render a Secret) or
 # reference an existing Secret with keys: tls.crt, tls.key, ca.crt (ca.crt is
 # optional; without it the system roots verify the controller).
+# The Secret is mounted read-only at /etc/traversal-tls/controller and the
+# connector reads it through TLS_DIR, so the private key is never in the
+# container environment.
 # Since v0.3.0, this same cert + key are also presented for mTLS to the OTLP
 # telemetry endpoints when those endpoints are TLS-enabled.
 controllerTLS:
-  certPEM: ""              # → TLS_CERT_BASE64
-  keyPEM: ""               # → TLS_KEY_BASE64
-  caPEM: ""                # → TLS_CA_BASE64
+  certPEM: ""              # → Secret key tls.crt
+  keyPEM: ""               # → Secret key tls.key
+  caPEM: ""                # → Secret key ca.crt (optional)
   existingSecret: ""       # name of pre-existing Secret (overrides PEM fields)
 
 # ─── Upstream TLS (validating customer observability endpoints) ──────────────
 upstreamTLS:
   verify: true             # UPSTREAM_TLS_VERIFY
-  caPEM: ""                # → UPSTREAM_TLS_CA_BASE64
-  existingSecret: ""       # name of pre-existing Secret with key ca.crt
+  caPEM: ""                # → Secret key ca.crt, mounted at /etc/traversal-tls/upstream (UPSTREAM_TLS_CA_FILE)
+  existingSecret: ""       # name of pre-existing Secret with key ca.crt, mounted the same way
   caFile: ""               # → UPSTREAM_TLS_CA_FILE (path in container; excludes caPEM/existingSecret)
 
 # ─── Telemetry (OTLP) ────────────────────────────────────────────────────────

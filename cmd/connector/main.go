@@ -59,6 +59,14 @@ func main() {
 				"Traversal cannot diagnose issues in this deployment",
 		)
 	}
+	if len(cfg.LegacyTLSEnvVars) > 0 {
+		slog.Warn(
+			"controller mTLS material is read from legacy environment variables, "+
+				"which expose the private key in the process environment; "+
+				"mount it as files and set TLS_DIR instead",
+			"variables", cfg.LegacyTLSEnvVars,
+		)
+	}
 
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
