@@ -170,9 +170,9 @@ assert_contains "$tmp_dir/sidecar.yaml" $'            - name: OTLP_TLS_CA_PEM\n 
 assert_render_fails no-fsgroup 'podSecurityContext.fsGroup is required' "${common[@]}" --set podSecurityContext.fsGroup=null
 render fsgroup-other "$fixtures/direct-export-values.yaml" --set podSecurityContext.fsGroup=10001
 assert_contains "$tmp_dir/fsgroup-other.yaml" 'fsGroup: 10001'
-# Images before v0.11.0 do not read TLS_DIR; non-release tags are not checked.
-assert_render_fails old-image 'needs connector v0.11.0 or later' "${common[@]}" --set-string image.tag=v0.10.1
-for tag in v0.11.0 0.11.0 sha-0123456789abcdef prerelease-0123456789ab dev; do
+# Images before v0.10.3 do not read TLS_DIR; non-release tags are not checked.
+assert_render_fails old-image 'needs connector v0.10.3 or later' "${common[@]}" --set-string image.tag=v0.10.2
+for tag in v0.10.3 0.10.3 v0.11.0 sha-0123456789abcdef prerelease-0123456789ab dev; do
   render "image-$tag" "$fixtures/direct-export-values.yaml" --set-string "image.tag=$tag"
 done
 # Only a pinned image.tag is checked: the default appVersion is the image released
