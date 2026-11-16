@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+issuer: https://oidc.eks.us-west-2.amazonaws.com/id/6A0050026B709636C47806AD2E2DE60E
+subject: system:serviceaccount:monitoring:github-actions-telemetry
+permissions:
+  actions: read
