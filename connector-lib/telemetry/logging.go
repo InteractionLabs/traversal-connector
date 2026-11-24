@@ -9,9 +9,9 @@ import (
 	"os"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
-	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"google.golang.org/grpc/credentials"
 )
@@ -90,7 +90,7 @@ func InitLogging(
 		),
 	)
 
-	global.SetLoggerProvider(loggerProvider)
+	otel.SetLoggerProvider(loggerProvider)
 	slog.InfoContext(ctx, "global OTel LoggerProvider set")
 
 	otelHandler := otelslog.NewHandler(serviceName)
